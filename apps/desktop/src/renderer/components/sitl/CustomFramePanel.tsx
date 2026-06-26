@@ -17,8 +17,11 @@ import { useArduPilotSitlStore } from '../../stores/ardupilot-sitl-store';
 import { useSettingsStore } from '../../stores/settings-store';
 import {
   altitudeValueFromMeters,
+  capacityValueFromMah,
+  toMahFromCapacityUnit,
   toMetersFromAltitudeUnit,
   UNIT_LABELS,
+  UNIT_PRECISION,
 } from '../../../shared/user-units.js';
 
 type EditorMode =
@@ -37,7 +40,6 @@ const FIELD_HINTS: Partial<Record<keyof SitlCustomFrame, string>> = {
   mass: 'kg',
   diagonal_size: 'm (motor-to-motor)',
   maxVoltage: 'V (full-charge)',
-  battCapacityAh: 'Ah',
   refBatRes: 'Ω (internal)',
   refSpd: 'm/s',
   refAngle: 'deg',
@@ -62,7 +64,9 @@ export function CustomFramePanel() {
   const customFrameMotors = useArduPilotSitlStore((s) => s.customFrameMotors);
   const setCustomFrame = useArduPilotSitlStore((s) => s.setCustomFrame);
   const setModel = useArduPilotSitlStore((s) => s.setModel);
-  const altitudeUnit = useSettingsStore((s) => s.unitPreferences.altitude);
+  const unitPreferences = useSettingsStore((s) => s.unitPreferences);
+  const altitudeUnit = unitPreferences.altitude;
+  const electricCapacityUnit = unitPreferences.electricCapacity;
 
   const [expanded, setExpanded] = useState(false);
   const [list, setList] = useState<SitlCustomFrameMeta[]>([]);
@@ -198,21 +202,35 @@ export function CustomFramePanel() {
 
   const getFieldHint = (field: keyof SitlCustomFrame): string | undefined => {
     if (field === 'refAlt') return UNIT_LABELS.altitude[altitudeUnit];
+    if (field === 'battCapacityAh') return UNIT_LABELS.electricCapacity[electricCapacityUnit];
     return FIELD_HINTS[field];
   };
 
   const getFieldDisplayValue = (field: keyof SitlCustomFrame): number => {
     if (editor.kind === 'closed') return 0;
     const value = editor.frame[field];
-    if (field !== 'refAlt') return value;
-    const precision = altitudeUnit === 'km' ? 3 : altitudeUnit === 'm' ? 0 : 1;
-    return Number(altitudeValueFromMeters(value, altitudeUnit).toFixed(precision));
+    if (field === 'refAlt') {
+      const precision = altitudeUnit === 'km' ? 3 : altitudeUnit === 'm' ? 0 : 1;
+      return Number(altitudeValueFromMeters(value, altitudeUnit).toFixed(precision));
+    }
+    if (field === 'battCapacityAh') {
+      return Number(capacityValueFromMah(value * 1000, electricCapacityUnit).toFixed(UNIT_PRECISION.electricCapacity[electricCapacityUnit]));
+    }
+    return value;
   };
 
   const updateFieldFromDisplay = (field: keyof SitlCustomFrame, raw: string) => {
     const v = parseNumberDraft(raw.replace(',', '.'));
     if (v === null) return;
-    updateField(field, field === 'refAlt' ? toMetersFromAltitudeUnit(v, altitudeUnit) : v);
+    if (field === 'refAlt') {
+      updateField(field, toMetersFromAltitudeUnit(v, altitudeUnit));
+      return;
+    }
+    if (field === 'battCapacityAh') {
+      updateField(field, toMahFromCapacityUnit(v, electricCapacityUnit) / 1000);
+      return;
+    }
+    updateField(field, v);
   };
 
   return (

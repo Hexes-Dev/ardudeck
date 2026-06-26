@@ -24,11 +24,15 @@ import { Download } from 'lucide-react';
 import type { VehicleTemplate } from '../../lib/vehicle-templates/types';
 import {
   altitudeValueFromMeters,
+  capacityValueFromMah,
   formatAltitudeFromMeters,
+  formatCapacityFromMah,
+  toMahFromCapacityUnit,
   toMetersFromAltitudeUnit,
   UNIT_LABELS,
   UNIT_PRECISION,
   type AltitudeUnit,
+  type ElectricCapacityUnit,
 } from '../../../shared/user-units.js';
 
 // Display unit conversion helpers - storage is always mm/g/mAh
@@ -38,8 +42,8 @@ function fmtWeight(g: number, units: DisplayUnits): string {
 function fmtLength(mm: number, units: DisplayUnits): string {
   return units === 'large' ? `${+(mm / 1000).toFixed(2)}m` : `${mm}mm`;
 }
-function fmtCapacity(mah: number, units: DisplayUnits): string {
-  return units === 'large' ? `${+(mah / 1000).toFixed(1)}Ah` : `${mah}mAh`;
+function fmtCapacity(mah: number, unit: ElectricCapacityUnit): string {
+  return formatCapacityFromMah(mah, unit);
 }
 function unitLabel(smallUnit: string, units: DisplayUnits): string {
   if (units !== 'large') return smallUnit;
@@ -49,7 +53,7 @@ function unitLabel(smallUnit: string, units: DisplayUnits): string {
 // Fields that convert by ÷1000 when display units = 'large'
 const LARGE_UNIT_FIELDS: Record<string, number> = {
   weight: 1000, wingspan: 1000, hullLength: 1000, wheelbase: 1000,
-  batteryCapacity: 1000, displacement: 1000,
+  displacement: 1000,
 };
 
 const MISSION_ALTITUDE_FIELDS = new Set([
@@ -1077,6 +1081,7 @@ export function SettingsView() {
   const estimatedRange = getEstimatedRange();
   const altitudeUnit = unitPreferences.altitude;
   const altitudeUnitLabel = UNIT_LABELS.altitude[altitudeUnit];
+  const electricCapacityUnit = unitPreferences.electricCapacity;
 
   // Auto-detect vehicle type from MAVLink connection (only once per connection session)
   // Uses module-level variable to survive component remounts
@@ -1320,7 +1325,7 @@ export function SettingsView() {
                     {/* Battery */}
                     <div className="bg-black/20 rounded-lg p-2">
                       <div className="text-xs text-content-secondary">Battery</div>
-                      <div className="text-sm text-content font-medium">{activeVehicle.batteryCells}S{activeVehicle.batteryChemistry && activeVehicle.batteryChemistry !== 'lipo' ? ` ${({ lihv: 'LiHV', lion: 'Li-Ion', life: 'LiFe' } as Record<string, string>)[activeVehicle.batteryChemistry] ?? ''}` : ''} {fmtCapacity(activeVehicle.batteryCapacity, displayUnits)}</div>
+                      <div className="text-sm text-content font-medium">{activeVehicle.batteryCells}S{activeVehicle.batteryChemistry && activeVehicle.batteryChemistry !== 'lipo' ? ` ${({ lihv: 'LiHV', lion: 'Li-Ion', life: 'LiFe' } as Record<string, string>)[activeVehicle.batteryChemistry] ?? ''}` : ''} {fmtCapacity(activeVehicle.batteryCapacity, electricCapacityUnit)}</div>
                     </div>
                     {/* Type-specific secondary spec */}
                     <div className="bg-black/20 rounded-lg p-2">
@@ -2677,6 +2682,114 @@ function AltitudeInputField({
   );
 }
 
+function capacityInputValueFromMah(mah: number | undefined, unit: ElectricCapacityUnit): string {
+  const nativeValue = mah ?? 0;
+  const decimals = UNIT_PRECISION.electricCapacity[unit];
+  return String(Number(capacityValueFromMah(nativeValue, unit).toFixed(decimals)));
+}
+
+function capacityInputStep(unit: ElectricCapacityUnit): string {
+  return unit === 'ah' ? '0.01' : '1';
+}
+
+function validateCapacityField(value: string, rules: FieldValidation, unit: ElectricCapacityUnit): string | null {
+  if (value.trim() === '') {
+    return rules.required ? 'Required' : null;
+  }
+
+  const displayValue = Number(value);
+  if (!Number.isFinite(displayValue)) return 'Must be a valid number';
+
+  const mah = toMahFromCapacityUnit(displayValue, unit);
+  if (rules.min !== undefined && mah < rules.min) {
+    return `Min: ${capacityInputValueFromMah(rules.min, unit)} ${UNIT_LABELS.electricCapacity[unit]}`;
+  }
+  if (rules.max !== undefined && mah > rules.max) {
+    return `Max: ${capacityInputValueFromMah(rules.max, unit)} ${UNIT_LABELS.electricCapacity[unit]}`;
+  }
+  if (unit === 'mah' && rules.integer && !Number.isInteger(displayValue)) {
+    return 'Must be a whole number';
+  }
+  return null;
+}
+
+function CapacityInputField({
+  label,
+  valueMah,
+  onCommit,
+  unit,
+  placeholderMah,
+  rules,
+}: {
+  label: string;
+  valueMah: number | undefined;
+  onCommit: (mah: number) => void;
+  unit: ElectricCapacityUnit;
+  placeholderMah?: number;
+  rules: FieldValidation;
+}) {
+  const displayValue = capacityInputValueFromMah(valueMah, unit);
+  const [draft, setDraft] = useState(displayValue);
+  const [focused, setFocused] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!focused) setDraft(displayValue);
+  }, [displayValue, focused]);
+
+  const resetDraft = useCallback(() => {
+    setDraft(capacityInputValueFromMah(valueMah, unit));
+    setError(null);
+  }, [unit, valueMah]);
+
+  return (
+    <div>
+      <label className="block text-xs text-content-secondary mb-1">{label}</label>
+      <div className="relative">
+        <input
+          type="number"
+          value={draft}
+          onFocus={() => setFocused(true)}
+          onChange={(e) => {
+            const next = e.target.value;
+            setDraft(next);
+            setError(validateCapacityField(next, rules, unit));
+          }}
+          onBlur={() => {
+            setFocused(false);
+            const err = validateCapacityField(draft, rules, unit);
+            if (draft.trim() === '' || err) {
+              resetDraft();
+              return;
+            }
+            const displayNumber = Number(draft);
+            if (!Number.isFinite(displayNumber)) {
+              resetDraft();
+              return;
+            }
+            if (displayNumber === Number(displayValue)) {
+              resetDraft();
+              return;
+            }
+            onCommit(Math.round(toMahFromCapacityUnit(displayNumber, unit)));
+          }}
+          placeholder={placeholderMah !== undefined ? capacityInputValueFromMah(placeholderMah, unit) : undefined}
+          min={rules.min !== undefined ? capacityInputValueFromMah(rules.min, unit) : undefined}
+          max={rules.max !== undefined ? capacityInputValueFromMah(rules.max, unit) : undefined}
+          step={capacityInputStep(unit)}
+          className={`w-full px-3 py-2 pr-12 bg-surface-input border rounded-lg text-content text-sm focus:outline-none ${
+            error ? 'border-red-500/60 focus:border-red-500' : 'border-border focus:border-blue-500'
+          }`}
+        />
+        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-content-secondary text-xs pointer-events-none">
+          {UNIT_LABELS.electricCapacity[unit]}
+        </span>
+      </div>
+      {error && <div className="text-[10px] text-red-400 mt-0.5">{error}</div>}
+    </div>
+  );
+}
+
 // Select field component for vehicle forms
 function VehicleSelectField({
   label,
@@ -2792,6 +2905,7 @@ function VehicleEditModal({
   const { displayUnits, unitPreferences } = useSettingsStore();
   const large = displayUnits === 'large';
   const altitudeUnit = unitPreferences.altitude;
+  const electricCapacityUnit = unitPreferences.electricCapacity;
 
   // Conversion factor for current display units (1 = no conversion)
   const factor = (field: string) => large ? (LARGE_UNIT_FIELDS[field] ?? 1) : 1;
@@ -3316,14 +3430,13 @@ function VehicleEditModal({
                   { value: 14, label: '14S' },
                 ]}
               />
-              <VehicleInputField
+              <CapacityInputField
                 label="Capacity"
-                value={getConvertedValue('batteryCapacity')}
-                onChange={(v) => handleConvertedChange('batteryCapacity', v)}
-                onBlur={() => handleBlur('batteryCapacity')}
-                error={getError('batteryCapacity')}
-                unit={getUnit('mAh')}
-                placeholder={getPlaceholder('batteryCapacity', '1500')}
+                valueMah={vehicle.batteryCapacity}
+                onCommit={(mah) => onUpdate({ batteryCapacity: mah })}
+                unit={electricCapacityUnit}
+                placeholderMah={1500}
+                rules={VEHICLE_FIELD_RULES.batteryCapacity!}
               />
             </div>
           </div>
@@ -3498,13 +3611,14 @@ function VehicleCard({
 }: VehicleCardProps) {
   const { displayUnits, unitPreferences } = useSettingsStore();
   const altitudeUnit = unitPreferences.altitude;
+  const electricCapacityUnit = unitPreferences.electricCapacity;
   // Build vehicle-specific info string
   const getVehicleSpecs = () => {
     const parts: string[] = [];
     const chemLabel = vehicle.batteryChemistry && vehicle.batteryChemistry !== 'lipo'
       ? ` ${({ lihv: 'LiHV', lion: 'Li-Ion', life: 'LiFe' } as Record<string, string>)[vehicle.batteryChemistry] ?? ''}`
       : '';
-    const batteryStr = `${vehicle.batteryCells}S${chemLabel} ${fmtCapacity(vehicle.batteryCapacity, displayUnits)}`;
+    const batteryStr = `${vehicle.batteryCells}S${chemLabel} ${fmtCapacity(vehicle.batteryCapacity, electricCapacityUnit)}`;
 
     switch (vehicle.type) {
       case 'copter':

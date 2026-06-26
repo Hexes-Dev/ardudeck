@@ -4,7 +4,7 @@ import { useSettingsStore } from '../../stores/settings-store';
 import { HealthCheckCard } from './HealthCheckCard';
 import { AiWarningDialog } from './AiAnalysisPanel';
 import type { ExplorerPreset, HealthCheckResult } from '@ardudeck/dataflash-parser';
-import { formatAltitudeFromMeters } from '../../../shared/user-units.js';
+import { formatAltitudeFromMeters, formatCapacityFromMah } from '../../../shared/user-units.js';
 
 function computeFlightStats(log: ReturnType<typeof useLogStore.getState>['currentLog']) {
   if (!log) return null;
@@ -53,6 +53,7 @@ export function HealthReportPanel() {
   const aiProvider = useSettingsStore((s) => s.aiProvider);
   const aiWarningDismissed = useSettingsStore((s) => s.aiWarningDismissed);
   const altitudeUnit = useSettingsStore((s) => s.unitPreferences.altitude);
+  const electricCapacityUnit = useSettingsStore((s) => s.unitPreferences.electricCapacity);
   const aiInsightCards = useLogStore((s) => s.aiInsightCards);
   const isAiInsightLoading = useLogStore((s) => s.isAiInsightLoading);
   const aiInsightError = useLogStore((s) => s.aiInsightError);
@@ -85,7 +86,7 @@ export function HealthReportPanel() {
 - Vehicle: ${meta.vehicleType || 'Unknown'} running ${meta.firmwareString || meta.firmwareVersion || 'Unknown firmware'}
 - Duration: ${(dS / 60).toFixed(1)} minutes
 - Max Altitude: ${formatAltitudeFromMeters(stats.maxAlt, altitudeUnit)} | Max Speed: ${stats.maxSpd.toFixed(1)} m/s
-- Distance: ${dist} | Battery Used: ${stats.totalMah.toFixed(0)} mAh
+- Distance: ${dist} | Battery Used: ${formatCapacityFromMah(stats.totalMah, electricCapacityUnit)}
 
 ## Automated Health Check Results
 ${JSON.stringify(healthResults, null, 2)}
@@ -126,7 +127,7 @@ Return 3-6 cards. Most important issues first.`;
     } else {
       store.setAiInsightError(result?.error ?? 'AI analysis failed');
     }
-  }, [aiProvider, altitudeUnit, currentLog, healthResults]);
+  }, [aiProvider, altitudeUnit, currentLog, electricCapacityUnit, healthResults]);
 
   if (!healthResults || !currentLog) {
     return (
@@ -227,7 +228,7 @@ Return 3-6 cards. Most important issues first.`;
             </div>
             <div>
               <div className="text-xs text-content-secondary">Battery Used</div>
-              <div className="text-sm text-content font-medium">{flightStats.totalMah.toFixed(0)} mAh</div>
+              <div className="text-sm text-content font-medium">{formatCapacityFromMah(flightStats.totalMah, electricCapacityUnit)}</div>
             </div>
           </div>
         )}
