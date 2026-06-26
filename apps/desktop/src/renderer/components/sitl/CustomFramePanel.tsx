@@ -18,11 +18,13 @@ import { useSettingsStore } from '../../stores/settings-store';
 import {
   altitudeValueFromMeters,
   capacityValueFromMah,
+  dimensionInputValueFromMillimeters,
   speedValueFromMetersPerSecond,
   toGramsFromWeightUnit,
   toMahFromCapacityUnit,
   toMetersPerSecondFromSpeedUnit,
   toMetersFromAltitudeUnit,
+  toMillimetersFromDimensionUnit,
   UNIT_LABELS,
   UNIT_PRECISION,
   weightInputValueFromGrams,
@@ -41,7 +43,6 @@ const FIELD_GROUPS: { title: string; fields: (keyof SitlCustomFrame)[] }[] = [
 ];
 
 const FIELD_HINTS: Partial<Record<keyof SitlCustomFrame, string>> = {
-  diagonal_size: 'm (motor-to-motor)',
   maxVoltage: 'V (full-charge)',
   refBatRes: 'Ω (internal)',
   refAngle: 'deg',
@@ -71,6 +72,7 @@ export function CustomFramePanel() {
   const electricCapacityUnit = unitPreferences.electricCapacity;
   const speedUnit = unitPreferences.speed;
   const weightUnit = unitPreferences.weight;
+  const dimensionUnit = unitPreferences.dimensions;
 
   const [expanded, setExpanded] = useState(false);
   const [list, setList] = useState<SitlCustomFrameMeta[]>([]);
@@ -206,6 +208,7 @@ export function CustomFramePanel() {
 
   const getFieldHint = (field: keyof SitlCustomFrame): string | undefined => {
     if (field === 'mass') return UNIT_LABELS.weight[weightUnit];
+    if (field === 'diagonal_size') return `${UNIT_LABELS.dimensions[dimensionUnit]} (motor-to-motor)`;
     if (field === 'refAlt') return UNIT_LABELS.altitude[altitudeUnit];
     if (field === 'battCapacityAh') return UNIT_LABELS.electricCapacity[electricCapacityUnit];
     if (field === 'refSpd') return UNIT_LABELS.speed[speedUnit];
@@ -221,6 +224,9 @@ export function CustomFramePanel() {
     }
     if (field === 'mass') {
       return Number(weightInputValueFromGrams(value * 1000, weightUnit));
+    }
+    if (field === 'diagonal_size') {
+      return Number(dimensionInputValueFromMillimeters(value * 1000, dimensionUnit));
     }
     if (field === 'battCapacityAh') {
       return Number(capacityValueFromMah(value * 1000, electricCapacityUnit).toFixed(UNIT_PRECISION.electricCapacity[electricCapacityUnit]));
@@ -240,6 +246,10 @@ export function CustomFramePanel() {
     }
     if (field === 'mass') {
       updateField(field, toGramsFromWeightUnit(v, weightUnit) / 1000);
+      return;
+    }
+    if (field === 'diagonal_size') {
+      updateField(field, toMillimetersFromDimensionUnit(v, dimensionUnit) / 1000);
       return;
     }
     if (field === 'battCapacityAh') {

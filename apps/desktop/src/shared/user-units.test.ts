@@ -8,6 +8,7 @@ import {
   areaValueFromSquareMeters,
   altitudeValueFromMeters,
   capacityValueFromMah,
+  dimensionInputValueFromMillimeters,
   dimensionValueFromMillimeters,
   distanceValueFromMeters,
   formatAltitudeFromMeters,
@@ -231,6 +232,14 @@ describe('weight, dimension, area, and wind helpers', () => {
     expect(weightInputValueFromGrams(1500, 'kg')).toBe('1.5');
     expect(weightInputValueFromGrams(28.349523125, 'oz')).toBe('1');
     expect(weightInputValueFromGrams(453.59237, 'lb')).toBe('1');
+  });
+
+  it('formats dimension input values without unit text while preserving selected-unit precision', () => {
+    expect(dimensionInputValueFromMillimeters(undefined, 'm')).toBe('');
+    expect(dimensionInputValueFromMillimeters(1200, 'mm')).toBe('1200');
+    expect(dimensionInputValueFromMillimeters(1200, 'm')).toBe('1.2');
+    expect(dimensionInputValueFromMillimeters(254, 'in')).toBe('10');
+    expect(dimensionInputValueFromMillimeters(304.8, 'ft')).toBe('1');
   });
 });
 

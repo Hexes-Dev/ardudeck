@@ -464,6 +464,11 @@ export function formatDimensionFromMillimeters(millimeters: number, unit: Dimens
   return `${formatValue(dimensionValueFromMillimeters(millimeters, unit), UNIT_PRECISION.dimensions[unit])} ${UNIT_LABELS.dimensions[unit]}`;
 }
 
+export function dimensionInputValueFromMillimeters(millimeters: number | undefined, unit: DimensionUnit): string {
+  if (millimeters === undefined || !Number.isFinite(millimeters)) return '';
+  return String(Number(dimensionValueFromMillimeters(millimeters, unit).toFixed(UNIT_PRECISION.dimensions[unit])));
+}
+
 export function areaValueFromSquareMeters(squareMeters: number, unit: AreaUnit): number {
   switch (unit) {
     case 'm2':

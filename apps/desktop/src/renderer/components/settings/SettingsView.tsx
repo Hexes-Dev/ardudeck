@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { TileCacheCard } from './TileCacheCard';
 import { UnitSelectionCard } from './UnitSelectionCard';
-import { useSettingsStore, type VehicleProfile, type VehicleType, type DisplayUnits, type ExperienceLevel, type UiVisibility } from '../../stores/settings-store';
+import { useSettingsStore, type VehicleProfile, type VehicleType, type ExperienceLevel, type UiVisibility } from '../../stores/settings-store';
 import { useParameterStore } from '../../stores/parameter-store';
 import { useNavigationStore } from '../../stores/navigation-store';
 import { useTelemetryStore } from '../../stores/telemetry-store';
@@ -25,8 +25,10 @@ import type { VehicleTemplate } from '../../lib/vehicle-templates/types';
 import {
   altitudeValueFromMeters,
   capacityValueFromMah,
+  dimensionInputValueFromMillimeters,
   formatAltitudeFromMeters,
   formatCapacityFromMah,
+  formatDimensionFromMillimeters,
   formatSpeedFromMetersPerSecond,
   formatWeightFromGrams,
   speedValueFromMetersPerSecond,
@@ -34,10 +36,12 @@ import {
   toMahFromCapacityUnit,
   toMetersPerSecondFromSpeedUnit,
   toMetersFromAltitudeUnit,
+  toMillimetersFromDimensionUnit,
   UNIT_LABELS,
   UNIT_PRECISION,
   weightInputValueFromGrams,
   type AltitudeUnit,
+  type DimensionUnit,
   type ElectricCapacityUnit,
   type SpeedUnit,
   type WeightUnit,
@@ -47,21 +51,12 @@ import {
 function fmtWeight(g: number, unit: WeightUnit): string {
   return formatWeightFromGrams(g, unit);
 }
-function fmtLength(mm: number, units: DisplayUnits): string {
-  return units === 'large' ? `${+(mm / 1000).toFixed(2)}m` : `${mm}mm`;
+function fmtLength(mm: number, unit: DimensionUnit): string {
+  return formatDimensionFromMillimeters(mm, unit);
 }
 function fmtCapacity(mah: number, unit: ElectricCapacityUnit): string {
   return formatCapacityFromMah(mah, unit);
 }
-function unitLabel(smallUnit: string, units: DisplayUnits): string {
-  if (units !== 'large') return smallUnit;
-  return ({ g: 'kg', mm: 'm', mAh: 'Ah' } as Record<string, string>)[smallUnit] ?? smallUnit;
-}
-
-// Fields that convert by ÷1000 when display units = 'large'
-const LARGE_UNIT_FIELDS: Record<string, number> = {
-  wingspan: 1000, hullLength: 1000, wheelbase: 1000,
-};
 
 const MISSION_ALTITUDE_FIELDS = new Set([
   'safeAltitudeBuffer',
@@ -1086,7 +1081,6 @@ export function SettingsView() {
     getActiveVehicle,
     getEstimatedFlightTime,
     getEstimatedRange,
-    displayUnits,
     unitPreferences,
     experienceLevel,
     setExperienceLevel,
@@ -1125,6 +1119,7 @@ export function SettingsView() {
   const electricCapacityUnit = unitPreferences.electricCapacity;
   const speedUnit = unitPreferences.speed;
   const weightUnit = unitPreferences.weight;
+  const dimensionUnit = unitPreferences.dimensions;
 
   // Auto-detect vehicle type from MAVLink connection (only once per connection session)
   // Uses module-level variable to survive component remounts
@@ -1352,9 +1347,9 @@ export function SettingsView() {
                         {activeVehicle.type === 'sub' && 'Depth'}
                       </div>
                       <div className="text-sm text-content font-medium">
-                        {activeVehicle.type === 'copter' && `${fmtLength(activeVehicle.frameSize || 127, displayUnits)} ${activeVehicle.motorCount === 6 ? 'Hex' : activeVehicle.motorCount === 8 ? 'Octo' : 'Quad'}`}
-                        {activeVehicle.type === 'plane' && fmtLength(activeVehicle.wingspan || 1200, displayUnits)}
-                        {activeVehicle.type === 'vtol' && fmtLength(activeVehicle.wingspan || 1500, displayUnits)}
+                        {activeVehicle.type === 'copter' && `${fmtLength(activeVehicle.frameSize || 127, dimensionUnit)} ${activeVehicle.motorCount === 6 ? 'Hex' : activeVehicle.motorCount === 8 ? 'Octo' : 'Quad'}`}
+                        {activeVehicle.type === 'plane' && fmtLength(activeVehicle.wingspan || 1200, dimensionUnit)}
+                        {activeVehicle.type === 'vtol' && fmtLength(activeVehicle.wingspan || 1500, dimensionUnit)}
                         {activeVehicle.type === 'rover' && (activeVehicle.driveType === 'ackermann' ? 'Car' : activeVehicle.driveType === 'skid' ? 'Skid' : 'Tank')}
                         {activeVehicle.type === 'boat' && (activeVehicle.hullType ? `${activeVehicle.hullType.charAt(0).toUpperCase()}${activeVehicle.hullType.slice(1)}` : 'Displacement')}
                         {activeVehicle.type === 'sub' && formatAltitudeFromMeters(activeVehicle.maxDepth ?? 100, altitudeUnit)}
@@ -2377,9 +2372,8 @@ function AboutSection() {
 
 // Input field component for vehicle forms
 /**
- * Frame size input with mm/inches toggle
- * Stores value in mm internally for consistency
- * Common frame sizes: 127mm (5"), 178mm (7"), 254mm (10"), 320mm, 450mm
+ * Vehicle profile values are stored in native units and converted only at the
+ * editable field boundary.
  */
 // ============================================
 // Validation
@@ -2396,6 +2390,7 @@ const VEHICLE_FIELD_RULES: Record<string, FieldValidation> = {
   name:             { required: true },
   weight:           { min: 1, max: 500_000, required: true, integer: true },
   batteryCapacity:  { min: 100, max: 100_000, required: true, integer: true },
+  frameSize:        { min: 0, max: 10_000, integer: true },
   wingspan:         { min: 100, max: 10_000, integer: true },
   wingArea:         { min: 100, max: 100_000, integer: true },
   stallSpeed:       { min: 0.1, max: 100 },
@@ -2544,51 +2539,117 @@ function PropSizeInput({
   );
 }
 
-function FrameSizeInput({
-  value,
-  onChange,
+function dimensionInputStep(unit: DimensionUnit): string {
+  return String(1 / (10 ** UNIT_PRECISION.dimensions[unit]));
+}
+
+function clampDimensionMillimetersToRules(millimeters: number, rules: FieldValidation): number {
+  let next = millimeters;
+  if (rules.min !== undefined) next = Math.max(rules.min, next);
+  if (rules.max !== undefined) next = Math.min(rules.max, next);
+  return next;
+}
+
+function validateDimensionField(value: string, rules: FieldValidation, unit: DimensionUnit): string | null {
+  const trimmed = value.trim();
+  if (trimmed === '') {
+    return rules.required ? 'Required' : null;
+  }
+  const displayValue = Number(trimmed);
+  if (!Number.isFinite(displayValue)) return 'Must be a valid number';
+
+  const millimeters = toMillimetersFromDimensionUnit(displayValue, unit);
+  if (rules.min !== undefined && millimeters < rules.min) {
+    return `Min: ${dimensionInputValueFromMillimeters(rules.min, unit)} ${UNIT_LABELS.dimensions[unit]}`;
+  }
+  if (rules.max !== undefined && millimeters > rules.max) {
+    return `Max: ${dimensionInputValueFromMillimeters(rules.max, unit)} ${UNIT_LABELS.dimensions[unit]}`;
+  }
+  if (unit === 'mm' && rules.integer && !Number.isInteger(displayValue)) {
+    return 'Must be a whole number';
+  }
+  return null;
+}
+
+function DimensionInputField({
+  label,
+  valueMillimeters,
+  onCommit,
+  unit,
+  placeholderMillimeters,
+  rules,
 }: {
-  value: number | undefined;
-  onChange: (mm: number | undefined) => void;
+  label: string;
+  valueMillimeters: number | undefined;
+  onCommit: (millimeters: number | undefined) => void;
+  unit: DimensionUnit;
+  placeholderMillimeters?: number;
+  rules: FieldValidation;
 }) {
-  const [unit, setUnit] = useState<'mm' | 'in'>('mm');
+  const displayValue = dimensionInputValueFromMillimeters(valueMillimeters, unit);
+  const [draft, setDraft] = useState(displayValue);
+  const [focused, setFocused] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const displayValue = value !== undefined
-    ? unit === 'mm'
-      ? value
-      : Math.round(value / 25.4 * 10) / 10
-    : '';
+  useEffect(() => {
+    if (!focused) setDraft(displayValue);
+  }, [displayValue, focused]);
 
-  const handleChange = (inputVal: string) => {
-    if (inputVal === '') { onChange(undefined); return; }
-    const numVal = parseFloat(inputVal);
-    if (isNaN(numVal) || numVal < 0) return;
-    const mmValue = unit === 'mm' ? Math.round(numVal) : Math.round(numVal * 25.4);
-    onChange(mmValue);
-  };
+  const resetDraft = useCallback(() => {
+    setDraft(dimensionInputValueFromMillimeters(valueMillimeters, unit));
+    setError(null);
+  }, [unit, valueMillimeters]);
 
   return (
     <div>
-      <label className="block text-xs text-content-secondary mb-1">Frame Size</label>
+      <label className="block text-xs text-content-secondary mb-1">{label}</label>
       <div className="relative">
         <input
           type="number"
-          value={displayValue}
-          onChange={(e) => handleChange(e.target.value)}
-          placeholder={unit === 'mm' ? '450' : '5'}
-          min={0}
-          step={unit === 'mm' ? 10 : 0.5}
-          className="w-full px-3 py-2 pr-12 bg-surface-input border border-border rounded-lg text-content text-sm focus:outline-none focus:border-blue-500"
+          value={draft}
+          onFocus={() => setFocused(true)}
+          onChange={(e) => {
+            const next = e.target.value;
+            setDraft(next);
+            setError(validateDimensionField(next, rules, unit));
+          }}
+          onBlur={() => {
+            setFocused(false);
+            const err = validateDimensionField(draft, rules, unit);
+            if (draft.trim() === '' && !rules.required) {
+              if (valueMillimeters !== undefined) onCommit(undefined);
+              resetDraft();
+              return;
+            }
+            if (draft.trim() === '' || err) {
+              resetDraft();
+              return;
+            }
+            const displayNumber = Number(draft);
+            if (!Number.isFinite(displayNumber)) {
+              resetDraft();
+              return;
+            }
+            if (displayNumber === Number(displayValue)) {
+              resetDraft();
+              return;
+            }
+            const millimeters = Math.round(toMillimetersFromDimensionUnit(displayNumber, unit));
+            onCommit(clampDimensionMillimetersToRules(millimeters, rules));
+          }}
+          placeholder={placeholderMillimeters !== undefined ? dimensionInputValueFromMillimeters(placeholderMillimeters, unit) : undefined}
+          min={rules.min !== undefined ? dimensionInputValueFromMillimeters(rules.min, unit) : undefined}
+          max={rules.max !== undefined ? dimensionInputValueFromMillimeters(rules.max, unit) : undefined}
+          step={dimensionInputStep(unit)}
+          className={`w-full px-3 py-2 pr-12 bg-surface-input border rounded-lg text-content text-sm focus:outline-none ${
+            error ? 'border-red-500/60 focus:border-red-500' : 'border-border focus:border-blue-500'
+          }`}
         />
-        <button
-          type="button"
-          onClick={() => setUnit(unit === 'mm' ? 'in' : 'mm')}
-          className="absolute right-2 top-1/2 -translate-y-1/2 text-content-secondary text-xs hover:text-blue-400 transition-colors px-1"
-          title="Toggle mm / inches"
-        >
-          {unit}
-        </button>
+        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-content-secondary text-xs pointer-events-none">
+          {UNIT_LABELS.dimensions[unit]}
+        </span>
       </div>
+      {error && <div className="text-[10px] text-red-400 mt-0.5">{error}</div>}
     </div>
   );
 }
@@ -3144,45 +3205,12 @@ function VehicleEditModal({
   onClose: () => void;
 }) {
   const { getDisplayValue, handleChange, handleBlur, getError } = useVehicleForm(vehicle, onUpdate);
-  const { displayUnits, unitPreferences } = useSettingsStore();
-  const large = displayUnits === 'large';
+  const { unitPreferences } = useSettingsStore();
   const altitudeUnit = unitPreferences.altitude;
   const electricCapacityUnit = unitPreferences.electricCapacity;
   const speedUnit = unitPreferences.speed;
   const weightUnit = unitPreferences.weight;
-
-  // Conversion factor for current display units (1 = no conversion)
-  const factor = (field: string) => large ? (LARGE_UNIT_FIELDS[field] ?? 1) : 1;
-
-  // Wrap getDisplayValue to convert stored small-unit values for display
-  const getConvertedValue = (field: string) => {
-    const raw = getDisplayValue(field);
-    const f = factor(field);
-    if (f === 1 || raw === undefined || raw === '') return raw;
-    const num = typeof raw === 'string' ? parseFloat(raw) : raw;
-    if (typeof num !== 'number' || isNaN(num)) return raw;
-    return +(num / f).toFixed(3);
-  };
-
-  // Wrap handleChange to convert user input (large units) back to small units for storage
-  const handleConvertedChange = (field: string, value: string, isText?: boolean) => {
-    const f = factor(field);
-    if (f === 1 || isText) return handleChange(field, value, isText);
-    if (value === '') return handleChange(field, value);
-    const num = parseFloat(value);
-    if (isNaN(num)) return handleChange(field, value);
-    handleChange(field, String(Math.round(num * f)));
-  };
-
-  // Get unit label converted for large mode
-  const getUnit = (smallUnit: string) => unitLabel(smallUnit, displayUnits);
-
-  // Get placeholder converted for large mode
-  const getPlaceholder = (field: string, defaultVal: string) => {
-    const f = factor(field);
-    if (f === 1) return defaultVal;
-    return String(+(parseFloat(defaultVal) / f));
-  };
+  const dimensionUnit = unitPreferences.dimensions;
 
   const isCopter = vehicle.type === 'copter';
   const isPlane = vehicle.type === 'plane';
@@ -3260,9 +3288,13 @@ function VehicleEditModal({
                 Airframe
               </h3>
               <div className="grid grid-cols-2 gap-4">
-                <FrameSizeInput
-                  value={vehicle.frameSize}
-                  onChange={(mm) => onUpdate({ frameSize: mm })}
+                <DimensionInputField
+                  label="Frame Size"
+                  valueMillimeters={vehicle.frameSize}
+                  onCommit={(millimeters) => onUpdate({ frameSize: millimeters })}
+                  unit={dimensionUnit}
+                  placeholderMillimeters={127}
+                  rules={VEHICLE_FIELD_RULES.frameSize!}
                 />
                 <VehicleSelectField
                   label="Motor Count"
@@ -3307,14 +3339,13 @@ function VehicleEditModal({
                 Airframe
               </h3>
               <div className="grid grid-cols-2 gap-4">
-                <VehicleInputField
+                <DimensionInputField
                   label="Wingspan"
-                  value={getConvertedValue('wingspan')}
-                  onChange={(v) => handleConvertedChange('wingspan', v)}
-                  onBlur={() => handleBlur('wingspan')}
-                  error={getError('wingspan')}
-                  unit={getUnit('mm')}
-                  placeholder={getPlaceholder('wingspan', '1200')}
+                  valueMillimeters={vehicle.wingspan}
+                  onCommit={(millimeters) => onUpdate({ wingspan: millimeters })}
+                  unit={dimensionUnit}
+                  placeholderMillimeters={1200}
+                  rules={VEHICLE_FIELD_RULES.wingspan!}
                 />
                 <WeightInputField
                   label="All-Up Weight"
@@ -3374,14 +3405,13 @@ function VehicleEditModal({
                 VTOL Airframe
               </h3>
               <div className="grid grid-cols-2 gap-4">
-                <VehicleInputField
+                <DimensionInputField
                   label="Wingspan"
-                  value={getConvertedValue('wingspan')}
-                  onChange={(v) => handleConvertedChange('wingspan', v)}
-                  onBlur={() => handleBlur('wingspan')}
-                  error={getError('wingspan')}
-                  unit={getUnit('mm')}
-                  placeholder={getPlaceholder('wingspan', '1500')}
+                  valueMillimeters={vehicle.wingspan}
+                  onCommit={(millimeters) => onUpdate({ wingspan: millimeters })}
+                  unit={dimensionUnit}
+                  placeholderMillimeters={1500}
+                  rules={VEHICLE_FIELD_RULES.wingspan!}
                 />
                 <VehicleSelectField
                   label="VTOL Motors"
@@ -3450,23 +3480,21 @@ function VehicleEditModal({
                   placeholderGrams={2000}
                   rules={VEHICLE_FIELD_RULES.weight!}
                 />
-                <VehicleInputField
+                <DimensionInputField
                   label="Wheelbase"
-                  value={getConvertedValue('wheelbase')}
-                  onChange={(v) => handleConvertedChange('wheelbase', v)}
-                  onBlur={() => handleBlur('wheelbase')}
-                  error={getError('wheelbase')}
-                  unit={getUnit('mm')}
-                  placeholder={getPlaceholder('wheelbase', '300')}
+                  valueMillimeters={vehicle.wheelbase}
+                  onCommit={(millimeters) => onUpdate({ wheelbase: millimeters })}
+                  unit={dimensionUnit}
+                  placeholderMillimeters={300}
+                  rules={VEHICLE_FIELD_RULES.wheelbase!}
                 />
-                <VehicleInputField
+                <DimensionInputField
                   label="Wheel Diameter"
-                  value={getDisplayValue('wheelDiameter')}
-                  onChange={(v) => handleChange('wheelDiameter', v)}
-                  onBlur={() => handleBlur('wheelDiameter')}
-                  error={getError('wheelDiameter')}
-                  unit="mm"
-                  placeholder="100"
+                  valueMillimeters={vehicle.wheelDiameter}
+                  onCommit={(millimeters) => onUpdate({ wheelDiameter: millimeters })}
+                  unit={dimensionUnit}
+                  placeholderMillimeters={100}
+                  rules={VEHICLE_FIELD_RULES.wheelDiameter!}
                 />
                 <SpeedInputField
                   label="Max Speed"
@@ -3511,14 +3539,13 @@ function VehicleEditModal({
                     { value: 'paddle', label: 'Paddle Wheel' },
                   ]}
                 />
-                <VehicleInputField
+                <DimensionInputField
                   label="Hull Length"
-                  value={getConvertedValue('hullLength')}
-                  onChange={(v) => handleConvertedChange('hullLength', v)}
-                  onBlur={() => handleBlur('hullLength')}
-                  error={getError('hullLength')}
-                  unit={getUnit('mm')}
-                  placeholder={getPlaceholder('hullLength', '600')}
+                  valueMillimeters={vehicle.hullLength}
+                  onCommit={(millimeters) => onUpdate({ hullLength: millimeters })}
+                  unit={dimensionUnit}
+                  placeholderMillimeters={600}
+                  rules={VEHICLE_FIELD_RULES.hullLength!}
                 />
                 <WeightInputField
                   label="Total Weight"
@@ -3558,14 +3585,13 @@ function VehicleEditModal({
                 Hull & Thrusters
               </h3>
               <div className="grid grid-cols-2 gap-4">
-                <VehicleInputField
+                <DimensionInputField
                   label="Hull Length"
-                  value={getConvertedValue('hullLength')}
-                  onChange={(v) => handleConvertedChange('hullLength', v)}
-                  onBlur={() => handleBlur('hullLength')}
-                  error={getError('hullLength')}
-                  unit={getUnit('mm')}
-                  placeholder={getPlaceholder('hullLength', '500')}
+                  valueMillimeters={vehicle.hullLength}
+                  onCommit={(millimeters) => onUpdate({ hullLength: millimeters })}
+                  unit={dimensionUnit}
+                  placeholderMillimeters={500}
+                  rules={VEHICLE_FIELD_RULES.hullLength!}
                 />
                 <VehicleSelectField
                   label="Thruster Count"
@@ -3832,10 +3858,11 @@ function VehicleCard({
   onDelete,
   canDelete,
 }: VehicleCardProps) {
-  const { displayUnits, unitPreferences } = useSettingsStore();
+  const { unitPreferences } = useSettingsStore();
   const altitudeUnit = unitPreferences.altitude;
   const electricCapacityUnit = unitPreferences.electricCapacity;
   const weightUnit = unitPreferences.weight;
+  const dimensionUnit = unitPreferences.dimensions;
   // Build vehicle-specific info string
   const getVehicleSpecs = () => {
     const parts: string[] = [];
@@ -3846,7 +3873,7 @@ function VehicleCard({
 
     switch (vehicle.type) {
       case 'copter':
-        if (vehicle.frameSize) parts.push(fmtLength(vehicle.frameSize, displayUnits));
+        if (vehicle.frameSize) parts.push(fmtLength(vehicle.frameSize, dimensionUnit));
         if (vehicle.motorCount) {
           const motorNames: Record<number, string> = { 3: 'Tri', 4: 'Quad', 6: 'Hex', 8: 'Octo' };
           parts.push(motorNames[vehicle.motorCount] || `${vehicle.motorCount}M`);
@@ -3855,12 +3882,12 @@ function VehicleCard({
         parts.push(fmtWeight(vehicle.weight, weightUnit));
         break;
       case 'plane':
-        if (vehicle.wingspan) parts.push(`${fmtLength(vehicle.wingspan, displayUnits)} span`);
+        if (vehicle.wingspan) parts.push(`${fmtLength(vehicle.wingspan, dimensionUnit)} span`);
         parts.push(batteryStr);
         parts.push(fmtWeight(vehicle.weight, weightUnit));
         break;
       case 'vtol':
-        if (vehicle.wingspan) parts.push(fmtLength(vehicle.wingspan, displayUnits));
+        if (vehicle.wingspan) parts.push(fmtLength(vehicle.wingspan, dimensionUnit));
         if (vehicle.vtolMotorCount) parts.push(`${vehicle.vtolMotorCount} VTOL motors`);
         parts.push(batteryStr);
         break;
@@ -3869,14 +3896,14 @@ function VehicleCard({
           const driveNames: Record<string, string> = { differential: 'Tank', ackermann: 'Car', skid: 'Skid' };
           parts.push(driveNames[vehicle.driveType] || vehicle.driveType);
         }
-        if (vehicle.wheelDiameter) parts.push(`${vehicle.wheelDiameter}mm wheels`);
+        if (vehicle.wheelDiameter) parts.push(`${fmtLength(vehicle.wheelDiameter, dimensionUnit)} wheels`);
         parts.push(batteryStr);
         break;
       case 'boat':
         if (vehicle.hullType) {
           parts.push(vehicle.hullType.charAt(0).toUpperCase() + vehicle.hullType.slice(1));
         }
-        if (vehicle.hullLength) parts.push(fmtLength(vehicle.hullLength, displayUnits));
+        if (vehicle.hullLength) parts.push(fmtLength(vehicle.hullLength, dimensionUnit));
         parts.push(batteryStr);
         break;
       case 'sub':
