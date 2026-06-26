@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { TileCacheCard } from './TileCacheCard';
+import { UnitSelectionCard } from './UnitSelectionCard';
 import { useSettingsStore, type VehicleProfile, type VehicleType, type DisplayUnits, type ExperienceLevel, type UiVisibility } from '../../stores/settings-store';
 import { useParameterStore } from '../../stores/parameter-store';
 import { useNavigationStore } from '../../stores/navigation-store';
@@ -1000,7 +1001,6 @@ export function SettingsView() {
     getEstimatedFlightTime,
     getEstimatedRange,
     displayUnits,
-    setDisplayUnits,
     experienceLevel,
     setExperienceLevel,
     uiVisibility,
@@ -1376,42 +1376,7 @@ export function SettingsView() {
             <h2 className="text-sm font-medium text-content uppercase tracking-wider">Configuration</h2>
           </div>
 
-          {/* Display Units Toggle */}
-          <div className="bg-gradient-to-br from-surface to-surface-base rounded-xl border border-subtle p-4 mb-4 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <svg className="w-4 h-4 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 6l3 1m0 0l-3 9a5.002 5.002 0 006.001 0M6 7l3 9M6 7l6-2m6 2l3-1m-3 1l-3 9a5.002 5.002 0 006.001 0M18 7l3 9m-3-9l-6-2m0-2v2m0 16V5m0 16H9m3 0h3" />
-              </svg>
-              <div>
-                <div className="text-sm font-medium text-content">Display Units</div>
-                <div className="text-[11px] text-content-secondary">
-                  {displayUnits === 'small' ? 'mm, g, mAh - for small/racing builds' : 'm, kg, Ah - for large aircraft'}
-                </div>
-              </div>
-            </div>
-            <div className="flex bg-surface-input rounded-lg border border-subtle overflow-hidden">
-              <button
-                onClick={() => setDisplayUnits('small')}
-                className={`px-3 py-1.5 text-xs font-medium transition-colors ${
-                  displayUnits === 'small'
-                    ? 'bg-blue-500/20 text-blue-400'
-                    : 'text-content-secondary hover:text-content'
-                }`}
-              >
-                mm / g / mAh
-              </button>
-              <button
-                onClick={() => setDisplayUnits('large')}
-                className={`px-3 py-1.5 text-xs font-medium transition-colors ${
-                  displayUnits === 'large'
-                    ? 'bg-blue-500/20 text-blue-400'
-                    : 'text-content-secondary hover:text-content'
-                }`}
-              >
-                m / kg / Ah
-              </button>
-            </div>
-          </div>
+          <UnitSelectionCard />
 
           {/* Experience Level & UI Visibility */}
           <div className="bg-gradient-to-br from-surface to-surface-base rounded-xl border border-subtle p-4 mb-4">
