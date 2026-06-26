@@ -22,6 +22,14 @@ import { saveParmToFile } from '../../lib/vehicle-templates/export-parm';
 import { getTemplate, defaultTemplateForType } from '../../lib/vehicle-templates/registry';
 import { Download } from 'lucide-react';
 import type { VehicleTemplate } from '../../lib/vehicle-templates/types';
+import {
+  altitudeValueFromMeters,
+  formatAltitudeFromMeters,
+  toMetersFromAltitudeUnit,
+  UNIT_LABELS,
+  UNIT_PRECISION,
+  type AltitudeUnit,
+} from '../../../shared/user-units.js';
 
 // Display unit conversion helpers - storage is always mm/g/mAh
 function fmtWeight(g: number, units: DisplayUnits): string {
@@ -43,6 +51,39 @@ const LARGE_UNIT_FIELDS: Record<string, number> = {
   weight: 1000, wingspan: 1000, hullLength: 1000, wheelbase: 1000,
   batteryCapacity: 1000, displacement: 1000,
 };
+
+const MISSION_ALTITUDE_FIELDS = new Set([
+  'safeAltitudeBuffer',
+  'defaultWaypointAltitude',
+  'defaultTakeoffAltitude',
+]);
+
+const ALTITUDE_INPUT_PRECISION: Record<AltitudeUnit, number> = {
+  m: UNIT_PRECISION.altitude.m,
+  km: 3,
+  ft: 2,
+};
+
+function isMissionAltitudeField(field: string): boolean {
+  return MISSION_ALTITUDE_FIELDS.has(field);
+}
+
+function altitudeInputValueFromMeters(meters: number | undefined, unit: AltitudeUnit): string {
+  if (meters === undefined || !Number.isFinite(meters)) return '';
+  const decimals = ALTITUDE_INPUT_PRECISION[unit];
+  return String(Number(altitudeValueFromMeters(meters, unit).toFixed(decimals)));
+}
+
+function altitudeInputStep(unit: AltitudeUnit): string {
+  return unit === 'm' ? '1' : String(1 / (10 ** ALTITUDE_INPUT_PRECISION[unit]));
+}
+
+function clampAltitudeMetersToRules(meters: number, rules: FieldValidation): number {
+  let next = meters;
+  if (rules.min !== undefined) next = Math.max(rules.min, next);
+  if (rules.max !== undefined) next = Math.min(rules.max, next);
+  return next;
+}
 
 // Vehicle types supported by each firmware
 // Betaflight: Only multirotors (racing/freestyle focused)
@@ -1001,6 +1042,7 @@ export function SettingsView() {
     getEstimatedFlightTime,
     getEstimatedRange,
     displayUnits,
+    unitPreferences,
     experienceLevel,
     setExperienceLevel,
     uiVisibility,
@@ -1033,6 +1075,8 @@ export function SettingsView() {
   const activeVehicle = getActiveVehicle();
   const estimatedFlightTime = getEstimatedFlightTime();
   const estimatedRange = getEstimatedRange();
+  const altitudeUnit = unitPreferences.altitude;
+  const altitudeUnitLabel = UNIT_LABELS.altitude[altitudeUnit];
 
   // Auto-detect vehicle type from MAVLink connection (only once per connection session)
   // Uses module-level variable to survive component remounts
@@ -1109,14 +1153,34 @@ export function SettingsView() {
 
   const getMissionDisplayValue = (field: string): string | number => {
     if (field in missionLocalValues) return missionLocalValues[field]!;
-    return (missionDefaults as any)[field] as number;
+    const nativeValue = (missionDefaults as any)[field] as number;
+    if (isMissionAltitudeField(field)) {
+      return altitudeInputValueFromMeters(nativeValue, altitudeUnit);
+    }
+    return nativeValue;
+  };
+
+  const getMissionDisplayBound = (field: string, bound: 'min' | 'max'): string | undefined => {
+    const value = MISSION_FIELD_RULES[field]?.[bound];
+    if (value === undefined) return undefined;
+    return isMissionAltitudeField(field)
+      ? altitudeInputValueFromMeters(value, altitudeUnit)
+      : String(value);
+  };
+
+  const getMissionDisplayStep = (field: string): string | undefined => {
+    if (!isMissionAltitudeField(field)) return undefined;
+    return altitudeInputStep(altitudeUnit);
   };
 
   const handleMissionChange = (field: string, rawValue: string) => {
     setMissionLocalValues(prev => ({ ...prev, [field]: rawValue }));
     const rules = MISSION_FIELD_RULES[field];
     if (rules) {
-      setMissionErrors(prev => ({ ...prev, [field]: validateField(rawValue, rules) }));
+      const error = isMissionAltitudeField(field)
+        ? validateAltitudeField(rawValue, rules, altitudeUnit)
+        : validateField(rawValue, rules);
+      setMissionErrors(prev => ({ ...prev, [field]: error }));
     }
   };
 
@@ -1125,7 +1189,11 @@ export function SettingsView() {
     if (raw === undefined) return;
 
     const rules = MISSION_FIELD_RULES[field];
-    const error = rules ? validateField(raw, rules) : null;
+    const error = rules
+      ? isMissionAltitudeField(field)
+        ? validateAltitudeField(raw, rules, altitudeUnit)
+        : validateField(raw, rules)
+      : null;
 
     if (error) {
       setMissionLocalValues(prev => { const n = { ...prev }; delete n[field]; return n; });
@@ -1133,7 +1201,23 @@ export function SettingsView() {
       return;
     }
 
-    updateMissionDefaults({ [field]: Number(raw) });
+    if (isMissionAltitudeField(field)) {
+      const displayValue = Number(raw);
+      if (!Number.isFinite(displayValue)) {
+        setMissionLocalValues(prev => { const n = { ...prev }; delete n[field]; return n; });
+        setMissionErrors(prev => ({ ...prev, [field]: null }));
+        return;
+      }
+      const currentDisplayValue = Number(altitudeInputValueFromMeters((missionDefaults as any)[field] as number, altitudeUnit));
+      if (displayValue === currentDisplayValue) {
+        setMissionLocalValues(prev => { const n = { ...prev }; delete n[field]; return n; });
+        setMissionErrors(prev => ({ ...prev, [field]: null }));
+        return;
+      }
+      updateMissionDefaults({ [field]: clampAltitudeMetersToRules(toMetersFromAltitudeUnit(displayValue, altitudeUnit), rules ?? {}) });
+    } else {
+      updateMissionDefaults({ [field]: Number(raw) });
+    }
     setMissionLocalValues(prev => { const n = { ...prev }; delete n[field]; return n; });
     setMissionErrors(prev => ({ ...prev, [field]: null }));
   };
@@ -1225,7 +1309,7 @@ export function SettingsView() {
                         {activeVehicle.type === 'vtol' && fmtLength(activeVehicle.wingspan || 1500, displayUnits)}
                         {activeVehicle.type === 'rover' && (activeVehicle.driveType === 'ackermann' ? 'Car' : activeVehicle.driveType === 'skid' ? 'Skid' : 'Tank')}
                         {activeVehicle.type === 'boat' && (activeVehicle.hullType ? `${activeVehicle.hullType.charAt(0).toUpperCase()}${activeVehicle.hullType.slice(1)}` : 'Displacement')}
-                        {activeVehicle.type === 'sub' && `${activeVehicle.maxDepth || 100}m`}
+                        {activeVehicle.type === 'sub' && formatAltitudeFromMeters(activeVehicle.maxDepth ?? 100, altitudeUnit)}
                       </div>
                     </div>
                     {/* Weight */}
@@ -1471,10 +1555,11 @@ export function SettingsView() {
                       className={`w-full px-2 py-1.5 bg-surface-input border rounded text-content text-sm focus:outline-none ${
                         missionErrors.safeAltitudeBuffer ? 'border-red-500/60 focus:border-red-500' : 'border-border focus:border-blue-500'
                       }`}
-                      min="0"
-                      max="500"
+                      min={getMissionDisplayBound('safeAltitudeBuffer', 'min')}
+                      max={getMissionDisplayBound('safeAltitudeBuffer', 'max')}
+                      step={getMissionDisplayStep('safeAltitudeBuffer')}
                     />
-                    <span className="text-content-secondary text-xs">m</span>
+                    <span className="text-content-secondary text-xs">{altitudeUnitLabel}</span>
                   </div>
                   {missionErrors.safeAltitudeBuffer
                     ? <div className="text-[10px] text-red-400 mt-1">{missionErrors.safeAltitudeBuffer}</div>
@@ -1495,10 +1580,11 @@ export function SettingsView() {
                       className={`w-full px-2 py-1.5 bg-surface-input border rounded text-content text-sm focus:outline-none ${
                         missionErrors.defaultWaypointAltitude ? 'border-red-500/60 focus:border-red-500' : 'border-border focus:border-blue-500'
                       }`}
-                      min="0"
-                      max="10000"
+                      min={getMissionDisplayBound('defaultWaypointAltitude', 'min')}
+                      max={getMissionDisplayBound('defaultWaypointAltitude', 'max')}
+                      step={getMissionDisplayStep('defaultWaypointAltitude')}
                     />
-                    <span className="text-content-secondary text-xs">m</span>
+                    <span className="text-content-secondary text-xs">{altitudeUnitLabel}</span>
                   </div>
                   {missionErrors.defaultWaypointAltitude
                     ? <div className="text-[10px] text-red-400 mt-1">{missionErrors.defaultWaypointAltitude}</div>
@@ -1519,10 +1605,11 @@ export function SettingsView() {
                       className={`w-full px-2 py-1.5 bg-surface-input border rounded text-content text-sm focus:outline-none ${
                         missionErrors.defaultTakeoffAltitude ? 'border-red-500/60 focus:border-red-500' : 'border-border focus:border-blue-500'
                       }`}
-                      min="0"
-                      max="1000"
+                      min={getMissionDisplayBound('defaultTakeoffAltitude', 'min')}
+                      max={getMissionDisplayBound('defaultTakeoffAltitude', 'max')}
+                      step={getMissionDisplayStep('defaultTakeoffAltitude')}
                     />
-                    <span className="text-content-secondary text-xs">m</span>
+                    <span className="text-content-secondary text-xs">{altitudeUnitLabel}</span>
                   </div>
                   {missionErrors.defaultTakeoffAltitude
                     ? <div className="text-[10px] text-red-400 mt-1">{missionErrors.defaultTakeoffAltitude}</div>
@@ -2298,6 +2385,26 @@ function validateField(value: string, rules: FieldValidation, isText?: boolean):
   return null;
 }
 
+function validateAltitudeField(value: string, rules: FieldValidation, unit: AltitudeUnit): string | null {
+  const trimmed = value.trim();
+  if (trimmed === '') {
+    return rules.required ? 'Required' : null;
+  }
+  const displayValue = Number(trimmed);
+  if (!Number.isFinite(displayValue)) return 'Invalid number';
+  if (rules.integer && unit === 'm' && !Number.isInteger(displayValue)) return 'Must be whole number';
+
+  const displayMin = rules.min === undefined ? undefined : Number(altitudeInputValueFromMeters(rules.min, unit));
+  const displayMax = rules.max === undefined ? undefined : Number(altitudeInputValueFromMeters(rules.max, unit));
+  if (displayMin !== undefined && displayValue < displayMin) {
+    return `Min: ${displayMin} ${UNIT_LABELS.altitude[unit]}`;
+  }
+  if (displayMax !== undefined && displayValue > displayMax) {
+    return `Max: ${displayMax} ${UNIT_LABELS.altitude[unit]}`;
+  }
+  return null;
+}
+
 // Prop size input: text field with format validation + preset grid
 function PropSizeInput({
   value,
@@ -2493,6 +2600,83 @@ function VehicleInputField({
   );
 }
 
+function AltitudeInputField({
+  label,
+  valueMeters,
+  onCommit,
+  unit,
+  placeholderMeters,
+  rules,
+}: {
+  label: string;
+  valueMeters: number | undefined;
+  onCommit: (meters: number) => void;
+  unit: AltitudeUnit;
+  placeholderMeters?: number;
+  rules: FieldValidation;
+}) {
+  const displayValue = altitudeInputValueFromMeters(valueMeters, unit);
+  const [draft, setDraft] = useState(displayValue);
+  const [focused, setFocused] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!focused) setDraft(displayValue);
+  }, [displayValue, focused]);
+
+  const resetDraft = useCallback(() => {
+    setDraft(altitudeInputValueFromMeters(valueMeters, unit));
+    setError(null);
+  }, [unit, valueMeters]);
+
+  return (
+    <div>
+      <label className="block text-xs text-content-secondary mb-1">{label}</label>
+      <div className="relative">
+        <input
+          type="number"
+          value={draft}
+          onFocus={() => setFocused(true)}
+          onChange={(e) => {
+            const next = e.target.value;
+            setDraft(next);
+            setError(validateAltitudeField(next, rules, unit));
+          }}
+          onBlur={() => {
+            setFocused(false);
+            const err = validateAltitudeField(draft, rules, unit);
+            if (draft.trim() === '' || err) {
+              resetDraft();
+              return;
+            }
+            const displayNumber = Number(draft);
+            if (!Number.isFinite(displayNumber)) {
+              resetDraft();
+              return;
+            }
+            if (displayNumber === Number(displayValue)) {
+              resetDraft();
+              return;
+            }
+            onCommit(clampAltitudeMetersToRules(toMetersFromAltitudeUnit(displayNumber, unit), rules));
+          }}
+          placeholder={placeholderMeters !== undefined ? altitudeInputValueFromMeters(placeholderMeters, unit) : undefined}
+          min={rules.min !== undefined ? altitudeInputValueFromMeters(rules.min, unit) : undefined}
+          max={rules.max !== undefined ? altitudeInputValueFromMeters(rules.max, unit) : undefined}
+          step={altitudeInputStep(unit)}
+          className={`w-full px-3 py-2 pr-12 bg-surface-input border rounded-lg text-content text-sm focus:outline-none ${
+            error ? 'border-red-500/60 focus:border-red-500' : 'border-border focus:border-blue-500'
+          }`}
+        />
+        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-content-secondary text-xs pointer-events-none">
+          {UNIT_LABELS.altitude[unit]}
+        </span>
+      </div>
+      {error && <div className="text-[10px] text-red-400 mt-0.5">{error}</div>}
+    </div>
+  );
+}
+
 // Select field component for vehicle forms
 function VehicleSelectField({
   label,
@@ -2605,8 +2789,9 @@ function VehicleEditModal({
   onClose: () => void;
 }) {
   const { getDisplayValue, handleChange, handleBlur, getError } = useVehicleForm(vehicle, onUpdate);
-  const { displayUnits } = useSettingsStore();
+  const { displayUnits, unitPreferences } = useSettingsStore();
   const large = displayUnits === 'large';
+  const altitudeUnit = unitPreferences.altitude;
 
   // Conversion factor for current display units (1 = no conversion)
   const factor = (field: string) => large ? (LARGE_UNIT_FIELDS[field] ?? 1) : 1;
@@ -3063,14 +3248,13 @@ function VehicleEditModal({
                   unit={getUnit('g')}
                   placeholder={getPlaceholder('weight', '5000')}
                 />
-                <VehicleInputField
+                <AltitudeInputField
                   label="Max Depth Rating"
-                  value={getDisplayValue('maxDepth')}
-                  onChange={(v) => handleChange('maxDepth', v)}
-                  onBlur={() => handleBlur('maxDepth')}
-                  error={getError('maxDepth')}
-                  unit="m"
-                  placeholder="100"
+                  valueMeters={vehicle.maxDepth}
+                  onCommit={(meters) => onUpdate({ maxDepth: meters })}
+                  unit={altitudeUnit}
+                  placeholderMeters={100}
+                  rules={VEHICLE_FIELD_RULES.maxDepth!}
                 />
                 <VehicleSelectField
                   label="Buoyancy"
@@ -3312,7 +3496,8 @@ function VehicleCard({
   onDelete,
   canDelete,
 }: VehicleCardProps) {
-  const { displayUnits } = useSettingsStore();
+  const { displayUnits, unitPreferences } = useSettingsStore();
+  const altitudeUnit = unitPreferences.altitude;
   // Build vehicle-specific info string
   const getVehicleSpecs = () => {
     const parts: string[] = [];
@@ -3358,7 +3543,7 @@ function VehicleCard({
         break;
       case 'sub':
         if (vehicle.thrusterCount) parts.push(`${vehicle.thrusterCount}T`);
-        if (vehicle.maxDepth) parts.push(`${vehicle.maxDepth}m rated`);
+        if (vehicle.maxDepth) parts.push(`${formatAltitudeFromMeters(vehicle.maxDepth, altitudeUnit)} rated`);
         parts.push(batteryStr);
         break;
       default:

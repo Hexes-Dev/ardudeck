@@ -4,6 +4,7 @@ import { useSettingsStore } from '../../stores/settings-store';
 import { HealthCheckCard } from './HealthCheckCard';
 import { AiWarningDialog } from './AiAnalysisPanel';
 import type { ExplorerPreset, HealthCheckResult } from '@ardudeck/dataflash-parser';
+import { formatAltitudeFromMeters } from '../../../shared/user-units.js';
 
 function computeFlightStats(log: ReturnType<typeof useLogStore.getState>['currentLog']) {
   if (!log) return null;
@@ -51,6 +52,7 @@ export function HealthReportPanel() {
   const currentLogPath = useLogStore((s) => s.currentLogPath);
   const aiProvider = useSettingsStore((s) => s.aiProvider);
   const aiWarningDismissed = useSettingsStore((s) => s.aiWarningDismissed);
+  const altitudeUnit = useSettingsStore((s) => s.unitPreferences.altitude);
   const aiInsightCards = useLogStore((s) => s.aiInsightCards);
   const isAiInsightLoading = useLogStore((s) => s.isAiInsightLoading);
   const aiInsightError = useLogStore((s) => s.aiInsightError);
@@ -82,7 +84,7 @@ export function HealthReportPanel() {
 ## This Flight
 - Vehicle: ${meta.vehicleType || 'Unknown'} running ${meta.firmwareString || meta.firmwareVersion || 'Unknown firmware'}
 - Duration: ${(dS / 60).toFixed(1)} minutes
-- Max Altitude: ${stats.maxAlt.toFixed(1)} m | Max Speed: ${stats.maxSpd.toFixed(1)} m/s
+- Max Altitude: ${formatAltitudeFromMeters(stats.maxAlt, altitudeUnit)} | Max Speed: ${stats.maxSpd.toFixed(1)} m/s
 - Distance: ${dist} | Battery Used: ${stats.totalMah.toFixed(0)} mAh
 
 ## Automated Health Check Results
@@ -124,7 +126,7 @@ Return 3-6 cards. Most important issues first.`;
     } else {
       store.setAiInsightError(result?.error ?? 'AI analysis failed');
     }
-  }, [aiProvider, currentLog, healthResults]);
+  }, [aiProvider, altitudeUnit, currentLog, healthResults]);
 
   if (!healthResults || !currentLog) {
     return (
@@ -209,7 +211,7 @@ Return 3-6 cards. Most important issues first.`;
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4 pt-4 border-t border-subtle">
             <div>
               <div className="text-xs text-content-secondary">Max Altitude</div>
-              <div className="text-sm text-content font-medium">{flightStats.maxAlt.toFixed(1)} m</div>
+              <div className="text-sm text-content font-medium">{formatAltitudeFromMeters(flightStats.maxAlt, altitudeUnit)}</div>
             </div>
             <div>
               <div className="text-xs text-content-secondary">Max Speed</div>

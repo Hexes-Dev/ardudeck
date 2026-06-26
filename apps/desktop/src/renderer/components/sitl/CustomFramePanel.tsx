@@ -14,6 +14,12 @@ import {
   type SitlCustomFrameMeta,
 } from '../../../shared/sitl-custom-frame';
 import { useArduPilotSitlStore } from '../../stores/ardupilot-sitl-store';
+import { useSettingsStore } from '../../stores/settings-store';
+import {
+  altitudeValueFromMeters,
+  toMetersFromAltitudeUnit,
+  UNIT_LABELS,
+} from '../../../shared/user-units.js';
 
 type EditorMode =
   | { kind: 'closed' }
@@ -37,7 +43,6 @@ const FIELD_HINTS: Partial<Record<keyof SitlCustomFrame, string>> = {
   refAngle: 'deg',
   refVoltage: 'V',
   refCurrent: 'A',
-  refAlt: 'm',
   refTempC: '°C',
   refRotRate: 'deg/s',
   hoverThrOut: '0–1',
@@ -45,11 +50,19 @@ const FIELD_HINTS: Partial<Record<keyof SitlCustomFrame, string>> = {
   num_motors: '4 / 6 / 8',
 };
 
+function parseNumberDraft(value: string): number | null {
+  const trimmed = value.trim();
+  if (!/^[+-]?(?:(?:\d+\.?\d*)|(?:\.\d+))(?:e[+-]?\d+)?$/i.test(trimmed)) return null;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 export function CustomFramePanel() {
   const customFramePath = useArduPilotSitlStore((s) => s.customFramePath);
   const customFrameMotors = useArduPilotSitlStore((s) => s.customFrameMotors);
   const setCustomFrame = useArduPilotSitlStore((s) => s.setCustomFrame);
   const setModel = useArduPilotSitlStore((s) => s.setModel);
+  const altitudeUnit = useSettingsStore((s) => s.unitPreferences.altitude);
 
   const [expanded, setExpanded] = useState(false);
   const [list, setList] = useState<SitlCustomFrameMeta[]>([]);
@@ -181,6 +194,25 @@ export function CustomFramePanel() {
   const updateField = (key: keyof SitlCustomFrame, value: number) => {
     if (editor.kind === 'closed') return;
     setEditor({ ...editor, frame: { ...editor.frame, [key]: value } });
+  };
+
+  const getFieldHint = (field: keyof SitlCustomFrame): string | undefined => {
+    if (field === 'refAlt') return UNIT_LABELS.altitude[altitudeUnit];
+    return FIELD_HINTS[field];
+  };
+
+  const getFieldDisplayValue = (field: keyof SitlCustomFrame): number => {
+    if (editor.kind === 'closed') return 0;
+    const value = editor.frame[field];
+    if (field !== 'refAlt') return value;
+    const precision = altitudeUnit === 'km' ? 3 : altitudeUnit === 'm' ? 0 : 1;
+    return Number(altitudeValueFromMeters(value, altitudeUnit).toFixed(precision));
+  };
+
+  const updateFieldFromDisplay = (field: keyof SitlCustomFrame, raw: string) => {
+    const v = parseNumberDraft(raw.replace(',', '.'));
+    if (v === null) return;
+    updateField(field, field === 'refAlt' ? toMetersFromAltitudeUnit(v, altitudeUnit) : v);
   };
 
   return (
@@ -324,17 +356,13 @@ export function CustomFramePanel() {
                       <div key={field}>
                         <label className="block text-[11px] text-content-secondary">
                           {field}
-                          {FIELD_HINTS[field] && <span className="text-content-tertiary ml-1">({FIELD_HINTS[field]})</span>}
+                          {getFieldHint(field) && <span className="text-content-tertiary ml-1">({getFieldHint(field)})</span>}
                         </label>
                         <input
                           type="text"
                           inputMode="decimal"
-                          value={editor.frame[field]}
-                          onChange={(e) => {
-                            const raw = e.target.value.replace(',', '.');
-                            const v = parseFloat(raw);
-                            if (Number.isFinite(v)) updateField(field, v);
-                          }}
+                          value={getFieldDisplayValue(field)}
+                          onChange={(e) => updateFieldFromDisplay(field, e.target.value)}
                           className="w-full px-2 py-1 text-xs bg-surface-input border border-subtle rounded text-content font-mono tabular-nums focus:outline-none focus:border-blue-500"
                         />
                       </div>

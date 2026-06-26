@@ -12,7 +12,9 @@
 import { estimateBatteryCount } from '../components/survey/survey-stats';
 import {
   DEFAULT_USER_UNIT_PREFERENCES,
+  formatAltitudeFromMeters,
   formatDistanceFromMeters,
+  type AltitudeUnit,
   type DistanceUnit,
 } from '../../shared/user-units.js';
 import type { WeatherSummary } from './weather-api';
@@ -51,6 +53,8 @@ export interface BriefingInput {
   weather?: WeatherSummary | null;
   /** Display unit for briefing distance strings. Native numeric values stay metres. */
   distanceUnit?: DistanceUnit;
+  /** Display unit for altitude/depth strings. Native numeric values stay metres. */
+  altitudeUnit?: AltitudeUnit;
   /** Legal AGL ceiling in metres. Defaults to 120 (EASA / 400ft). */
   ceilingM?: number;
 }
@@ -117,6 +121,10 @@ export function formatDistanceM(m: number, unit: DistanceUnit = DEFAULT_USER_UNI
   return formatDistanceFromMeters(m, unit);
 }
 
+export function formatAltitudeM(m: number, unit: AltitudeUnit = DEFAULT_USER_UNIT_PREFERENCES.altitude): string {
+  return formatAltitudeFromMeters(m, unit);
+}
+
 export function formatDurationSec(s: number): string {
   if (s <= 0) return '0 min';
   const totalMin = Math.round(s / 60);
@@ -130,6 +138,7 @@ export function computeMissionBriefing(input: BriefingInput): MissionBriefing {
   const { located, home, cruiseSpeedMs, enduranceSec } = input;
   const ceilingM = input.ceilingM ?? 120;
   const distanceUnit = input.distanceUnit ?? DEFAULT_USER_UNIT_PREFERENCES.distance;
+  const altitudeUnit = input.altitudeUnit ?? DEFAULT_USER_UNIT_PREFERENCES.altitude;
   const weather = input.weather ?? null;
   const survey = input.survey
     ? {
@@ -220,6 +229,7 @@ export function computeMissionBriefing(input: BriefingInput): MissionBriefing {
     maxAltM,
     ceilingM,
     distanceUnit,
+    altitudeUnit,
     weather,
   });
 
@@ -254,6 +264,7 @@ interface CheckContext {
   maxAltM: number;
   ceilingM: number;
   distanceUnit: DistanceUnit;
+  altitudeUnit: AltitudeUnit;
   weather: WeatherSummary | null;
 }
 
@@ -291,9 +302,9 @@ function buildChecks(ctx: CheckContext): BriefingCheck[] {
     {
       id: 'maxAlt',
       label: 'Max altitude',
-      value: `${Math.round(ctx.maxAltM)} m`,
+      value: formatAltitudeM(ctx.maxAltM, ctx.altitudeUnit),
       severity: PASSIVE,
-      detail: `ceiling ${ctx.ceilingM} m AGL`,
+      detail: `ceiling ${formatAltitudeM(ctx.ceilingM, ctx.altitudeUnit)} AGL`,
     },
   ];
 

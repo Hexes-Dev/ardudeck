@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   computeMissionBriefing,
+  formatAltitudeM,
   formatDistanceM,
   formatDurationSec,
   type BriefingInput,
@@ -27,6 +28,12 @@ describe('formatters', () => {
   it('formats distance using an explicit distance unit', () => {
     expect(formatDistanceM(2500, 'km')).toBe('2.50 km');
     expect(formatDistanceM(1609.344, 'mi')).toBe('1.00 mi');
+  });
+
+  it('formats altitude and depth using an explicit altitude unit', () => {
+    expect(formatAltitudeM(120)).toBe('120 m');
+    expect(formatAltitudeM(120, 'ft')).toBe('394 ft');
+    expect(formatAltitudeM(1500, 'km')).toBe('1.50 km');
   });
 
   it('formats duration in min and h/min', () => {
@@ -90,6 +97,19 @@ describe('computeMissionBriefing', () => {
     expect(defaultBriefing.checks.find((c) => c.id === 'maxFromHome')?.value).toBe('2224 m');
     expect(mileBriefing.checks.find((c) => c.id === 'distance')?.value).toBe('1.38 mi');
     expect(mileBriefing.checks.find((c) => c.id === 'maxFromHome')?.value).toBe('1.38 mi');
+  });
+
+  it('formats altitude checks using the selected altitude unit while keeping native meters', () => {
+    const located = legPoints(3, 120);
+    const defaultBriefing = computeMissionBriefing({ ...base, located, ceilingM: 120 });
+    const feetBriefing = computeMissionBriefing({ ...base, located, ceilingM: 120, altitudeUnit: 'ft' });
+
+    expect(defaultBriefing.maxAltM).toBe(feetBriefing.maxAltM);
+    expect(defaultBriefing.ceilingM).toBe(feetBriefing.ceilingM);
+    expect(defaultBriefing.checks.find((c) => c.id === 'maxAlt')?.value).toBe('120 m');
+    expect(defaultBriefing.checks.find((c) => c.id === 'maxAlt')?.detail).toBe('ceiling 120 m AGL');
+    expect(feetBriefing.checks.find((c) => c.id === 'maxAlt')?.value).toBe('394 ft');
+    expect(feetBriefing.checks.find((c) => c.id === 'maxAlt')?.detail).toBe('ceiling 394 ft AGL');
   });
 
   it('reports altitude range, total climb and waypoint count', () => {

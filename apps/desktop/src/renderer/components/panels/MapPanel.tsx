@@ -21,7 +21,7 @@ import { useImperativeMapLayer } from '../map/ImperativeMapLayer';
 import { MapCommandPopup } from '../map/MapCommandPopup';
 import { createPortal } from 'react-dom';
 import { computeOffsetPosition } from '../../utils/geo-offset';
-import { formatDistanceFromMeters, type DistanceUnit } from '../../../shared/user-units.js';
+import { formatAltitudeFromMeters, formatDistanceFromMeters, type DistanceUnit } from '../../../shared/user-units.js';
 
 // Geofence and Rally overlays (read-only in telemetry view)
 import { FenceMapOverlay } from '../geofence/FenceMapOverlay';
@@ -984,6 +984,7 @@ const TelemetryMap3D = React.memo(function TelemetryMap3D() {
   const flight = useTelemetryStore((s) => s.flight);
   const attitude = useTelemetryStore((s) => s.attitude);
   const distanceUnit = useSettingsStore((s) => s.unitPreferences.distance);
+  const altitudeUnit = useSettingsStore((s) => s.unitPreferences.altitude);
 
   const [followVehicle, setFollowVehicle] = useState(true);
   const [showCompass, setShowCompass] = useState(true);
@@ -1381,11 +1382,11 @@ const TelemetryMap3D = React.memo(function TelemetryMap3D() {
       <div className="absolute bottom-2 left-2 z-[1000] bg-surface-overlay backdrop-blur-sm rounded px-3 py-2 text-xs text-content space-y-1 min-w-[130px] border border-subtle shadow-lg">
         <div className="flex justify-between">
           <span className="text-content-secondary">MSL</span>
-          <span className="font-mono text-content">{position.alt.toFixed(1)}<span className="text-content-secondary ml-0.5">m</span></span>
+          <span className="font-mono text-content">{formatAltitudeFromMeters(position.alt, altitudeUnit)}</span>
         </div>
         <div className="flex justify-between">
           <span className="text-content-secondary">Rel</span>
-          <span className="font-mono text-content">{position.relativeAlt.toFixed(1)}<span className="text-content-secondary ml-0.5">m</span></span>
+          <span className="font-mono text-content">{formatAltitudeFromMeters(position.relativeAlt, altitudeUnit)}</span>
         </div>
         <div className="flex justify-between">
           <span className="text-content-secondary">Spd</span>
@@ -1658,6 +1659,7 @@ const TelemetryMap2D = React.memo(function TelemetryMap2D() {
   const battery = useTelemetryStore((s) => s.battery);
   const wind = useTelemetryStore((s) => s.wind);
   const distanceUnit = useSettingsStore((s) => s.unitPreferences.distance);
+  const altitudeUnit = useSettingsStore((s) => s.unitPreferences.altitude);
   const connectionState = useConnectionStore((s) => s.connectionState);
   const [followVehicle, setFollowVehicle] = useState(true);
   const [trail, setTrail] = useState<[number, number][]>([]);
@@ -1764,13 +1766,14 @@ const TelemetryMap2D = React.memo(function TelemetryMap2D() {
       heading: vfrHud.heading,
       groundspeed: vfrHud.groundspeed,
       altitudeAgl: position.relativeAlt,
+      altitudeText: formatAltitudeFromMeters(position.relativeAlt, altitudeUnit),
       windDirection: wind.direction,
       windSpeed: wind.speed,
     }, tacticalClass === 'antenna');
     // tacticalIcon is in deps so that whenever the icon DOM is regenerated
     // (e.g. selection change rebuilds it with reset rotation), we reapply
     // the current heading immediately - prevents a brief flip-to-north flicker.
-  }, [vfrHud.heading, vfrHud.groundspeed, position.relativeAlt, wind.direction, wind.speed, tacticalClass, tacticalIcon]);
+  }, [vfrHud.heading, vfrHud.groundspeed, position.relativeAlt, altitudeUnit, wind.direction, wind.speed, tacticalClass, tacticalIcon]);
 
   // Calculate distance and bearing to home
   const homeStats = useMemo(() => {
@@ -2136,11 +2139,11 @@ const TelemetryMap2D = React.memo(function TelemetryMap2D() {
       <div className="absolute bottom-2 left-2 z-[1000] bg-surface-overlay backdrop-blur-sm rounded px-3 py-2 text-xs text-content space-y-1 min-w-[130px] border border-subtle shadow-lg">
         <div className="flex justify-between">
           <span className="text-content-secondary">MSL</span>
-          <span className="font-mono text-content">{position.alt.toFixed(1)}<span className="text-content-secondary ml-0.5">m</span></span>
+          <span className="font-mono text-content">{formatAltitudeFromMeters(position.alt, altitudeUnit)}</span>
         </div>
         <div className="flex justify-between">
           <span className="text-content-secondary">Rel</span>
-          <span className="font-mono text-content">{position.relativeAlt.toFixed(1)}<span className="text-content-secondary ml-0.5">m</span></span>
+          <span className="font-mono text-content">{formatAltitudeFromMeters(position.relativeAlt, altitudeUnit)}</span>
         </div>
         <div className="flex justify-between">
           <span className="text-content-secondary">Spd</span>

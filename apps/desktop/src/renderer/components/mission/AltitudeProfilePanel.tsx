@@ -5,7 +5,12 @@ import { commandHasLocation, hasValidCoordinates, MAV_CMD, type MissionItem } fr
 import { getElevations, interpolatePathPoints } from '../../utils/elevation-api';
 import { AutoAdjustAltitudeDialog } from './AutoAdjustAltitudeDialog';
 import type { PlanResult, PlannerWaypoint } from './terrain-altitude-planner';
-import { formatDistanceFromMeters } from '../../../shared/user-units.js';
+import {
+  altitudeValueFromMeters,
+  formatAltitudeFromMeters,
+  formatDistanceFromMeters,
+  UNIT_LABELS,
+} from '../../../shared/user-units.js';
 
 // Terrain data point
 interface TerrainPoint {
@@ -99,6 +104,7 @@ export function AltitudeProfilePanel({ readOnly = false }: AltitudeProfilePanelP
   const safeAltitudeBuffer = missionDefaults.safeAltitudeBuffer;
   const maxWaypointMarkers = useSettingsStore((s) => s.surveyPerformance.maxWaypointMarkers);
   const distanceUnit = useSettingsStore((s) => s.unitPreferences.distance);
+  const altitudeUnit = useSettingsStore((s) => s.unitPreferences.altitude);
 
   // Filter to items with location AND valid coordinates. Takeoff uses (0,0)
   // as a "take off from current position" sentinel; including it would make
@@ -560,7 +566,7 @@ export function AltitudeProfilePanel({ readOnly = false }: AltitudeProfilePanelP
               </span>
               <span className="flex items-center gap-1 pointer-events-none">
                 <span className="w-3 h-0.5 bg-amber-500" style={{ borderStyle: 'dashed' }} />
-                <span className="text-content-secondary">Safe +{safeAltitudeBuffer}m</span>
+                <span className="text-content-secondary">Safe +{formatAltitudeFromMeters(safeAltitudeBuffer, altitudeUnit)}</span>
               </span>
             </>
           )}
@@ -574,7 +580,7 @@ export function AltitudeProfilePanel({ readOnly = false }: AltitudeProfilePanelP
             <button
               onClick={() => setAutoAdjustOpen(true)}
               className="px-2 py-0.5 text-[10px] font-medium text-amber-300 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 rounded transition-colors"
-              title={`Keep flight path ${safeAltitudeBuffer}m above terrain`}
+              title={`Keep flight path ${formatAltitudeFromMeters(safeAltitudeBuffer, altitudeUnit)} above terrain`}
             >
               Auto Adjust...
             </button>
@@ -732,10 +738,10 @@ export function AltitudeProfilePanel({ readOnly = false }: AltitudeProfilePanelP
                       fontSize={isDragging || isCurrent ? 11 : 9}
                       fontWeight={isDragging || isCurrent ? 'bold' : 'normal'}
                     >
-                      {Math.round(displayAlt)}m
+                      {formatAltitudeFromMeters(displayAlt, altitudeUnit)}
                       {agl !== null && (
                         <tspan fill={isBelowSafe ? '#ef4444' : '#22c55e'} fontSize={8}>
-                          {' '}({Math.round(agl)} AGL)
+                          {' '}({formatAltitudeFromMeters(agl, altitudeUnit)} AGL)
                         </tspan>
                       )}
                     </text>
@@ -798,7 +804,7 @@ export function AltitudeProfilePanel({ readOnly = false }: AltitudeProfilePanelP
                   fill="var(--text-secondary)"
                   fontSize={9}
                 >
-                  {Math.round(tick)}
+                  {Number(altitudeValueFromMeters(tick, altitudeUnit).toFixed(altitudeUnit === 'km' ? 2 : 0))}
                 </text>
               </g>
             ))}
@@ -822,7 +828,7 @@ export function AltitudeProfilePanel({ readOnly = false }: AltitudeProfilePanelP
               fontSize={10}
               transform="rotate(-90)"
             >
-              Altitude (m)
+              Altitude ({UNIT_LABELS.altitude[altitudeUnit]})
             </text>
 
             {/* Gradient definitions */}

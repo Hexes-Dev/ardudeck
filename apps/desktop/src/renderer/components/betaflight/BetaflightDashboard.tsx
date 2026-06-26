@@ -9,6 +9,8 @@ import { useEffect, useState, useMemo } from 'react';
 import { useMspTelemetryStore, setupMspTelemetryListeners } from '../../stores/msp-telemetry-store';
 import { PRIMARY_CHANNEL_COUNT, getChannelName, reorderChannels } from '../../utils/rc-channel-constants';
 import { useReceiverStore } from '../../stores/receiver-store';
+import { useSettingsStore } from '../../stores/settings-store';
+import { formatAltitudeFromMeters } from '../../../shared/user-units.js';
 
 interface SerialPortInfo {
   path: string;
@@ -37,6 +39,7 @@ export function BetaflightDashboard() {
   const motors = useMspTelemetryStore((s) => s.motors);
   const gps = useMspTelemetryStore((s) => s.gps);
   const lastUpdate = useMspTelemetryStore((s) => s.lastUpdate);
+  const altitudeUnit = useSettingsStore((s) => s.unitPreferences.altitude);
 
   // Setup IPC listeners on mount
   useEffect(() => {
@@ -348,7 +351,7 @@ export function BetaflightDashboard() {
               <div className="space-y-2">
                 <div className="flex justify-between">
                   <span className="text-content-secondary">Altitude</span>
-                  <span className="text-content font-mono">{altitude.altitude.toFixed(1)}m</span>
+                  <span className="text-content font-mono">{formatAltitudeFromMeters(altitude.altitude, altitudeUnit)}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-content-secondary">Vario</span>

@@ -10,8 +10,11 @@ import { useConnectionStore } from '../../stores/connection-store';
 import { mavTypeToTacticalClass, type TacticalVehicleClass } from './tactical-icon-pool';
 import { ScriptInstallModal } from '../script-installer/ScriptInstallModal';
 import {
+  altitudeValueFromMeters,
   distanceValueFromMeters,
+  formatAltitudeFromMeters,
   formatDistanceFromMeters,
+  toMetersFromAltitudeUnit,
   toMetersFromDistanceUnit,
   UNIT_LABELS,
 } from '../../../shared/user-units.js';
@@ -128,6 +131,7 @@ export const MapCommandPopup: React.FC<MapCommandPopupProps> = ({
   const scriptHealth = useScriptHealth();
   const advancedCommandsUnlocked = useSettingsStore(s => s.advancedCommandsUnlocked);
   const distanceUnit = useSettingsStore(s => s.unitPreferences.distance);
+  const altitudeUnit = useSettingsStore(s => s.unitPreferences.altitude);
   const scriptHealthy = scriptHealth.status === 'present';
 
   // Vehicle-class gating. When mavType is unknown (early connect / no link),
@@ -274,6 +278,33 @@ export const MapCommandPopup: React.FC<MapCommandPopupProps> = ({
     [distanceUnit],
   );
   const distanceLabel = UNIT_LABELS.distance[distanceUnit];
+  const altitudePrecision = altitudeUnit === 'km' ? 3 : altitudeUnit === 'm' ? 0 : 1;
+  const altitudeStep = altitudeUnit === 'km' ? 0.01 : 1;
+  const altitudeLabel = UNIT_LABELS.altitude[altitudeUnit];
+  const displayAltitude = useCallback(
+    (meters: number) => Number(altitudeValueFromMeters(meters, altitudeUnit).toFixed(altitudePrecision)),
+    [altitudePrecision, altitudeUnit],
+  );
+  const nativeAltitude = useCallback(
+    (value: number) => toMetersFromAltitudeUnit(value, altitudeUnit),
+    [altitudeUnit],
+  );
+  const setAltitudeFromDisplay = useCallback((value: number) => {
+    if (value === displayAltitude(altitude)) return;
+    setAltitude(nativeAltitude(value));
+  }, [altitude, displayAltitude, nativeAltitude]);
+  const setSpiralTargetAltFromDisplay = useCallback((value: number) => {
+    if (value === displayAltitude(spiralTargetAlt)) return;
+    setSpiralTargetAlt(nativeAltitude(value));
+  }, [displayAltitude, nativeAltitude, spiralTargetAlt]);
+  const setRevealClimbFromDisplay = useCallback((value: number) => {
+    if (value === displayAltitude(revealClimb)) return;
+    setRevealClimb(nativeAltitude(value));
+  }, [displayAltitude, nativeAltitude, revealClimb]);
+  const setClimbRtlAltFromDisplay = useCallback((value: number) => {
+    if (value === displayAltitude(climbRtlAlt)) return;
+    setClimbRtlAlt(nativeAltitude(value));
+  }, [climbRtlAlt, displayAltitude, nativeAltitude]);
 
   // Confirm button styling per tab
   const confirmClass =
@@ -364,8 +395,9 @@ export const MapCommandPopup: React.FC<MapCommandPopupProps> = ({
           luaCmd === 'reveal' || luaCmd === 'strafe'
         ))
       ) && (
-        <Field label="Alt (m)">
-          <NumberInput value={altitude} onChange={setAltitude} min={2} max={5000} step={5} accent="cyan" autoFocus />
+        <Field label="Alt">
+          <NumberInput value={displayAltitude(altitude)} onChange={setAltitudeFromDisplay} min={displayAltitude(2)} max={displayAltitude(5000)} step={altitudeStep} accent="cyan" autoFocus />
+          <Suffix>{altitudeLabel}</Suffix>
         </Field>
       )}
 
@@ -392,9 +424,9 @@ export const MapCommandPopup: React.FC<MapCommandPopupProps> = ({
             <Suffix>{distanceLabel}</Suffix>
           </Field>
           <DirectionToggle direction={direction} onChange={setDirection} />
-          <Field label="To alt (m)">
-            <NumberInput value={spiralTargetAlt} onChange={setSpiralTargetAlt} min={2} max={5000} step={5} accent="violet" />
-            <Suffix>{spiralTargetAlt > currentAltAgl ? `↑ from ${Math.round(currentAltAgl)}m` : `↓ from ${Math.round(currentAltAgl)}m`}</Suffix>
+          <Field label="To alt">
+            <NumberInput value={displayAltitude(spiralTargetAlt)} onChange={setSpiralTargetAltFromDisplay} min={displayAltitude(2)} max={displayAltitude(5000)} step={altitudeStep} accent="violet" />
+            <Suffix>{altitudeLabel} {spiralTargetAlt > currentAltAgl ? `↑ from ${formatAltitudeFromMeters(currentAltAgl, altitudeUnit)}` : `↓ from ${formatAltitudeFromMeters(currentAltAgl, altitudeUnit)}`}</Suffix>
           </Field>
           <Field label="Climb">
             <NumberInput value={climbRate} onChange={setClimbRate} min={0.1} max={10} step={0.5} accent="violet" />
@@ -422,8 +454,8 @@ export const MapCommandPopup: React.FC<MapCommandPopupProps> = ({
             <Suffix>{distanceLabel} back from current pos</Suffix>
           </Field>
           <Field label="Climb">
-            <NumberInput value={revealClimb} onChange={setRevealClimb} min={-100} max={200} step={5} accent="violet" />
-            <Suffix>m {revealClimb >= 0 ? '↑' : '↓'} during pullback</Suffix>
+            <NumberInput value={displayAltitude(revealClimb)} onChange={setRevealClimbFromDisplay} min={displayAltitude(-100)} max={displayAltitude(200)} step={altitudeStep} accent="violet" />
+            <Suffix>{altitudeLabel} {revealClimb >= 0 ? '↑' : '↓'} during pullback</Suffix>
           </Field>
           <Field label="Speed">
             <NumberInput value={revealSpeed} onChange={setRevealSpeed} min={0.5} max={15} step={0.5} accent="violet" />
@@ -460,8 +492,8 @@ export const MapCommandPopup: React.FC<MapCommandPopupProps> = ({
       {tabId === 'lua' && luaCmd === 'climbRtl' && (
         <>
           <Field label="Climb to">
-            <NumberInput value={climbRtlAlt} onChange={setClimbRtlAlt} min={5} max={500} step={5} accent="violet" />
-            <Suffix>m AGL ({climbRtlAlt > currentAltAgl ? `↑ +${Math.round(climbRtlAlt - currentAltAgl)}m` : 'already higher'})</Suffix>
+            <NumberInput value={displayAltitude(climbRtlAlt)} onChange={setClimbRtlAltFromDisplay} min={displayAltitude(5)} max={displayAltitude(500)} step={altitudeStep} accent="violet" />
+            <Suffix>{altitudeLabel} AGL ({climbRtlAlt > currentAltAgl ? `↑ +${formatAltitudeFromMeters(climbRtlAlt - currentAltAgl, altitudeUnit)}` : 'already higher'})</Suffix>
           </Field>
           <div className="mb-2 px-2 py-1 rounded text-[10px] text-violet-200 bg-violet-900/30 border border-violet-700/40">
             Vehicle climbs in place, then FC switches to RTL mode for return.

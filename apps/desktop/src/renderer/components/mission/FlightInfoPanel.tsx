@@ -16,6 +16,7 @@ import { commandHasLocation, hasValidCoordinates } from '../../../shared/mission
 import { estimateDataSizeGb } from '../survey/survey-stats';
 import {
   computeMissionBriefing,
+  formatAltitudeM,
   formatDistanceM,
   formatDurationSec,
   FC_WAYPOINT_SOFT_LIMIT,
@@ -147,6 +148,7 @@ export function FlightInfoPanel() {
   const activeVehicleId = useSettingsStore((s) => s.activeVehicleId);
   const vehicles = useSettingsStore((s) => s.vehicles);
   const distanceUnit = useSettingsStore((s) => s.unitPreferences.distance);
+  const altitudeUnit = useSettingsStore((s) => s.unitPreferences.altitude);
 
   const { cruiseSpeedMs, enduranceSec, vehicleName, isAerial } = useMemo(() => {
     const st = useSettingsStore.getState();
@@ -208,8 +210,8 @@ export function FlightInfoPanel() {
   );
 
   const briefing = useMemo(
-    () => computeMissionBriefing({ located, home, cruiseSpeedMs, enduranceSec, survey, weather, distanceUnit }),
-    [located, home, cruiseSpeedMs, enduranceSec, survey, weather, distanceUnit],
+    () => computeMissionBriefing({ located, home, cruiseSpeedMs, enduranceSec, survey, weather, distanceUnit, altitudeUnit }),
+    [located, home, cruiseSpeedMs, enduranceSec, survey, weather, distanceUnit, altitudeUnit],
   );
 
   if (!isAerial) {
@@ -270,12 +272,16 @@ export function FlightInfoPanel() {
         )}
         <MeterStat
           label="Max altitude"
-          value={`${Math.round(briefing.maxAltM)} m AGL`}
-          detail={`ceiling ${briefing.ceilingM} m`}
+          value={`${formatAltitudeM(briefing.maxAltM, altitudeUnit)} AGL`}
+          detail={`ceiling ${formatAltitudeM(briefing.ceilingM, altitudeUnit)}`}
           pct={altPct}
           tone={altPct > 100 ? 'bg-amber-500/80' : 'bg-blue-500/70'}
         />
-        <Stat label="Total climb" value={`${Math.round(briefing.totalClimbM)} m`} detail={`from ${Math.round(briefing.minAltM)} m lowest`} />
+        <Stat
+          label="Total climb"
+          value={formatAltitudeM(briefing.totalClimbM, altitudeUnit)}
+          detail={`from ${formatAltitudeM(briefing.minAltM, altitudeUnit)} lowest`}
+        />
         <Stat
           label="Waypoints"
           value={briefing.waypointCount.toLocaleString()}

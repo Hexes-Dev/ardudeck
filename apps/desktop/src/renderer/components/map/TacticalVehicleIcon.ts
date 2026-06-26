@@ -30,6 +30,7 @@ export interface TacticalIconDynamics {
   heading: number;
   groundspeed: number;
   altitudeAgl: number;
+  altitudeText: string;
   windDirection?: number;  // degrees - where wind comes FROM
   windSpeed?: number;      // m/s
 }
@@ -156,7 +157,7 @@ export function createTacticalVehicleIcon(opts: TacticalIconOptions): L.DivIcon 
         line-height:1.4;
       ">
         <div>${designationHtml}<span style="color:${modeColor};" class="tvi-mode">${opts.mode}</span></div>
-        <div style="color:#d1d5db;"><span class="tvi-alt">0.0</span><span style="color:#6b7280;">m</span> <span class="tvi-spd">0.0</span><span style="color:#6b7280;">m/s</span></div>
+        <div style="color:#d1d5db;"><span class="tvi-alt">0</span> <span class="tvi-spd">0.0</span><span style="color:#6b7280;">m/s</span></div>
       </div>
     </div>
   `;
@@ -206,7 +207,7 @@ export function updateTacticalIconDOM(
 
   // Info label text
   const altEl = markerElement.querySelector<HTMLElement>('.tvi-alt');
-  if (altEl) altEl.textContent = dynamics.altitudeAgl.toFixed(1);
+  if (altEl) altEl.textContent = dynamics.altitudeText;
 
   const spdEl = markerElement.querySelector<HTMLElement>('.tvi-spd');
   if (spdEl) spdEl.textContent = dynamics.groundspeed.toFixed(1);
