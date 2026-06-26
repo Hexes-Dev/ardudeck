@@ -5,6 +5,7 @@ import { commandHasLocation, hasValidCoordinates, MAV_CMD, type MissionItem } fr
 import { getElevations, interpolatePathPoints } from '../../utils/elevation-api';
 import { AutoAdjustAltitudeDialog } from './AutoAdjustAltitudeDialog';
 import type { PlanResult, PlannerWaypoint } from './terrain-altitude-planner';
+import { formatDistanceFromMeters } from '../../../shared/user-units.js';
 
 // Terrain data point
 interface TerrainPoint {
@@ -97,6 +98,7 @@ export function AltitudeProfilePanel({ readOnly = false }: AltitudeProfilePanelP
   const { missionDefaults } = useSettingsStore();
   const safeAltitudeBuffer = missionDefaults.safeAltitudeBuffer;
   const maxWaypointMarkers = useSettingsStore((s) => s.surveyPerformance.maxWaypointMarkers);
+  const distanceUnit = useSettingsStore((s) => s.unitPreferences.distance);
 
   // Filter to items with location AND valid coordinates. Takeoff uses (0,0)
   // as a "take off from current position" sentinel; including it would make
@@ -537,14 +539,6 @@ export function AltitudeProfilePanel({ readOnly = false }: AltitudeProfilePanelP
     });
   }, [applyTerrainPlan]);
 
-  // Format distance for display
-  const formatDistance = (meters: number): string => {
-    if (meters >= 1000) {
-      return `${(meters / 1000).toFixed(1)}km`;
-    }
-    return `${Math.round(meters)}m`;
-  };
-
   return (
     <div ref={containerRef} data-tour="mission-altitude-panel" className="h-full w-full bg-surface overflow-hidden relative">
       {waypoints.length === 0 ? (
@@ -788,7 +782,7 @@ export function AltitudeProfilePanel({ readOnly = false }: AltitudeProfilePanelP
                   fill="var(--text-secondary)"
                   fontSize={9}
                 >
-                  {formatDistance(tick)}
+                  {formatDistanceFromMeters(tick, distanceUnit)}
                 </text>
               </g>
             ))}

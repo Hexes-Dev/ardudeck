@@ -34,6 +34,13 @@ import { computeItemColors, SEGMENT_COLORS } from '../../utils/mission-segment-c
 import { validateMission } from '../../../shared/mission-validation';
 import { MissionValidationBadge } from './MissionValidationBadge';
 import { useVirtualizer } from '@tanstack/react-virtual';
+import {
+  distanceValueFromMeters,
+  formatDistanceFromMeters,
+  toMetersFromDistanceUnit,
+  UNIT_LABELS,
+  type DistanceUnit,
+} from '../../../shared/user-units.js';
 
 // Helper to get GPS state without subscribing (avoids re-renders)
 function getGpsState() {
@@ -478,8 +485,8 @@ function CommandDropdown({
 // Get description for a waypoint
 // advanced=false: friendly labels for beginners ("Fly here", "Circle here")
 // advanced=true: standard GCS labels ("WP", "Loiter Unlim")
-function getWaypointSummary(wp: MissionItem, advanced: boolean): string {
-  const radiusSuffix = wp.param3 > 0 ? ` (${wp.param3}m radius)` : '';
+function getWaypointSummary(wp: MissionItem, advanced: boolean, distanceUnit: DistanceUnit): string {
+  const radiusSuffix = wp.param3 > 0 ? ` (${formatDistanceFromMeters(wp.param3, distanceUnit)} radius)` : '';
 
   switch (wp.command) {
     // Navigation
@@ -537,7 +544,7 @@ function getWaypointSummary(wp: MissionItem, advanced: boolean): string {
     case MAV_CMD.CONDITION_CHANGE_ALT:
       return `Climb/descend at ${wp.param1} m/s`;
     case MAV_CMD.CONDITION_DISTANCE:
-      return `Wait until ${wp.param1}m from next WP`;
+      return `Wait until ${formatDistanceFromMeters(wp.param1, distanceUnit)} from next WP`;
     case MAV_CMD.CONDITION_YAW: {
       const isRelative = wp.param4 !== 0;
       return isRelative
@@ -547,8 +554,8 @@ function getWaypointSummary(wp: MissionItem, advanced: boolean): string {
 
     // Camera / Gimbal
     case MAV_CMD.DO_SET_CAM_TRIGG_DIST:
-      if (advanced) return wp.param1 > 0 ? `CAM_TRIGG_DIST ${wp.param1}m` : 'CAM_TRIGG off';
-      return wp.param1 > 0 ? `Camera every ${wp.param1}m` : 'Camera trigger off';
+      if (advanced) return wp.param1 > 0 ? `CAM_TRIGG_DIST ${formatDistanceFromMeters(wp.param1, distanceUnit)}` : 'CAM_TRIGG off';
+      return wp.param1 > 0 ? `Camera every ${formatDistanceFromMeters(wp.param1, distanceUnit)}` : 'Camera trigger off';
     case MAV_CMD.DO_DIGICAM_CONTROL:
       if (advanced) return 'DIGICAM_CONTROL';
       return 'Take photo';
@@ -650,7 +657,7 @@ function getWaypointSummary(wp: MissionItem, advanced: boolean): string {
     case MAV_CMD.SET_YAW_SPEED:
       return `Yaw ${wp.param1} at ${wp.param2} deg/s`;
     case MAV_CMD.DO_SET_RESUME_REPEAT_DIST:
-      return `Resume repeat ${wp.param1}m`;
+      return `Resume repeat ${formatDistanceFromMeters(wp.param1, distanceUnit)}`;
     case MAV_CMD.DO_AUX_FUNCTION:
       return `Aux function ${wp.param1}`;
 
@@ -659,16 +666,19 @@ function getWaypointSummary(wp: MissionItem, advanced: boolean): string {
   }
 }
 
-// Get the parameters config for each command type
-function getCommandParams(cmd: number): Array<{
+type CommandParamConfig = {
   key: keyof MissionItem;
   label: string;
   unit: string;
+  unitKind?: 'distance' | 'altitude' | 'speed' | 'verticalSpeed';
   min?: number;
   max?: number;
   step?: number;
   show: boolean;
-}> {
+};
+
+// Get the parameters config for each command type
+function getCommandParams(cmd: number): CommandParamConfig[] {
   const baseLocation = [
     { key: 'altitude' as const, label: 'Altitude', unit: 'm', min: 0, max: 1000, step: 5, show: true },
   ];
@@ -683,7 +693,7 @@ function getCommandParams(cmd: number): Array<{
       return [
         ...baseLocation,
         { key: 'param1' as const, label: 'Wait Time', unit: 's', min: 0, max: 300, step: 1, show: true },
-        { key: 'param2' as const, label: 'Acceptance Radius', unit: 'm', min: 0, max: 50, step: 1, show: false },
+        { key: 'param2' as const, label: 'Acceptance Radius', unit: 'm', unitKind: 'distance', min: 0, max: 50, step: 1, show: false },
       ];
     case MAV_CMD.NAV_SPLINE_WAYPOINT:
       return [
@@ -693,19 +703,19 @@ function getCommandParams(cmd: number): Array<{
     case MAV_CMD.NAV_LOITER_UNLIM:
       return [
         ...baseLocation,
-        { key: 'param3' as const, label: 'Radius', unit: 'm', min: 10, max: 500, step: 10, show: true },
+        { key: 'param3' as const, label: 'Radius', unit: 'm', unitKind: 'distance', min: 10, max: 500, step: 10, show: true },
       ];
     case MAV_CMD.NAV_LOITER_TIME:
       return [
         ...baseLocation,
         { key: 'param1' as const, label: 'Duration', unit: 's', min: 1, max: 600, step: 5, show: true },
-        { key: 'param3' as const, label: 'Radius', unit: 'm', min: 10, max: 500, step: 10, show: true },
+        { key: 'param3' as const, label: 'Radius', unit: 'm', unitKind: 'distance', min: 10, max: 500, step: 10, show: true },
       ];
     case MAV_CMD.NAV_LOITER_TURNS:
       return [
         ...baseLocation,
         { key: 'param1' as const, label: 'Number of Turns', unit: '', min: 1, max: 100, step: 1, show: true },
-        { key: 'param3' as const, label: 'Radius', unit: 'm', min: 10, max: 500, step: 10, show: true },
+        { key: 'param3' as const, label: 'Radius', unit: 'm', unitKind: 'distance', min: 10, max: 500, step: 10, show: true },
       ];
     case MAV_CMD.NAV_LAND:
       return [
@@ -724,7 +734,7 @@ function getCommandParams(cmd: number): Array<{
     case MAV_CMD.NAV_LOITER_TO_ALT:
       return [
         ...baseLocation,
-        { key: 'param3' as const, label: 'Radius', unit: 'm', min: 10, max: 500, step: 10, show: true },
+        { key: 'param3' as const, label: 'Radius', unit: 'm', unitKind: 'distance', min: 10, max: 500, step: 10, show: true },
       ];
     case MAV_CMD.NAV_VTOL_TAKEOFF:
       return [
@@ -750,7 +760,7 @@ function getCommandParams(cmd: number): Array<{
       ];
     case MAV_CMD.CONDITION_DISTANCE:
       return [
-        { key: 'param1' as const, label: 'Distance', unit: 'm', min: 0, max: 10000, step: 10, show: true },
+        { key: 'param1' as const, label: 'Distance', unit: 'm', unitKind: 'distance', min: 0, max: 10000, step: 10, show: true },
       ];
     case MAV_CMD.CONDITION_YAW:
       return [
@@ -766,7 +776,7 @@ function getCommandParams(cmd: number): Array<{
       ];
     case MAV_CMD.DO_SET_CAM_TRIGG_DIST:
       return [
-        { key: 'param1' as const, label: 'Distance', unit: 'm', min: 0, max: 1000, step: 1, show: true },
+        { key: 'param1' as const, label: 'Distance', unit: 'm', unitKind: 'distance', min: 0, max: 1000, step: 1, show: true },
       ];
     case MAV_CMD.DO_SET_SERVO:
       return [
@@ -902,7 +912,7 @@ function getCommandParams(cmd: number): Array<{
       ];
     case MAV_CMD.DO_SET_RESUME_REPEAT_DIST:
       return [
-        { key: 'param1' as const, label: 'Distance', unit: 'm', min: 0, max: 10000, step: 10, show: true },
+        { key: 'param1' as const, label: 'Distance', unit: 'm', unitKind: 'distance', min: 0, max: 10000, step: 10, show: true },
       ];
     case MAV_CMD.DO_ENGINE_CONTROL:
       return [
@@ -972,14 +982,123 @@ export function WaypointTablePanel({ readOnly = false }: WaypointTablePanelProps
  * overflow menu (delete). Selective-upload checkbox + edit-survey shortcut
  * land in later steps.
  */
-function formatBlockDistance(m: number): string {
-  return m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${Math.round(m)} m`;
+function formatBlockDistance(m: number, unit: DistanceUnit): string {
+  return formatDistanceFromMeters(m, unit);
 }
 
 function formatBlockDuration(s: number): string {
   const mins = Math.floor(s / 60);
   const secs = Math.round(s % 60);
   return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+}
+
+function displayParamValue(value: number, param: CommandParamConfig, distanceUnit: DistanceUnit): number {
+  if (param.unitKind === 'distance') return distanceValueFromMeters(value, distanceUnit);
+  return value;
+}
+
+function nativeParamValue(value: number, param: CommandParamConfig, distanceUnit: DistanceUnit): number {
+  if (param.unitKind === 'distance') return toMetersFromDistanceUnit(value, distanceUnit);
+  return value;
+}
+
+function displayParamBound(value: number | undefined, param: CommandParamConfig, distanceUnit: DistanceUnit): number | undefined {
+  if (value === undefined) return undefined;
+  return displayParamValue(value, param, distanceUnit);
+}
+
+function displayParamUnit(param: CommandParamConfig, distanceUnit: DistanceUnit): string {
+  if (param.unitKind === 'distance') return UNIT_LABELS.distance[distanceUnit];
+  return param.unit;
+}
+
+function clampNumber(value: number, min?: number, max?: number): number {
+  let next = value;
+  if (min !== undefined) next = Math.max(min, next);
+  if (max !== undefined) next = Math.min(max, next);
+  return next;
+}
+
+function isValidDisplayNumber(value: number, min?: number, max?: number): boolean {
+  return Number.isFinite(value) &&
+    (min === undefined || value >= min) &&
+    (max === undefined || value <= max);
+}
+
+function DistanceParamInput({
+  valueMeters,
+  param,
+  distanceUnit,
+  onCommit,
+}: {
+  valueMeters: number;
+  param: CommandParamConfig;
+  distanceUnit: DistanceUnit;
+  onCommit: (nativeMeters: number) => void;
+}) {
+  const displayValue = displayParamValue(valueMeters, param, distanceUnit);
+  const min = displayParamBound(param.min, param, distanceUnit);
+  const max = displayParamBound(param.max, param, distanceUnit);
+  const step = displayParamBound(param.step, param, distanceUnit);
+  const [draft, setDraft] = useState(() => String(displayValue));
+  const [focused, setFocused] = useState(false);
+  const skipBlurCommitRef = useRef(false);
+
+  useEffect(() => {
+    if (!focused) setDraft(String(displayValue));
+  }, [displayValue, focused]);
+
+  const commitDisplayValue = useCallback((display: number) => {
+    const clamped = clampNumber(display, min, max);
+    onCommit(nativeParamValue(clamped, param, distanceUnit));
+    setDraft(String(clamped));
+  }, [distanceUnit, max, min, onCommit, param]);
+
+  const resetDraft = useCallback(() => {
+    setDraft(String(displayParamValue(valueMeters, param, distanceUnit)));
+  }, [distanceUnit, param, valueMeters]);
+
+  return (
+    <input
+      type="number"
+      value={draft}
+      onFocus={() => setFocused(true)}
+      onChange={(e) => {
+        const nextDraft = e.target.value;
+        setDraft(nextDraft);
+        if (nextDraft.trim() === '') return;
+        const parsed = Number(nextDraft);
+        if (!isValidDisplayNumber(parsed, min, max)) return;
+        onCommit(nativeParamValue(parsed, param, distanceUnit));
+      }}
+      onBlur={() => {
+        setFocused(false);
+        if (skipBlurCommitRef.current) {
+          skipBlurCommitRef.current = false;
+          return;
+        }
+        const parsed = Number(draft);
+        if (draft.trim() === '' || !Number.isFinite(parsed)) {
+          resetDraft();
+          return;
+        }
+        commitDisplayValue(parsed);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.currentTarget.blur();
+        } else if (e.key === 'Escape') {
+          skipBlurCommitRef.current = true;
+          resetDraft();
+          e.currentTarget.blur();
+        }
+      }}
+      min={min}
+      max={max}
+      step={step}
+      className="w-full bg-surface-input text-content text-sm px-2 py-1.5 rounded border border-default focus:border-blue-500 focus:outline-none font-mono"
+    />
+  );
 }
 
 function GroupHeaderRow({
@@ -1000,6 +1119,7 @@ function GroupHeaderRow({
   onDelete,
   onRegenerate,
   onEdit,
+  distanceUnit,
 }: {
   group: Group;
   count: number;
@@ -1032,6 +1152,7 @@ function GroupHeaderRow({
   /** Re-open the survey panel and load this group's polygon + config back
       into the draft for live editing. Survey groups only. */
   onEdit?: () => void;
+  distanceUnit: DistanceUnit;
 }) {
   const isStaleSurvey = isSurveyGroup(group) && isSurveyGroupStale(group);
   const [editing, setEditing] = useState(false);
@@ -1298,7 +1419,7 @@ function GroupHeaderRow({
         <span className="uppercase tracking-wide">{group.kind}</span>
         {stats && stats.distanceM > 0 && (
           <>
-            <span>· {formatBlockDistance(stats.distanceM)}</span>
+            <span>· {formatBlockDistance(stats.distanceM, distanceUnit)}</span>
             {stats.timeS > 0 && <span>· {formatBlockDuration(stats.timeS)}</span>}
             {stats.gsd != null && stats.gsd > 0 && <span>· {stats.gsd.toFixed(1)} cm/px</span>}
           </>
@@ -1353,6 +1474,7 @@ function WaypointListContent({ readOnly = false }: { readOnly?: boolean }) {
 
   const advancedLabels = useSettingsStore((s) => s.missionDefaults.advancedMissionLabels);
   const settingsFirmware = useSettingsStore((s) => s.missionDefaults.missionFirmware);
+  const distanceUnit = useSettingsStore((s) => s.unitPreferences.distance);
   const connectionState = useConnectionStore((s) => s.connectionState);
 
   const showSegmentColors = useSettingsStore((s) => s.missionDefaults.showSegmentColors);
@@ -1840,6 +1962,7 @@ function WaypointListContent({ readOnly = false }: { readOnly?: boolean }) {
                     onRename={(name) => renameGroup(group.id, name)}
                     onSetColor={(color) => setGroupColor(group.id, color)}
                     onDelete={() => deleteGroup(group.id)}
+                    distanceUnit={distanceUnit}
                     onRegenerate={
                       isSurveyGroup(group)
                         ? () => regenerateSurveyGroup(group.id)
@@ -1985,7 +2108,7 @@ function WaypointListContent({ readOnly = false }: { readOnly?: boolean }) {
                     <div className={`flex items-center gap-1.5 ${
                       isChild ? 'text-xs text-content-secondary' : 'text-sm text-content'
                     }`}>
-                      <span className="truncate">{getWaypointSummary(wp, advancedLabels)}</span>
+                      <span className="truncate">{getWaypointSummary(wp, advancedLabels, distanceUnit)}</span>
                       {wp.command === MAV_CMD.CONDITION_YAW && wp.param3 !== 0 && (
                         <span className={`px-1 py-0 text-[9px] font-bold rounded shrink-0 ${
                           wp.param3 < 0
@@ -2064,22 +2187,34 @@ function WaypointListContent({ readOnly = false }: { readOnly?: boolean }) {
           <div className="grid grid-cols-2 gap-2">
             {getCommandParams(selectedWaypoint.command)
               .filter(p => p.show)
-              .map((param) => (
-                <div key={param.key}>
-                  <label className="block text-[11px] text-content-secondary mb-1">
-                    {param.label} {param.unit && <span className="text-content-tertiary">({param.unit})</span>}
-                  </label>
-                  <input
-                    type="number"
-                    value={selectedWaypoint[param.key] as number}
-                    onChange={(e) => handleParamChange(selectedWaypoint.seq, param.key, Number(e.target.value))}
-                    min={param.min}
-                    max={param.max}
-                    step={param.step}
-                    className="w-full bg-surface-input text-content text-sm px-2 py-1.5 rounded border border-default focus:border-blue-500 focus:outline-none font-mono"
-                  />
-                </div>
-              ))}
+              .map((param) => {
+                const displayUnit = displayParamUnit(param, distanceUnit);
+                return (
+                  <div key={param.key}>
+                    <label className="block text-[11px] text-content-secondary mb-1">
+                      {param.label} {displayUnit && <span className="text-content-tertiary">({displayUnit})</span>}
+                    </label>
+                    {param.unitKind === 'distance' ? (
+                      <DistanceParamInput
+                        valueMeters={selectedWaypoint[param.key] as number}
+                        param={param}
+                        distanceUnit={distanceUnit}
+                        onCommit={(nativeMeters) => handleParamChange(selectedWaypoint.seq, param.key, nativeMeters)}
+                      />
+                    ) : (
+                      <input
+                        type="number"
+                        value={selectedWaypoint[param.key] as number}
+                        onChange={(e) => handleParamChange(selectedWaypoint.seq, param.key, Number(e.target.value))}
+                        min={param.min}
+                        max={param.max}
+                        step={param.step}
+                        className="w-full bg-surface-input text-content text-sm px-2 py-1.5 rounded border border-default focus:border-blue-500 focus:outline-none font-mono"
+                      />
+                    )}
+                  </div>
+                );
+              })}
 
             {/* Location fields for commands that have them */}
             {commandHasLocation(selectedWaypoint.command) && (

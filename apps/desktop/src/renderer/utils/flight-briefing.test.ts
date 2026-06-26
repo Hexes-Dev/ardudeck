@@ -19,10 +19,14 @@ const base: Omit<BriefingInput, 'located'> = {
 };
 
 describe('formatters', () => {
-  it('formats distance with km/m thresholds', () => {
+  it('formats distance using the default distance unit without autoscaling', () => {
     expect(formatDistanceM(450)).toBe('450 m');
-    expect(formatDistanceM(2500)).toBe('2.5 km');
-    expect(formatDistanceM(42000)).toBe('42 km');
+    expect(formatDistanceM(2500)).toBe('2500 m');
+  });
+
+  it('formats distance using an explicit distance unit', () => {
+    expect(formatDistanceM(2500, 'km')).toBe('2.50 km');
+    expect(formatDistanceM(1609.344, 'mi')).toBe('1.00 mi');
   });
 
   it('formats duration in min and h/min', () => {
@@ -73,6 +77,19 @@ describe('computeMissionBriefing', () => {
     const b = computeMissionBriefing({ ...base, located: legPoints(3) });
     expect(b.checks.length).toBeGreaterThan(0);
     expect(b.checks.every((c) => c.severity === 'info')).toBe(true);
+  });
+
+  it('formats distance checks using the selected distance unit while keeping native meters', () => {
+    const located = legPoints(3);
+    const defaultBriefing = computeMissionBriefing({ ...base, located });
+    const mileBriefing = computeMissionBriefing({ ...base, located, distanceUnit: 'mi' });
+
+    expect(defaultBriefing.distanceM).toBeCloseTo(mileBriefing.distanceM);
+    expect(defaultBriefing.maxFromHomeM).toBeCloseTo(mileBriefing.maxFromHomeM);
+    expect(defaultBriefing.checks.find((c) => c.id === 'distance')?.value).toBe('2224 m');
+    expect(defaultBriefing.checks.find((c) => c.id === 'maxFromHome')?.value).toBe('2224 m');
+    expect(mileBriefing.checks.find((c) => c.id === 'distance')?.value).toBe('1.38 mi');
+    expect(mileBriefing.checks.find((c) => c.id === 'maxFromHome')?.value).toBe('1.38 mi');
   });
 
   it('reports altitude range, total climb and waypoint count', () => {

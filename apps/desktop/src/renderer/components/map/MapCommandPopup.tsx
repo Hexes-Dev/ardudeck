@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   RotateCw, Tornado, Eye, Film, MoveHorizontal, ArrowUpFromLine,
 } from 'lucide-react';
@@ -9,6 +9,12 @@ import { useSettingsStore } from '../../stores/settings-store';
 import { useConnectionStore } from '../../stores/connection-store';
 import { mavTypeToTacticalClass, type TacticalVehicleClass } from './tactical-icon-pool';
 import { ScriptInstallModal } from '../script-installer/ScriptInstallModal';
+import {
+  distanceValueFromMeters,
+  formatDistanceFromMeters,
+  toMetersFromDistanceUnit,
+  UNIT_LABELS,
+} from '../../../shared/user-units.js';
 
 interface MapCommandPopupProps {
   lat: number;
@@ -121,6 +127,7 @@ export const MapCommandPopup: React.FC<MapCommandPopupProps> = ({
 
   const scriptHealth = useScriptHealth();
   const advancedCommandsUnlocked = useSettingsStore(s => s.advancedCommandsUnlocked);
+  const distanceUnit = useSettingsStore(s => s.unitPreferences.distance);
   const scriptHealthy = scriptHealth.status === 'present';
 
   // Vehicle-class gating. When mavType is unknown (early connect / no link),
@@ -253,8 +260,20 @@ export const MapCommandPopup: React.FC<MapCommandPopupProps> = ({
     return () => window.removeEventListener('keydown', handleKey);
   }, [onCancel, handleConfirm]);
 
-  const formatDistance = (d: number) =>
-    d >= 1000 ? `${(d / 1000).toFixed(1)}km` : `${d.toFixed(0)}m`;
+  const distanceStep = distanceUnit === 'm' || distanceUnit === 'ft' ? 5 : 0.01;
+  const displayDistance = useCallback(
+    (meters: number) => distanceValueFromMeters(meters, distanceUnit),
+    [distanceUnit],
+  );
+  const nativeDistance = useCallback(
+    (value: number) => toMetersFromDistanceUnit(value, distanceUnit),
+    [distanceUnit],
+  );
+  const displayDistanceBound = useCallback(
+    (meters: number) => distanceValueFromMeters(meters, distanceUnit),
+    [distanceUnit],
+  );
+  const distanceLabel = UNIT_LABELS.distance[distanceUnit];
 
   // Confirm button styling per tab
   const confirmClass =
@@ -333,7 +352,7 @@ export const MapCommandPopup: React.FC<MapCommandPopupProps> = ({
           {lat.toFixed(6)}, {lon.toFixed(6)}
         </span>
         <span className="text-[10px] text-gray-500 shrink-0">
-          <span className="font-mono text-gray-300">{formatDistance(distanceMeters)}</span> away
+          <span className="font-mono text-gray-300">{formatDistanceFromMeters(distanceMeters, distanceUnit)}</span> away
         </span>
       </div>
 
@@ -354,8 +373,8 @@ export const MapCommandPopup: React.FC<MapCommandPopupProps> = ({
       {tabId === 'lua' && luaCmd === 'orbit' && (
         <>
           <Field label="Radius">
-            <NumberInput value={radius} onChange={setRadius} min={5} max={1000} step={5} accent="violet" />
-            <Suffix>m</Suffix>
+            <NumberInput value={displayDistance(radius)} onChange={(n) => setRadius(nativeDistance(n))} min={displayDistanceBound(5)} max={displayDistanceBound(1000)} step={distanceStep} accent="violet" />
+            <Suffix>{distanceLabel}</Suffix>
           </Field>
           <DirectionToggle direction={direction} onChange={setDirection} />
           <Field label="Orbits">
@@ -369,8 +388,8 @@ export const MapCommandPopup: React.FC<MapCommandPopupProps> = ({
       {tabId === 'lua' && luaCmd === 'spiral' && (
         <>
           <Field label="Radius">
-            <NumberInput value={radius} onChange={setRadius} min={5} max={1000} step={5} accent="violet" />
-            <Suffix>m</Suffix>
+            <NumberInput value={displayDistance(radius)} onChange={(n) => setRadius(nativeDistance(n))} min={displayDistanceBound(5)} max={displayDistanceBound(1000)} step={distanceStep} accent="violet" />
+            <Suffix>{distanceLabel}</Suffix>
           </Field>
           <DirectionToggle direction={direction} onChange={setDirection} />
           <Field label="To alt (m)">
@@ -399,8 +418,8 @@ export const MapCommandPopup: React.FC<MapCommandPopupProps> = ({
       {tabId === 'lua' && luaCmd === 'reveal' && (
         <>
           <Field label="Pullback">
-            <NumberInput value={revealPullback} onChange={setRevealPullback} min={5} max={500} step={5} accent="violet" />
-            <Suffix>m back from current pos</Suffix>
+            <NumberInput value={displayDistance(revealPullback)} onChange={(n) => setRevealPullback(nativeDistance(n))} min={displayDistanceBound(5)} max={displayDistanceBound(500)} step={distanceStep} accent="violet" />
+            <Suffix>{distanceLabel} back from current pos</Suffix>
           </Field>
           <Field label="Climb">
             <NumberInput value={revealClimb} onChange={setRevealClimb} min={-100} max={200} step={5} accent="violet" />
@@ -420,12 +439,12 @@ export const MapCommandPopup: React.FC<MapCommandPopupProps> = ({
       {tabId === 'lua' && luaCmd === 'strafe' && (
         <>
           <Field label="Offset">
-            <NumberInput value={strafeOffset} onChange={setStrafeOffset} min={2} max={300} step={5} accent="violet" />
-            <Suffix>m clearance from target</Suffix>
+            <NumberInput value={displayDistance(strafeOffset)} onChange={(n) => setStrafeOffset(nativeDistance(n))} min={displayDistanceBound(2)} max={displayDistanceBound(300)} step={distanceStep} accent="violet" />
+            <Suffix>{distanceLabel} clearance from target</Suffix>
           </Field>
           <Field label="Length">
-            <NumberInput value={strafeLength} onChange={setStrafeLength} min={5} max={500} step={5} accent="violet" />
-            <Suffix>m total dolly distance</Suffix>
+            <NumberInput value={displayDistance(strafeLength)} onChange={(n) => setStrafeLength(nativeDistance(n))} min={displayDistanceBound(5)} max={displayDistanceBound(500)} step={distanceStep} accent="violet" />
+            <Suffix>{distanceLabel} total dolly distance</Suffix>
           </Field>
           <Field label="Speed">
             <NumberInput value={strafeSpeed} onChange={setStrafeSpeed} min={0.5} max={15} step={0.5} accent="violet" />
@@ -550,11 +569,57 @@ function NumberInput({
   autoFocus?: boolean;
 }) {
   const focusBorder = accent === 'cyan' ? 'focus:border-cyan-400' : 'focus:border-violet-400';
+  const [draft, setDraft] = useState(() => String(value));
+  const [focused, setFocused] = useState(false);
+  const skipBlurCommitRef = useRef(false);
+
+  useEffect(() => {
+    if (!focused) setDraft(String(value));
+  }, [focused, value]);
+
+  const clamp = useCallback((n: number) => Math.min(max, Math.max(min, n)), [max, min]);
+  const resetDraft = useCallback(() => setDraft(String(value)), [value]);
+  const commit = useCallback((n: number) => {
+    const clamped = clamp(n);
+    onChange(clamped);
+    setDraft(String(clamped));
+  }, [clamp, onChange]);
+
   return (
     <input
       type="number"
-      value={value}
-      onChange={(e) => onChange(Number(e.target.value))}
+      value={draft}
+      onFocus={() => setFocused(true)}
+      onChange={(e) => {
+        const nextDraft = e.target.value;
+        setDraft(nextDraft);
+        if (nextDraft.trim() === '') return;
+        const parsed = Number(nextDraft);
+        if (!Number.isFinite(parsed) || parsed < min || parsed > max) return;
+        onChange(parsed);
+      }}
+      onBlur={() => {
+        setFocused(false);
+        if (skipBlurCommitRef.current) {
+          skipBlurCommitRef.current = false;
+          return;
+        }
+        const parsed = Number(draft);
+        if (draft.trim() === '' || !Number.isFinite(parsed)) {
+          resetDraft();
+          return;
+        }
+        commit(parsed);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.currentTarget.blur();
+        } else if (e.key === 'Escape') {
+          skipBlurCommitRef.current = true;
+          resetDraft();
+          e.currentTarget.blur();
+        }
+      }}
       min={min}
       max={max}
       step={step}

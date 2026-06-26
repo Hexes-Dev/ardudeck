@@ -146,6 +146,7 @@ export function FlightInfoPanel() {
   // Recompute endurance/cruise only when the active vehicle profile changes.
   const activeVehicleId = useSettingsStore((s) => s.activeVehicleId);
   const vehicles = useSettingsStore((s) => s.vehicles);
+  const distanceUnit = useSettingsStore((s) => s.unitPreferences.distance);
 
   const { cruiseSpeedMs, enduranceSec, vehicleName, isAerial } = useMemo(() => {
     const st = useSettingsStore.getState();
@@ -207,8 +208,8 @@ export function FlightInfoPanel() {
   );
 
   const briefing = useMemo(
-    () => computeMissionBriefing({ located, home, cruiseSpeedMs, enduranceSec, survey, weather }),
-    [located, home, cruiseSpeedMs, enduranceSec, survey, weather],
+    () => computeMissionBriefing({ located, home, cruiseSpeedMs, enduranceSec, survey, weather, distanceUnit }),
+    [located, home, cruiseSpeedMs, enduranceSec, survey, weather, distanceUnit],
   );
 
   if (!isAerial) {
@@ -263,9 +264,9 @@ export function FlightInfoPanel() {
 
       {/* Route */}
       <Section icon={<Ruler className={ICON} />} title="Route">
-        <Stat label="Total distance" value={formatDistanceM(briefing.distanceM)} />
+        <Stat label="Total distance" value={formatDistanceM(briefing.distanceM, distanceUnit)} />
         {homePosition && (
-          <Stat label="Max from home" value={formatDistanceM(briefing.maxFromHomeM)} />
+          <Stat label="Max from home" value={formatDistanceM(briefing.maxFromHomeM, distanceUnit)} />
         )}
         <MeterStat
           label="Max altitude"
