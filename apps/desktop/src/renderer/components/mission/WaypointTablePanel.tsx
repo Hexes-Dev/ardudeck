@@ -35,25 +35,23 @@ import { validateMission } from '../../../shared/mission-validation';
 import { MissionValidationBadge } from './MissionValidationBadge';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import {
-  altitudeValueFromMeters,
-  distanceValueFromMeters,
   formatAltitudeFromMeters,
   formatDistanceFromMeters,
   formatSpeedFromMetersPerSecond,
   formatVerticalSpeedFromMetersPerSecond,
-  speedValueFromMetersPerSecond,
-  toMetersPerSecondFromSpeedUnit,
-  toMetersPerSecondFromVerticalSpeedUnit,
-  toMetersFromAltitudeUnit,
-  toMetersFromDistanceUnit,
   UNIT_LABELS,
-  UNIT_PRECISION,
-  verticalSpeedValueFromMetersPerSecond,
   type AltitudeUnit,
   type DistanceUnit,
   type SpeedUnit,
   type VerticalSpeedUnit,
 } from '../../../shared/user-units.js';
+import {
+  waypointDisplayBound,
+  waypointDisplayStep,
+  waypointDisplayValue,
+  waypointNativeValue,
+  type WaypointUnitContext,
+} from './waypoint-unit-format';
 
 // Helper to get GPS state without subscribing (avoids re-renders)
 function getGpsState() {
@@ -698,15 +696,15 @@ type CommandParamConfig = {
 };
 
 // Get the parameters config for each command type
-function getCommandParams(cmd: number): CommandParamConfig[] {
+export function getCommandParams(cmd: number): CommandParamConfig[] {
   const baseLocation: CommandParamConfig[] = [
-    { key: 'altitude' as const, label: 'Altitude', unit: 'm', unitKind: 'altitude', min: 0, max: 1000, step: 5, show: true },
+    { key: 'altitude' as const, label: 'Altitude', unit: 'm', unitKind: 'altitude', min: 0, step: 5, show: true },
   ];
 
   switch (cmd) {
     case MAV_CMD.NAV_TAKEOFF:
       return [
-        { key: 'altitude' as const, label: 'Target Altitude', unit: 'm', unitKind: 'altitude', min: 1, max: 500, step: 5, show: true },
+        { key: 'altitude' as const, label: 'Target Altitude', unit: 'm', unitKind: 'altitude', min: 1, step: 5, show: true },
         { key: 'param1' as const, label: 'Pitch Angle', unit: '°', min: 0, max: 90, step: 5, show: true },
       ];
     case MAV_CMD.NAV_WAYPOINT:
@@ -758,7 +756,7 @@ function getCommandParams(cmd: number): CommandParamConfig[] {
       ];
     case MAV_CMD.NAV_VTOL_TAKEOFF:
       return [
-        { key: 'altitude' as const, label: 'Target Altitude', unit: 'm', unitKind: 'altitude', min: 1, max: 500, step: 5, show: true },
+        { key: 'altitude' as const, label: 'Target Altitude', unit: 'm', unitKind: 'altitude', min: 1, step: 5, show: true },
       ];
     case MAV_CMD.NAV_VTOL_LAND:
       return [
@@ -776,7 +774,7 @@ function getCommandParams(cmd: number): CommandParamConfig[] {
     case MAV_CMD.CONDITION_CHANGE_ALT:
       return [
         { key: 'param1' as const, label: 'Rate', unit: 'm/s', unitKind: 'verticalSpeed', min: 0, max: 10, step: 0.5, show: true },
-        { key: 'altitude' as const, label: 'Target Altitude', unit: 'm', unitKind: 'altitude', min: 0, max: 1000, step: 5, show: true },
+        { key: 'altitude' as const, label: 'Target Altitude', unit: 'm', unitKind: 'altitude', min: 0, step: 5, show: true },
       ];
     case MAV_CMD.CONDITION_DISTANCE:
       return [
@@ -843,7 +841,7 @@ function getCommandParams(cmd: number): CommandParamConfig[] {
       ];
     case MAV_CMD.DO_CHANGE_ALTITUDE:
       return [
-        { key: 'param1' as const, label: 'Altitude', unit: 'm', unitKind: 'altitude', min: 0, max: 1000, step: 5, show: true },
+        { key: 'param1' as const, label: 'Altitude', unit: 'm', unitKind: 'altitude', min: 0, step: 5, show: true },
         { key: 'param2' as const, label: 'Frame', unit: '', min: 0, max: 10, step: 1, show: false },
       ];
     // New commands
@@ -853,7 +851,7 @@ function getCommandParams(cmd: number): CommandParamConfig[] {
       ];
     case MAV_CMD.NAV_ALTITUDE_WAIT:
       return [
-        { key: 'altitude' as const, label: 'Target Altitude', unit: 'm', unitKind: 'altitude', min: 0, max: 1000, step: 5, show: true },
+        { key: 'altitude' as const, label: 'Target Altitude', unit: 'm', unitKind: 'altitude', min: 0, step: 5, show: true },
         { key: 'param1' as const, label: 'Climb Rate', unit: 'm/s', unitKind: 'verticalSpeed', min: 0, max: 10, step: 0.5, show: true },
       ];
     case MAV_CMD.NAV_SCRIPT_TIME:
@@ -948,7 +946,7 @@ function getCommandParams(cmd: number): CommandParamConfig[] {
       ];
     case MAV_CMD.NAV_CONTINUE_AND_CHANGE_ALT:
       return [
-        { key: 'altitude' as const, label: 'Target Altitude', unit: 'm', unitKind: 'altitude', min: 0, max: 1000, step: 5, show: true },
+        { key: 'altitude' as const, label: 'Target Altitude', unit: 'm', unitKind: 'altitude', min: 0, step: 5, show: true },
       ];
     default:
       return baseLocation;
@@ -1015,57 +1013,35 @@ function formatBlockDuration(s: number): string {
 function displayParamValue(
   value: number,
   param: CommandParamConfig,
-  distanceUnit: DistanceUnit,
-  altitudeUnit: AltitudeUnit,
-  speedUnit: SpeedUnit,
-  verticalSpeedUnit: VerticalSpeedUnit,
+  unitContext: WaypointUnitContext,
 ): number {
-  if (param.unitKind === 'distance') return distanceValueFromMeters(value, distanceUnit);
-  if (param.unitKind === 'altitude') return altitudeValueFromMeters(value, altitudeUnit);
-  if (param.unitKind === 'speed') return Number(speedValueFromMetersPerSecond(value, speedUnit).toFixed(UNIT_PRECISION.speed[speedUnit]));
-  if (param.unitKind === 'verticalSpeed') return Number(verticalSpeedValueFromMetersPerSecond(value, verticalSpeedUnit).toFixed(UNIT_PRECISION.verticalSpeed[verticalSpeedUnit]));
-  return value;
+  return param.unitKind ? waypointDisplayValue(value, param.unitKind, unitContext) : value;
 }
 
 function nativeParamValue(
   value: number,
   param: CommandParamConfig,
-  distanceUnit: DistanceUnit,
-  altitudeUnit: AltitudeUnit,
-  speedUnit: SpeedUnit,
-  verticalSpeedUnit: VerticalSpeedUnit,
+  unitContext: WaypointUnitContext,
 ): number {
-  if (param.unitKind === 'distance') return toMetersFromDistanceUnit(value, distanceUnit);
-  if (param.unitKind === 'altitude') return toMetersFromAltitudeUnit(value, altitudeUnit);
-  if (param.unitKind === 'speed') return toMetersPerSecondFromSpeedUnit(value, speedUnit);
-  if (param.unitKind === 'verticalSpeed') return toMetersPerSecondFromVerticalSpeedUnit(value, verticalSpeedUnit);
-  return value;
+  return param.unitKind ? waypointNativeValue(value, param.unitKind, unitContext) : value;
 }
 
 function displayParamBound(
   value: number | undefined,
   param: CommandParamConfig,
-  distanceUnit: DistanceUnit,
-  altitudeUnit: AltitudeUnit,
-  speedUnit: SpeedUnit,
-  verticalSpeedUnit: VerticalSpeedUnit,
+  unitContext: WaypointUnitContext,
 ): number | undefined {
   if (value === undefined) return undefined;
-  return displayParamValue(value, param, distanceUnit, altitudeUnit, speedUnit, verticalSpeedUnit);
+  return param.unitKind ? waypointDisplayBound(value, param.unitKind, unitContext) : value;
 }
 
 function displayParamStep(
   value: number | undefined,
   param: CommandParamConfig,
-  distanceUnit: DistanceUnit,
-  altitudeUnit: AltitudeUnit,
-  speedUnit: SpeedUnit,
-  verticalSpeedUnit: VerticalSpeedUnit,
+  unitContext: WaypointUnitContext,
 ): number | undefined {
   if (value === undefined) return undefined;
-  if (param.unitKind === 'speed') return 1 / (10 ** UNIT_PRECISION.speed[speedUnit]);
-  if (param.unitKind === 'verticalSpeed') return 1 / (10 ** UNIT_PRECISION.verticalSpeed[verticalSpeedUnit]);
-  return displayParamBound(value, param, distanceUnit, altitudeUnit, speedUnit, verticalSpeedUnit);
+  return param.unitKind ? waypointDisplayStep(param.unitKind, unitContext) : value;
 }
 
 function displayParamUnit(
@@ -1080,13 +1056,6 @@ function displayParamUnit(
   if (param.unitKind === 'speed') return UNIT_LABELS.speed[speedUnit];
   if (param.unitKind === 'verticalSpeed') return UNIT_LABELS.verticalSpeed[verticalSpeedUnit];
   return param.unit;
-}
-
-function clampNumber(value: number, min?: number, max?: number): number {
-  let next = value;
-  if (min !== undefined) next = Math.max(min, next);
-  if (max !== undefined) next = Math.min(max, next);
-  return next;
 }
 
 function isValidDisplayNumber(value: number, min?: number, max?: number): boolean {
@@ -1116,10 +1085,16 @@ function UnitParamInput({
   verticalSpeedUnit: VerticalSpeedUnit;
   onCommit: (nativeValue: number) => void;
 }) {
-  const displayValue = displayParamValue(nativeValue, param, distanceUnit, altitudeUnit, speedUnit, verticalSpeedUnit);
-  const min = displayParamBound(param.min, param, distanceUnit, altitudeUnit, speedUnit, verticalSpeedUnit);
-  const max = displayParamBound(param.max, param, distanceUnit, altitudeUnit, speedUnit, verticalSpeedUnit);
-  const step = displayParamStep(param.step, param, distanceUnit, altitudeUnit, speedUnit, verticalSpeedUnit);
+  const unitContext = useMemo<WaypointUnitContext>(() => ({
+    distanceUnit,
+    altitudeUnit,
+    speedUnit,
+    verticalSpeedUnit,
+  }), [altitudeUnit, distanceUnit, speedUnit, verticalSpeedUnit]);
+  const displayValue = displayParamValue(nativeValue, param, unitContext);
+  const min = displayParamBound(param.min, param, unitContext);
+  const max = displayParamBound(param.max, param, unitContext);
+  const step = displayParamStep(param.step, param, unitContext);
   const [draft, setDraft] = useState(() => String(displayValue));
   const [focused, setFocused] = useState(false);
   const skipBlurCommitRef = useRef(false);
@@ -1128,18 +1103,21 @@ function UnitParamInput({
     if (!focused) setDraft(String(displayValue));
   }, [displayValue, focused]);
 
+  const resetDraft = useCallback(() => {
+    setDraft(String(displayParamValue(nativeValue, param, unitContext)));
+  }, [nativeValue, param, unitContext]);
+
   const commitDisplayValue = useCallback((display: number) => {
-    const clamped = clampNumber(display, min, max);
-    const nextNative = nativeParamValue(clamped, param, distanceUnit, altitudeUnit, speedUnit, verticalSpeedUnit);
+    if (!isValidDisplayNumber(display, min, max)) {
+      resetDraft();
+      return;
+    }
+    const nextNative = nativeParamValue(display, param, unitContext);
     if (!sameNativeParamValue(nextNative, nativeValue)) {
       onCommit(nextNative);
     }
-    setDraft(String(clamped));
-  }, [altitudeUnit, distanceUnit, max, min, nativeValue, onCommit, param, speedUnit, verticalSpeedUnit]);
-
-  const resetDraft = useCallback(() => {
-    setDraft(String(displayParamValue(nativeValue, param, distanceUnit, altitudeUnit, speedUnit, verticalSpeedUnit)));
-  }, [altitudeUnit, distanceUnit, nativeValue, param, speedUnit, verticalSpeedUnit]);
+    setDraft(String(display));
+  }, [max, min, nativeValue, onCommit, param, resetDraft, unitContext]);
 
   return (
     <input
@@ -1152,7 +1130,7 @@ function UnitParamInput({
         if (nextDraft.trim() === '') return;
         const parsed = Number(nextDraft);
         if (!isValidDisplayNumber(parsed, min, max)) return;
-        const nextNative = nativeParamValue(parsed, param, distanceUnit, altitudeUnit, speedUnit, verticalSpeedUnit);
+        const nextNative = nativeParamValue(parsed, param, unitContext);
         if (!sameNativeParamValue(nextNative, nativeValue)) {
           onCommit(nextNative);
         }
