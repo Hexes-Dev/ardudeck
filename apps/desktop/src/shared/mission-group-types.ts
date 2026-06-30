@@ -50,6 +50,13 @@ interface BaseGroup {
   collapsed: boolean;
   /** Explicit ordering. Drag-reorder updates this. Lower values render first. */
   order: number;
+  /**
+   * Fleet/swarm: the vehicle this group's waypoints are intended for. Drives
+   * the per-group "upload to vehicle" target and the per-vehicle colouring of
+   * waypoints on the telemetry map. Undefined = unassigned (uses the group's
+   * own colour and uploads to the active/primary vehicle).
+   */
+  assignedVehicleKey?: string;
   createdAt: number;
   updatedAt: number;
 }

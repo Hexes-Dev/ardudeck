@@ -88,6 +88,18 @@ export interface SurveyConfig {
    */
   gridMode?: CorridorMode;
   altitudeReference: AltitudeReference;
+  /**
+   * Continuous DEM terrain-follow. When true, the planner samples ground
+   * elevation (Open-Meteo DEM) at every generated waypoint and bakes an
+   * absolute (MSL) altitude of `ground + altitude` into each one, so the
+   * vehicle holds a constant height above ground for the whole flight without
+   * relying on an onboard terrain database. Waypoints emit in the GLOBAL (ASL)
+   * frame. This is distinct from `altitudeReference: 'terrain'`, which delegates
+   * following to the flight controller's own terrain data via
+   * GLOBAL_TERRAIN_ALT. Baking is the more portable option for vehicles with no
+   * terrain tiles loaded.
+   */
+  terrainFollow?: boolean;
   /** Ground-vehicle path pattern. Only consumed in manual / mower mode. */
   groundPattern?: GroundPattern;
   /** Spiral direction (only used when pattern === 'spiral'). */
@@ -128,6 +140,16 @@ export interface SurveyConfig {
   corridorMode?: CorridorMode;
   /** Lateral shift of the whole strip bundle off the centerline, in meters (e.g. to bias coverage to one side of a road). */
   corridorSideOffset?: number;
+  /**
+   * Corridor only. Additional centerlines that branch off the main one (roads
+   * that fork, power-line spurs, river tributaries). The main centerline is
+   * `polygon`; each entry here is a further open centerline that shares the
+   * corridor's width/overlap/camera settings. Every centerline is generated with
+   * the same strip algorithm and flown in sequence (main, then each branch).
+   * Junctions are visual only; overlap at a fork is accepted, as in every other
+   * corridor tool (which instead force you to manage separate routes by hand).
+   */
+  corridorBranches?: LatLng[][];
   /**
    * Plane only. Centerline bends sharper than this (degrees of heading change)
    * get racetrack turn waypoints so the aircraft overshoots and re-enters the
@@ -187,6 +209,7 @@ export const DEFAULT_SURVEY_CONFIG: Omit<SurveyConfig, 'polygon'> = {
   cameraOffOutside: false,
   gridMode: 'copter',
   altitudeReference: 'relative',
+  terrainFollow: false,
   groundPattern: 'boustrophedon',
   spiralDirection: 'inward',
   perimeterPasses: 2,

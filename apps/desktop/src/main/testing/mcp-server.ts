@@ -30,9 +30,13 @@ import {
 } from './tools';
 
 let httpServer: http.Server | null = null;
-let transport: SSEServerTransport | null = null;
 
-export async function startMcpServer(): Promise<{ port: number }> {
+// One transport per connected client, keyed by the SSE session id. Each Claude
+// Code session spawns its own bridge and gets its own session, so multiple
+// agents can drive ArduDeck concurrently.
+const transports = new Map<string, SSEServerTransport>();
+
+function buildServer(): McpServer {
   const server = new McpServer({
     name: 'ardudeck',
     version: '1.0.0',
@@ -321,39 +325,43 @@ export async function startMcpServer(): Promise<{ port: number }> {
     }
   );
 
-  // --- Start HTTP server with SSE transport ---
+  return server;
+}
 
+// --- Start HTTP server with SSE transport ---
+
+export async function startMcpServer(): Promise<{ port: number }> {
   return new Promise((resolve, reject) => {
     httpServer = http.createServer();
 
     httpServer.on('request', async (req, res) => {
       if (req.url === '/health') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', name: 'ardudeck' }));
+        res.end(JSON.stringify({ status: 'ok', name: 'ardudeck', sessions: transports.size }));
         return;
       }
 
-      // SSE endpoint — single client only
+      // SSE endpoint — one session per connecting client.
       if (req.url === '/sse' && req.method === 'GET') {
-        if (transport) {
-          res.writeHead(409, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Another agent is already connected. Single-client only.' }));
-          return;
-        }
-        transport = new SSEServerTransport('/messages', res);
-        await server.connect(transport);
+        const transport = new SSEServerTransport('/messages', res);
+        transports.set(transport.sessionId, transport);
         res.on('close', () => {
-          transport = null;
+          transports.delete(transport.sessionId);
         });
+        // Each session gets its own server instance: the SDK binds a server to
+        // exactly one transport, so one shared server cannot multiplex clients.
+        await buildServer().connect(transport);
         return;
       }
 
       if (req.url?.startsWith('/messages') && req.method === 'POST') {
+        const sessionId = new URL(req.url, 'http://localhost').searchParams.get('sessionId');
+        const transport = sessionId ? transports.get(sessionId) : undefined;
         if (transport) {
           await transport.handlePostMessage(req, res);
         } else {
           res.writeHead(400);
-          res.end('No active SSE connection');
+          res.end('No active SSE connection for sessionId');
         }
         return;
       }
@@ -378,5 +386,8 @@ export function stopMcpServer(): void {
     httpServer.close();
     httpServer = null;
   }
-  transport = null;
+  for (const transport of transports.values()) {
+    void transport.close();
+  }
+  transports.clear();
 }

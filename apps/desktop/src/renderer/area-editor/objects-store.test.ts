@@ -10,8 +10,14 @@ import { distanceLatLng } from '../components/survey/geo-math';
 
 const CENTER: LatLng = { lat: 42, lng: 19 };
 
+// A real (non-degenerate) n-gon around CENTER. Earlier this returned collinear
+// points, which is a fine corridor centerline but a zero-area "polygon" - holes
+// now get clipped to their area, so areas must enclose real space.
 function poly(n: number): LatLng[] {
-  return Array.from({ length: n }, (_, i) => ({ lat: 42 + i * 0.001, lng: 19 + i * 0.001 }));
+  return Array.from({ length: n }, (_, i) => {
+    const a = (i / n) * Math.PI * 2;
+    return { lat: 42 + 0.001 * Math.sin(a), lng: 19 + 0.001 * Math.cos(a) };
+  });
 }
 
 beforeEach(() => {
@@ -54,7 +60,7 @@ describe('tool + draft', () => {
 
     st.setTool('hole');
     expect(useObjectsStore.getState().draftType).toBe('polygon');
-    [{ lat: 42.0002, lng: 19.0002 }, { lat: 42.0008, lng: 19.0002 }, { lat: 42.0005, lng: 19.0008 }]
+    [{ lat: 42.0001, lng: 19.0001 }, { lat: 42.0003, lng: 19.0001 }, { lat: 42.0002, lng: 19.0003 }]
       .forEach((p) => st.addDraftPoint(p));
     st.finishHole();
     const s = useObjectsStore.getState();
@@ -71,6 +77,71 @@ describe('tool + draft', () => {
     [{ lat: 42.0002, lng: 19.0002 }, { lat: 42.0008, lng: 19.0002 }].forEach((p) => st.addDraftPoint(p));
     st.finishHole();
     expect(useObjectsStore.getState().objects).toHaveLength(0);
+  });
+
+  it('cutting a hole into a parametric rectangle promotes it to an editable polygon', () => {
+    const st = useObjectsStore.getState();
+    st.addObject(makeRectangle(CENTER, 200, 200, 'Rect'));
+    const id = useObjectsStore.getState().objects[0]!.id;
+    expect(useObjectsStore.getState().objects[0]!.type).toBe('rectangle');
+    st.selectObject(id);
+    st.setTool('hole');
+    [
+      { lat: 42.0002, lng: 19.0002 }, { lat: 42.0008, lng: 19.0002 }, { lat: 42.0005, lng: 19.0008 },
+    ].forEach((p) => st.addDraftPoint(p));
+    st.finishHole();
+    const o = useObjectsStore.getState().objects[0]!;
+    expect(o.type).toBe('polygon');
+    expect(o.holes).toHaveLength(1);
+  });
+
+  function areaWithHole(): string {
+    const st = useObjectsStore.getState();
+    st.setTool('polygon');
+    poly(4).forEach((p) => st.addDraftPoint(p));
+    st.finishDraft();
+    st.setTool('hole');
+    [
+      { lat: 42.0001, lng: 19.0001 }, { lat: 42.0003, lng: 19.0001 },
+      { lat: 42.0003, lng: 19.0003 }, { lat: 42.0001, lng: 19.0003 },
+    ].forEach((p) => st.addDraftPoint(p));
+    st.finishHole();
+    return useObjectsStore.getState().objects[0]!.id;
+  }
+
+  it('moveVertex with a hole index moves a hole point, leaving the outer ring intact', () => {
+    const id = areaWithHole();
+    const st = useObjectsStore.getState();
+    st.selectObject(id);
+    const before = useObjectsStore.getState().objects[0]!;
+    const outerBefore = before.base.map((p) => ({ ...p }));
+    const holePt0 = { ...before.holes[0]![0]! };
+    st.moveVertex(0, { lat: 42.0003, lng: 19.0003 }, -1, 0);
+    const after = useObjectsStore.getState().objects[0]!;
+    expect(after.base).toEqual(outerBefore);
+    expect(after.holes[0]![0]).not.toEqual(holePt0);
+  });
+
+  it('deleteVertex on a hole removes a point, then drops the hole below 3', () => {
+    const id = areaWithHole();
+    const st = useObjectsStore.getState();
+    st.selectObject(id);
+    expect(useObjectsStore.getState().objects[0]!.holes[0]!.length).toBe(4);
+    st.deleteVertex(0, -1, 0);
+    expect(useObjectsStore.getState().objects[0]!.holes[0]!.length).toBe(3);
+    st.deleteVertex(0, -1, 0);
+    expect(useObjectsStore.getState().objects[0]!.holes).toHaveLength(0);
+  });
+
+  it('insertVertexAfter on a hole adds a point to that hole, not the outer ring', () => {
+    const id = areaWithHole();
+    const st = useObjectsStore.getState();
+    st.selectObject(id);
+    const outerLen = useObjectsStore.getState().objects[0]!.base.length;
+    st.insertVertexAfter(0, { lat: 42.0005, lng: 19.0002 }, 0);
+    const after = useObjectsStore.getState().objects[0]!;
+    expect(after.holes[0]!.length).toBe(5);
+    expect(after.base.length).toBe(outerLen);
   });
 
   it('a corridor finishes at 2 points and carries the width', () => {
@@ -377,5 +448,75 @@ describe('loadWorldRings + reset', () => {
     st.reset();
     expect(useObjectsStore.getState().objects).toHaveLength(0);
     expect(useObjectsStore.getState().selectedId).toBeNull();
+  });
+});
+
+describe('corridor branches', () => {
+  function makeCorridor(): string {
+    const st = useObjectsStore.getState();
+    st.setTool('corridor');
+    [{ lat: 42, lng: 19 }, { lat: 42, lng: 19.003 }].forEach((p) => st.addDraftPoint(p));
+    st.finishDraft();
+    return useObjectsStore.getState().selectedId!;
+  }
+
+  it('finishBranch attaches a branch to the selected corridor', () => {
+    const id = makeCorridor();
+    const st = useObjectsStore.getState();
+    st.setTool('branch');
+    [{ lat: 42, lng: 19.0015 }, { lat: 42.003, lng: 19.0015 }].forEach((p) => st.addDraftPoint(p));
+    st.finishBranch();
+    const obj = useObjectsStore.getState().objects.find((o) => o.id === id)!;
+    expect(obj.branches).toHaveLength(1);
+    expect(obj.branches![0]!.length).toBe(2);
+    expect(useObjectsStore.getState().tool).toBe('select');
+  });
+
+  it('finishBranch is a no-op when the selection is not a corridor', () => {
+    const st = useObjectsStore.getState();
+    st.addObject(makeRectangle(CENTER, 100, 100, 'R'));
+    st.setTool('branch');
+    [{ lat: 42, lng: 19 }, { lat: 42.001, lng: 19 }].forEach((p) => st.addDraftPoint(p));
+    st.finishBranch();
+    const rect = useObjectsStore.getState().objects[0]!;
+    expect(rect.branches).toBeUndefined();
+  });
+
+  it('clearBranches removes all branches from the corridor', () => {
+    const id = makeCorridor();
+    const st = useObjectsStore.getState();
+    st.setTool('branch');
+    [{ lat: 42, lng: 19.0015 }, { lat: 42.003, lng: 19.0015 }].forEach((p) => st.addDraftPoint(p));
+    st.finishBranch();
+    st.clearBranches(id);
+    expect(useObjectsStore.getState().objects.find((o) => o.id === id)!.branches).toBeUndefined();
+  });
+
+  function corridorWithBranch(): string {
+    const id = makeCorridor();
+    const st = useObjectsStore.getState();
+    st.setTool('branch');
+    [{ lat: 42, lng: 19.0015 }, { lat: 42.003, lng: 19.0015 }, { lat: 42.004, lng: 19.0015 }].forEach((p) => st.addDraftPoint(p));
+    st.finishBranch();
+    return id;
+  }
+
+  it('moveVertex with a branch index edits the branch, not the base', () => {
+    const id = corridorWithBranch();
+    const before = useObjectsStore.getState().objects.find((o) => o.id === id)!;
+    const baseBefore = JSON.stringify(before.base);
+    useObjectsStore.getState().moveVertex(2, { lat: 42.01, lng: 19.02 }, 0);
+    const after = useObjectsStore.getState().objects.find((o) => o.id === id)!;
+    expect(JSON.stringify(after.base)).toBe(baseBefore); // base untouched
+    expect(after.branches![0]![2]).not.toEqual(before.branches![0]![2]); // branch moved
+  });
+
+  it('deleteVertex on a branch drops below 2 points by removing the whole branch', () => {
+    const id = corridorWithBranch();
+    const st = useObjectsStore.getState();
+    st.deleteVertex(2, 0); // 3 -> 2 points
+    expect(useObjectsStore.getState().objects.find((o) => o.id === id)!.branches![0]!.length).toBe(2);
+    st.deleteVertex(1, 0); // 2 -> would be 1, so the branch is dropped
+    expect(useObjectsStore.getState().objects.find((o) => o.id === id)!.branches).toBeUndefined();
   });
 });

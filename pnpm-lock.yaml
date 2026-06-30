@@ -53,6 +53,9 @@ importers:
       '@ardudeck/msp-ts':
         specifier: workspace:*
         version: link:../../packages/msp-ts
+      '@ardudeck/sim-engine':
+        specifier: workspace:*
+        version: link:../sim-engine
       '@ardudeck/stm32-dfu':
         specifier: workspace:*
         version: link:../../packages/stm32-dfu
@@ -199,6 +202,28 @@ importers:
         specifier: ^4.3.6
         version: 4.3.6
 
+  apps/sim-engine:
+    dependencies:
+      '@ardudeck/sim-physics':
+        specifier: workspace:*
+        version: link:../../packages/sim-physics
+      ws:
+        specifier: ^8.18.0
+        version: 8.19.0
+    devDependencies:
+      '@types/node':
+        specifier: ^20.10.5
+        version: 20.19.27
+      '@types/ws':
+        specifier: ^8.5.12
+        version: 8.18.1
+      typescript:
+        specifier: ^5.3.3
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.9
+        version: 2.1.9(@types/node@20.19.27)
+
   packages/ardudeck-agent:
     dependencies:
       '@ardudeck/companion-types':
@@ -320,6 +345,18 @@ importers:
       vitest:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.19.3)
+
+  packages/sim-physics:
+    devDependencies:
+      '@types/node':
+        specifier: ^20.10.5
+        version: 20.19.27
+      typescript:
+        specifier: ^5.3.3
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.9
+        version: 2.1.9(@types/node@20.19.27)
 
   packages/stm32-dfu:
     dependencies:

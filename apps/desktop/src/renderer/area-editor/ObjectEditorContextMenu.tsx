@@ -73,8 +73,8 @@ export function ObjectEditorContextMenu(): JSX.Element | null {
   if (!menu) return null;
 
   const {
-    closeContextMenu, setTool, deleteObject, duplicateObject, reorderObject,
-    convertSelectedToPolygon, clearMeasure, editMeasurement,
+    closeContextMenu, setTool, selectObject, deleteObject, duplicateObject, reorderObject,
+    convertSelectedToPolygon, clearBranches, clearMeasure, editMeasurement,
     insertMeasurePointAt, deleteMeasurePoint, undo, redo,
   } = useObjectsStore.getState();
 
@@ -101,6 +101,15 @@ export function ObjectEditorContextMenu(): JSX.Element | null {
             <Divider />
             <Item label="Cut hole" onClick={run(() => setTool('hole'))} />
             <Item label="Split with line" onClick={run(() => setTool('split'))} />
+          </>
+        )}
+        {isCorridor && (
+          <>
+            <Divider />
+            <Item label="Add branch" onClick={run(() => { selectObject(obj.id); setTool('branch'); })} />
+            {(obj.branches?.length ?? 0) > 0 && (
+              <Item label="Clear branches" hint={String(obj.branches!.length)} onClick={run(() => clearBranches(obj.id))} />
+            )}
           </>
         )}
         <Divider />

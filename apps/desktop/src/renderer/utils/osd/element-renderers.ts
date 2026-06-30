@@ -470,6 +470,13 @@ function renderCrosshairs(buffer: OsdScreenBuffer, x: number, y: number): void {
   buffer.setChar(x + 1, y, SYM.AH_CENTER_LINE_RIGHT);
 }
 
+/** Odd width scaled to the canvas: 9 cells on analog (30 cols), wider on HD. */
+function graphicWidth(bufferWidth: number, factor: number, min: number, max: number): number {
+  if (bufferWidth <= 30) return min;
+  const w = Math.max(min, Math.min(max, Math.round(bufferWidth * factor)));
+  return w % 2 === 0 ? w + 1 : w;
+}
+
 function renderArtificialHorizon(
   buffer: OsdScreenBuffer,
   x: number,
@@ -477,8 +484,8 @@ function renderArtificialHorizon(
   pitch: number,
   roll: number
 ): void {
-  const HORIZON_WIDTH = 9;
-  const CENTER_COL = 4;
+  const HORIZON_WIDTH = graphicWidth(buffer.width, 0.42, 9, 25);
+  const CENTER_COL = Math.floor(HORIZON_WIDTH / 2);
   const CHAR_HEIGHT_PX = 18;
   const ROLL_SENSITIVITY = 3.0;
   const NUM_VARIANTS = 9;
@@ -508,7 +515,8 @@ function renderArtificialHorizon(
 }
 
 function renderHorizonSidebars(buffer: OsdScreenBuffer, x: number, y: number): void {
-  const SIDEBAR_WIDTH = 7;   // chars from center to sidebar
+  // Push the bars out toward the screen edges on a wider HD canvas.
+  const SIDEBAR_WIDTH = buffer.width <= 30 ? 7 : Math.round(buffer.width * 0.3);
   const SIDEBAR_HEIGHT = 3;  // rows above/below center
 
   // Left vertical bar
@@ -551,15 +559,15 @@ function renderHeading(buffer: OsdScreenBuffer, x: number, y: number, heading: n
 }
 
 function renderHeadingGraph(buffer: OsdScreenBuffer, x: number, y: number, heading: number): void {
-  // Simple compass tape: N E S W with lines between
-  const cardinals = ['N', 'E', 'S', 'W'];
+  // Compass tape: N E S W with lines between. Widen the visible arc on HD.
+  const WIDTH = graphicWidth(buffer.width, 0.5, 9, 27);
+  const HALF = Math.floor(WIDTH / 2);
   const normalizedHdg = ((heading % 360) + 360) % 360;
-  // Each cardinal covers 90 degrees, we show 9 chars (~120 degrees FOV)
   const degreesPerChar = 360 / 36; // 10 degrees per character position
   const centerPos = normalizedHdg / degreesPerChar;
 
-  for (let i = 0; i < 9; i++) {
-    const pos = Math.round(centerPos - 4 + i) % 36;
+  for (let i = 0; i < WIDTH; i++) {
+    const pos = Math.round(centerPos - HALF + i) % 36;
     const normalPos = ((pos % 36) + 36) % 36;
 
     if (normalPos === 0) buffer.setChar(x + i, y, SYM.HEADING_N);

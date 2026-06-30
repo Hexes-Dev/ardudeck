@@ -17,11 +17,13 @@ import { AreaEditorLayers } from './AreaEditorLayers';
 import { GoToLocation } from './GoToLocation';
 import { attachObjectInteractions } from './attachObjectInteractions';
 import { attachWindLayer } from './attachWindLayer';
+import { attachTrafficLayer } from './attachTrafficLayer';
+import { TrafficAltitudeFilterCard } from '../components/map/overlays/TrafficAltitudeFilter';
 import { useAreaEditorLayersStore } from './area-editor-layers-store';
 import { WindControls } from '../components/map/overlays/WindControls';
 import { useObjectsStore, type AreaTool } from './objects-store';
 import { useSurveyStore } from '../stores/survey-store';
-import { objectWorldRing, objectWorldHoles } from './area-object';
+import { objectWorldRing, objectWorldHoles, objectWorldBranches } from './area-object';
 import { parseGisArea } from '../../shared/gis-area-import';
 import { useSettingsStore, type ThemePreference } from '../stores/settings-store';
 import logoImage from '../assets/logo.png';
@@ -31,6 +33,7 @@ const S = { className: 'w-4 h-4', viewBox: '0 0 24 24', fill: 'none', stroke: 'c
 const ICursor = () => <svg {...S}><path d="M4 3l7.07 16.97 2.51-7.39 7.39-2.51L4 3z" /></svg>;
 const IPolygon = () => <svg {...S}><path d="M12 3l8 6-3 9H7L4 9z" /></svg>;
 const ICorridor = () => <svg {...S}><path d="M4 18l5-5 4 4 7-7" /><circle cx="4" cy="18" r="1.4" /><circle cx="20" cy="10" r="1.4" /></svg>;
+const IBranch = () => <svg {...S}><path d="M5 21V8M5 8l6-5M5 13l7-4" /><circle cx="11" cy="3" r="1.3" /><circle cx="12" cy="9" r="1.3" /></svg>;
 const IRect = () => <svg {...S}><rect x="3" y="6" width="18" height="12" rx="1" /></svg>;
 const ICircle = () => <svg {...S}><circle cx="12" cy="12" r="8" /></svg>;
 const IEdit = () => <svg {...S}><path d="M6 18L12 5l6 9z" /><rect x="4" y="16" width="4" height="4" rx="0.5" fill="currentColor" /><rect x="10" y="3" width="4" height="4" rx="0.5" fill="currentColor" /><rect x="16" y="13" width="4" height="4" rx="0.5" fill="currentColor" /></svg>;
@@ -57,6 +60,7 @@ const TOOLS: { id: AreaTool; icon: () => JSX.Element; tip: string }[] = [
   { id: 'select', icon: ICursor, tip: 'Select & transform — move, rotate, scale' },
   { id: 'polygon', icon: IPolygon, tip: 'Draw area — click points, double-click to finish' },
   { id: 'corridor', icon: ICorridor, tip: 'Draw corridor — a centerline for a linear survey' },
+  { id: 'branch', icon: IBranch, tip: 'Branch — select a corridor, draw a fork off it (double-click to finish)' },
   { id: 'rectangle', icon: IRect, tip: 'Rectangle — drag on the map' },
   { id: 'circle', icon: ICircle, tip: 'Circle — drag from the center' },
   { id: 'edit', icon: IEdit, tip: 'Edit points of the selected object' },
@@ -96,15 +100,17 @@ export function ObjectEditorApp(): JSX.Element {
   const [sent, setSent] = useState(false);
   const [bufferM, setBufferM] = useState(10);
 
-  const { setTool, setCorridorWidth, clearMeasure, loadWorldRings, bufferSelected, undo, redo } = useObjectsStore.getState();
+  const { setTool, setCorridorWidth, clearMeasure, loadWorldRings, bufferSelected, clearBranches, undo, redo } = useObjectsStore.getState();
 
   const windOn = useAreaEditorLayersStore((s) => s.overlays.wind);
+  const trafficOn = useAreaEditorLayersStore((s) => s.overlays.traffic || s.overlays.gliders);
 
   const handleMapReady = useCallback((map: maplibregl.Map) => {
     const c1 = attachObjectInteractions(map);
     const c2 = attachWindLayer(map);
+    const c3 = attachTrafficLayer(map);
     setMap(map);
-    cleanupRef.current = () => { c1(); c2(); };
+    cleanupRef.current = () => { c1(); c2(); c3(); };
   }, []);
   useEffect(() => () => { cleanupRef.current?.(); cleanupRef.current = null; }, []);
   useEffect(() => { setSent(false); }, [objects]);
@@ -133,6 +139,7 @@ export function ObjectEditorApp(): JSX.Element {
 
   const selected = objects.find((o) => o.id === selectedId) ?? null;
   const selectedIsCorridor = selected?.type === 'corridor';
+  const selectedBranchCount = selected?.branches?.length ?? 0;
   const validObjects = objects.filter((o) => o.visible && objectWorldRing(o).length >= (o.type === 'corridor' ? 2 : 3));
   const hasValid = validObjects.length > 0;
 
@@ -153,7 +160,13 @@ export function ObjectEditorApp(): JSX.Element {
       .filter((o) => o.visible && objectWorldRing(o).length >= (o.type === 'corridor' ? 2 : 3))
       .map((o) =>
         o.type === 'corridor'
-          ? { polygon: objectWorldRing(o), kind: 'corridor' as const, corridorWidth: o.corridorWidthM ?? 60, config: editorConfig }
+          ? {
+              polygon: objectWorldRing(o),
+              kind: 'corridor' as const,
+              corridorWidth: o.corridorWidthM ?? 60,
+              ...(o.branches && o.branches.length > 0 ? { corridorBranches: objectWorldBranches(o) } : {}),
+              config: editorConfig,
+            }
           : { polygon: objectWorldRing(o), holes: objectWorldHoles(o), config: editorConfig },
       );
     if (areas.length === 0) return;
@@ -201,7 +214,7 @@ export function ObjectEditorApp(): JSX.Element {
 
         {/* Context options for the active tool */}
         <div className="flex items-center gap-2 min-w-0">
-          {(tool === 'corridor' || selectedIsCorridor) && (
+          {(tool === 'corridor' || tool === 'branch' || selectedIsCorridor) && (
             <div className="flex items-center gap-1.5" data-tip="Corridor swath width">
               <span className="text-content-tertiary"><ICorridor /></span>
               <input
@@ -212,6 +225,22 @@ export function ObjectEditorApp(): JSX.Element {
               />
               <span className="text-xs text-content-tertiary">m</span>
             </div>
+          )}
+          {tool === 'branch' && (
+            <span className="text-xs text-content-secondary">
+              {selectedIsCorridor
+                ? 'Click along the corridor to draw a branch, double-click to finish'
+                : 'Click a corridor first, then draw a branch off it (double-click to finish)'}
+            </span>
+          )}
+          {tool === 'select' && selectedIsCorridor && selectedBranchCount > 0 && (
+            <button
+              type="button" onClick={() => clearBranches()}
+              data-tip="Remove all branches from this corridor"
+              className="text-xs text-content-secondary hover:text-content underline-offset-2 hover:underline"
+            >
+              Clear {selectedBranchCount} branch{selectedBranchCount > 1 ? 'es' : ''}
+            </button>
           )}
           {tool === 'hole' && (
             <span className="text-xs text-content-secondary">
@@ -254,7 +283,7 @@ export function ObjectEditorApp(): JSX.Element {
           <ActionButton tip="Undo (Ctrl+Z)" disabled={!canUndo} onClick={undo}><IUndo /></ActionButton>
           <ActionButton tip="Redo (Ctrl+Shift+Z)" disabled={!canRedo} onClick={redo}><IRedo /></ActionButton>
           <div className="w-px h-6 bg-subtle mx-1" />
-          <ActionButton tip="Import KML / KMZ" onClick={() => void handleImport()}><IImport /></ActionButton>
+          <ActionButton tip="Import KML / KMZ / GeoJSON / Shapefile" onClick={() => void handleImport()}><IImport /></ActionButton>
           <ActionButton tip="Export areas as KML" disabled={!hasValid} onClick={() => void handleExport('kml')}><IExportKml /></ActionButton>
           <ActionButton tip="Export areas as KMZ" disabled={!hasValid} onClick={() => void handleExport('kmz')}><IExportKmz /></ActionButton>
           <button
@@ -296,6 +325,7 @@ export function ObjectEditorApp(): JSX.Element {
           <GoToLocation map={map} />
           <AreaEditorLayers />
           {windOn && <WindControls />}
+          {trafficOn && <TrafficAltitudeFilterCard className="absolute top-3 left-14 z-[20]" />}
         </div>
 
         {/* Right column: objects + briefing */}

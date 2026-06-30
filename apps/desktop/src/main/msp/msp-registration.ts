@@ -34,7 +34,7 @@ import { getServoConfigs, setServoConfig, saveServoConfigViaCli, getServoValues,
 import { getMotorMixer, setMotorMixer, setMotorMixerRulesViaCli, setServoMixerRulesViaCli, readSmixViaCli, readMmixViaCli } from './msp-motor-mixer.js';
 import { getWaypoints, setWaypoint, uploadWaypoints, saveWaypoints, clearWaypoints, getMissionInfo } from './msp-navigation.js';
 import { getNavConfig, setNavConfig, getGpsConfig, setGpsConfig } from './msp-navigation.js';
-import { getFailsafeConfig, setFailsafeConfig, getGpsRescueConfig, setGpsRescueConfig, getGpsRescuePids, setGpsRescuePids, getFilterConfig, setFilterConfig, getVtxConfig, setVtxConfig, getOsdConfig, getRxConfig, setRxConfig } from './msp-peripheral-config.js';
+import { getFailsafeConfig, setFailsafeConfig, getGpsRescueConfig, setGpsRescueConfig, getGpsRescuePids, setGpsRescuePids, getFilterConfig, setFilterConfig, getVtxConfig, setVtxConfig, getOsdConfig, setOsdConfig, type OsdElementWrite, uploadOsdFont, type OsdFontChar, getRxConfig, setRxConfig } from './msp-peripheral-config.js';
 import { getSerialConfig, setSerialConfig, getRxMap, setRxMap, getRcDeadband, setRcDeadband } from './msp-serial-config.js';
 import { getSetting, setSetting, getSettings, setSettings } from './msp-settings.js';
 import { saveEeprom, calibrateAcc, calibrateMag, reboot, resetMspCliFlags } from './msp-commands.js';
@@ -134,6 +134,8 @@ export function registerMspHandlers(window: BrowserWindow): void {
 
   // OSD configuration
   ipcMain.handle(IPC_CHANNELS.MSP_GET_OSD_CONFIG, async () => getOsdConfig());
+  ipcMain.handle(IPC_CHANNELS.MSP_SET_OSD_CONFIG, async (_event, elements: OsdElementWrite[]) => setOsdConfig(elements));
+  ipcMain.handle(IPC_CHANNELS.MSP_UPLOAD_OSD_FONT, async (_event, chars: OsdFontChar[]) => uploadOsdFont(chars));
 
   // RX configuration
   ipcMain.handle(IPC_CHANNELS.MSP_GET_RX_CONFIG, async () => getRxConfig());
@@ -260,6 +262,8 @@ export function unregisterMspHandlers(): void {
 
   // OSD config handler
   ipcMain.removeHandler(IPC_CHANNELS.MSP_GET_OSD_CONFIG);
+  ipcMain.removeHandler(IPC_CHANNELS.MSP_SET_OSD_CONFIG);
+  ipcMain.removeHandler(IPC_CHANNELS.MSP_UPLOAD_OSD_FONT);
 
   // RX config handlers
   ipcMain.removeHandler(IPC_CHANNELS.MSP_GET_RX_CONFIG);

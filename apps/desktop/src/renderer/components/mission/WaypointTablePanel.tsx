@@ -30,6 +30,8 @@ import { useFenceStore } from '../../stores/fence-store';
 import { useRallyStore } from '../../stores/rally-store';
 import { useEditModeStore } from '../../stores/edit-mode-store';
 import { useConnectionStore } from '../../stores/connection-store';
+import { useFleetVehicles } from '../../hooks/useFleet';
+import { useVehicleAppearanceStore, resolveVehicleColor } from '../../stores/vehicle-appearance-store';
 import { computeItemColors, SEGMENT_COLORS } from '../../utils/mission-segment-colors';
 import { validateMission } from '../../../shared/mission-validation';
 import { MissionValidationBadge } from './MissionValidationBadge';
@@ -1000,6 +1002,9 @@ function GroupHeaderRow({
   onDelete,
   onRegenerate,
   onEdit,
+  fleetVehicles,
+  assignedVehicleKey,
+  onAssignVehicle,
 }: {
   group: Group;
   count: number;
@@ -1032,6 +1037,14 @@ function GroupHeaderRow({
   /** Re-open the survey panel and load this group's polygon + config back
       into the draft for live editing. Survey groups only. */
   onEdit?: () => void;
+  /**
+   * Fleet/swarm: vehicles available to assign this group to. When non-empty a
+   * vehicle picker appears in the header and the sync button uploads to the
+   * assigned vehicle. Empty / undefined in single-vehicle mode (picker hidden).
+   */
+  fleetVehicles?: Array<{ key: string; label: string; color: string }>;
+  assignedVehicleKey?: string;
+  onAssignVehicle?: (vehicleKey: string | null) => void;
 }) {
   const isStaleSurvey = isSurveyGroup(group) && isSurveyGroupStale(group);
   const [editing, setEditing] = useState(false);
@@ -1039,8 +1052,16 @@ function GroupHeaderRow({
   const [menuOpen, setMenuOpen] = useState(false);
   const [colorOpen, setColorOpen] = useState(false);
   const [colorPos, setColorPos] = useState<{ top: number; left: number } | null>(null);
+  const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null);
+  const [vehicleMenuOpen, setVehicleMenuOpen] = useState(false);
+  const [vehicleMenuPos, setVehicleMenuPos] = useState<{ top: number; left: number } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const swatchRef = useRef<HTMLButtonElement>(null);
+  const menuBtnRef = useRef<HTMLButtonElement>(null);
+  const vehicleBtnRef = useRef<HTMLButtonElement>(null);
+
+  const showVehiclePicker = !readOnly && !!fleetVehicles && fleetVehicles.length > 0 && !!onAssignVehicle;
+  const assignedVehicle = fleetVehicles?.find((v) => v.key === assignedVehicleKey);
 
   useEffect(() => {
     if (editing) {
@@ -1203,6 +1224,57 @@ function GroupHeaderRow({
           </span>
         )}
       </div>
+      {showVehiclePicker && (
+        <>
+          <button
+            ref={vehicleBtnRef}
+            onClick={(e) => {
+              e.stopPropagation();
+              const r = vehicleBtnRef.current?.getBoundingClientRect();
+              if (r) setVehicleMenuPos({ top: r.bottom + 4, left: r.left });
+              setVehicleMenuOpen((o) => !o);
+            }}
+            className="shrink-0 flex items-center gap-1.5 px-1.5 h-6 rounded text-[11px] font-medium border border-subtle bg-surface-raised hover:bg-surface-solid text-content transition-colors max-w-[120px]"
+            data-tip="Assign this group to a fleet vehicle (sets its colour and upload target)"
+          >
+            <span
+              className="w-2.5 h-2.5 rounded-full shrink-0"
+              style={{ backgroundColor: assignedVehicle?.color ?? 'transparent', border: assignedVehicle ? 'none' : '1px solid var(--border-subtle, #555)' }}
+            />
+            <span className="truncate">{assignedVehicle ? assignedVehicle.label : 'Assign'}</span>
+          </button>
+          {vehicleMenuOpen && vehicleMenuPos &&
+            createPortal(
+              <>
+                <div className="fixed inset-0 z-[998]" onClick={(e) => { e.stopPropagation(); setVehicleMenuOpen(false); }} />
+                <div
+                  className="fixed z-[999] min-w-[140px] py-1 rounded-md border border-subtle bg-surface-solid shadow-xl"
+                  style={{ top: vehicleMenuPos.top, left: vehicleMenuPos.left }}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <button
+                    onClick={() => { onAssignVehicle?.(null); setVehicleMenuOpen(false); }}
+                    className="w-full flex items-center gap-2 px-2.5 py-1.5 text-[11px] text-content hover:bg-surface-raised text-left"
+                  >
+                    <span className="w-2.5 h-2.5 rounded-full shrink-0 border border-subtle" />
+                    Unassigned
+                  </button>
+                  {fleetVehicles!.map((v) => (
+                    <button
+                      key={v.key}
+                      onClick={() => { onAssignVehicle?.(v.key); setVehicleMenuOpen(false); }}
+                      className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-[11px] text-content hover:bg-surface-raised text-left ${v.key === assignedVehicleKey ? 'bg-surface-raised' : ''}`}
+                    >
+                      <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: v.color }} />
+                      <span className="truncate">{v.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </>,
+              document.body,
+            )}
+        </>
+      )}
       {!readOnly && onSync && (
         <button
           onClick={(e) => {
@@ -1252,10 +1324,17 @@ function GroupHeaderRow({
         </button>
       )}
       {!readOnly && (
-        <div className="relative shrink-0">
+        <div className="shrink-0">
           <button
+            ref={menuBtnRef}
             onClick={(e) => {
               e.stopPropagation();
+              if (!menuOpen) {
+                const r = menuBtnRef.current?.getBoundingClientRect();
+                // Body-level portal anchored to the button so the menu isn't
+                // clipped or out-stacked by the virtualized list's rows.
+                if (r) setMenuPos({ top: r.bottom + 4, right: window.innerWidth - r.right });
+              }
               setMenuOpen((v) => !v);
             }}
             className="w-5 h-5 flex items-center justify-center text-content-tertiary hover:text-content transition-colors rounded hover:bg-surface"
@@ -1263,34 +1342,36 @@ function GroupHeaderRow({
           >
             <MoreHorizontal className="w-3.5 h-3.5" />
           </button>
-          {menuOpen && (
-            <>
-              <div
-                className="fixed inset-0 z-30"
-                onClick={() => setMenuOpen(false)}
-              />
-              <div className="absolute right-0 top-full mt-1 z-40 min-w-[140px] bg-surface-raised border border-subtle rounded-lg shadow-xl py-1">
-                <button
-                  onClick={() => {
-                    setMenuOpen(false);
-                    setEditing(true);
-                  }}
-                  className="w-full text-left px-3 py-1.5 text-xs text-content hover:bg-surface-input transition-colors"
+          {menuOpen && menuPos &&
+            createPortal(
+              <>
+                <div className="fixed inset-0 z-[9998]" onClick={() => setMenuOpen(false)} />
+                <div
+                  className="fixed z-[9999] min-w-[140px] bg-surface-solid border border-subtle rounded-lg shadow-2xl py-1"
+                  style={{ top: menuPos.top, right: menuPos.right }}
                 >
-                  Rename
-                </button>
-                <button
-                  onClick={() => {
-                    setMenuOpen(false);
-                    onDelete();
-                  }}
-                  className="w-full text-left px-3 py-1.5 text-xs text-red-400 hover:bg-surface-input hover:text-red-300 transition-colors"
-                >
-                  Delete group
-                </button>
-              </div>
-            </>
-          )}
+                  <button
+                    onClick={() => {
+                      setMenuOpen(false);
+                      setEditing(true);
+                    }}
+                    className="w-full text-left px-3 py-1.5 text-xs text-content hover:bg-surface-raised transition-colors"
+                  >
+                    Rename
+                  </button>
+                  <button
+                    onClick={() => {
+                      setMenuOpen(false);
+                      onDelete();
+                    }}
+                    className="w-full text-left px-3 py-1.5 text-xs text-red-400 hover:bg-surface-raised hover:text-red-300 transition-colors"
+                  >
+                    Delete group
+                  </button>
+                </div>
+              </>,
+              document.body,
+            )}
         </div>
       )}
       </div>
@@ -1325,10 +1406,13 @@ function WaypointListContent({ readOnly = false }: { readOnly?: boolean }) {
     reorderWaypoints,
     renameGroup,
     setGroupColor,
+    setGroupVehicle,
     deleteGroup,
     toggleGroupCollapsed,
     setGroupVisible,
+    focusWaypoint,
     uploadGroup,
+    uploadGroupToVehicle,
     saveGroupToFile,
     lastUploadedAt,
     lastUploadedGroupIds,
@@ -1336,6 +1420,22 @@ function WaypointListContent({ readOnly = false }: { readOnly?: boolean }) {
 
   const surveyEditingGroupId = useSurveyStore((s) => s.editingGroupId);
   const surveyLoadFromGroup = useSurveyStore((s) => s.loadFromGroup);
+
+  // Fleet/swarm: vehicles available to assign groups to, each with its identity
+  // colour. The per-group picker only appears when 2+ vehicles are present.
+  const fleetVehicles = useFleetVehicles();
+  const colorOverrides = useVehicleAppearanceStore((s) => s.overrides);
+  const fleetVehicleOptions = useMemo(
+    () =>
+      fleetVehicles.length >= 2
+        ? fleetVehicles.map((v) => ({
+            key: v.key,
+            label: v.label,
+            color: resolveVehicleColor(colorOverrides, v.key, v.sysid),
+          }))
+        : undefined,
+    [fleetVehicles, colorOverrides],
+  );
 
   // Pre-compute upload state per group id. Doing this once per render keeps
   // the GroupHeaderRow props cheap and avoids each header subscribing.
@@ -1831,12 +1931,25 @@ function WaypointListContent({ readOnly = false }: { readOnly?: boolean }) {
                     onToggleVisible={() =>
                       setGroupVisible(group.id, !group.visible)
                     }
+                    fleetVehicles={fleetVehicleOptions}
+                    assignedVehicleKey={group.assignedVehicleKey}
+                    onAssignVehicle={(vehicleKey) => {
+                      setGroupVehicle(group.id, vehicleKey);
+                      // Assigning a vehicle colours the group by that vehicle's
+                      // identity colour, so the planner + telemetry map agree.
+                      if (vehicleKey) {
+                        const opt = fleetVehicleOptions?.find((o) => o.key === vehicleKey);
+                        if (opt) setGroupColor(group.id, opt.color);
+                      }
+                    }}
                     onSync={() =>
-                      connectionState.isConnected
-                        ? uploadGroup(group.id)
-                        : saveGroupToFile(group.id)
+                      group.assignedVehicleKey
+                        ? uploadGroupToVehicle(group.id, group.assignedVehicleKey)
+                        : connectionState.isConnected
+                          ? uploadGroup(group.id)
+                          : saveGroupToFile(group.id)
                     }
-                    connected={connectionState.isConnected}
+                    connected={connectionState.isConnected || !!group.assignedVehicleKey}
                     onRename={(name) => renameGroup(group.id, name)}
                     onSetColor={(color) => setGroupColor(group.id, color)}
                     onDelete={() => deleteGroup(group.id)}
@@ -2008,6 +2121,20 @@ function WaypointListContent({ readOnly = false }: { readOnly?: boolean }) {
                       </div>
                     )}
                   </div>
+
+                  {/* Focus button - pan/zoom the map to this WP. Located WPs only. */}
+                  {!readOnly && commandHasLocation(wp.command) && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        focusWaypoint(wp.seq);
+                      }}
+                      className="p-1 text-content-secondary hover:text-blue-400 hover:bg-blue-500/10 rounded transition-colors shrink-0"
+                      data-tip="Focus map on this waypoint"
+                    >
+                      <Crosshair className="w-4 h-4" />
+                    </button>
+                  )}
 
                   {/* Delete button - hidden in readOnly mode */}
                   {!readOnly && (

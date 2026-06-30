@@ -14,7 +14,7 @@ import { useSurveyStore } from '../stores/survey-store';
 import { useSettingsStore } from '../stores/settings-store';
 import { getSurveyGenerator, patternToGeneratorId } from '../components/survey/generator-registry';
 import { polygonArea } from '../components/survey/geo-math';
-import { objectWorldRing } from './area-object';
+import { objectWorldRing, objectWorldBranches } from './area-object';
 import { colorForIndex } from './objects-geo';
 import { computeAreaHud, aggregateAreaHud, type AreaHud } from './area-editor-hud';
 import { formatDurationSec } from '../utils/flight-briefing';
@@ -80,8 +80,15 @@ export function ObjectEditorHud(): JSX.Element {
       const ring = objectWorldRing(o);
       const isCorridor = o.type === 'corridor';
       if (ring.length < (isCorridor ? 2 : 3)) return;
+      const branches = isCorridor ? objectWorldBranches(o) : [];
       const fullConfig: SurveyConfig = isCorridor
-        ? { ...surveyConfig, pattern: 'corridor', corridorWidth: o.corridorWidthM ?? 60, polygon: ring }
+        ? {
+            ...surveyConfig,
+            pattern: 'corridor',
+            corridorWidth: o.corridorWidthM ?? 60,
+            polygon: ring,
+            ...(branches.length > 0 ? { corridorBranches: branches } : {}),
+          }
         : { ...surveyConfig, polygon: ring };
       const result = runGeneratorSafe(fullConfig);
       const areaM2 = isCorridor ? (result?.stats.areaCovered ?? 0) : polygonArea(ring);

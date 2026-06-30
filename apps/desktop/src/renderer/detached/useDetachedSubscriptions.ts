@@ -13,6 +13,12 @@ import { useEffect } from 'react';
 import { useConnectionStore } from '../stores/connection-store';
 import { useTelemetryStore } from '../stores/telemetry-store';
 import { useMessagesStore } from '../stores/messages-store';
+import { useMissionStore } from '../stores/mission-store';
+import { useFenceStore } from '../stores/fence-store';
+import { useActiveVehicleStore } from '../stores/active-vehicle-store';
+import { useFleetTelemetryStore } from '../stores/fleet-telemetry-store';
+import { useOrchestrationStore } from '../stores/orchestration-store';
+import { applyActiveSelectionFromBroadcast } from '../hooks/useFleet';
 import { startInspector } from '../stores/inspector-store';
 
 export function useDetachedSubscriptions(): void {
@@ -25,6 +31,9 @@ export function useDetachedSubscriptions(): void {
   const updateFlight = useTelemetryStore((s) => s.updateFlight);
   const updateBatch = useTelemetryStore((s) => s.updateBatch);
   const addStatusMessage = useMessagesStore((s) => s.addMessage);
+  const setMissionItems = useMissionStore((s) => s.setMissionItems);
+  const setCurrentSeq = useMissionStore((s) => s.setCurrentSeq);
+  const setFenceItems = useFenceStore((s) => s.setFenceItems);
 
   useEffect(() => {
     const api = window.electronAPI;
@@ -33,7 +42,41 @@ export function useDetachedSubscriptions(): void {
     // Start the inspector pipeline (idempotent — safe to call from every window).
     startInspector();
 
+    // Hydrate one-shot state this window may have missed by opening after connect.
+    // (CONNECTION_STATE is event-driven; a late window never sees the initial one.)
+    void api.getConnectionState?.().then((state) => { if (state) setConnectionState(state); }).catch(() => {});
+
+    // Hydrate the fleet roster so pop-outs know every vehicle, and adopt the
+    // active selection the roster reports — the change broadcast only covers
+    // future changes, so a window opening after a selection (e.g. a popped-out
+    // Vision panel) would otherwise never learn the current active vehicle.
+    void api.listVehicles?.().then((v) => useActiveVehicleStore.getState().hydrate(v)).catch(() => {});
+
     const cleanups: Array<() => void> = [];
+
+    cleanups.push(
+      api.onVehicleDiscovered?.((vehicle) => {
+        useActiveVehicleStore.getState().recordDiscovered(vehicle);
+      }) ?? (() => {}),
+    );
+    cleanups.push(
+      api.onVehicleLost?.((vehicleKey) => {
+        useActiveVehicleStore.getState().recordLost(vehicleKey);
+        useFleetTelemetryStore.getState().removeVehicle(vehicleKey);
+      }) ?? (() => {}),
+    );
+    cleanups.push(
+      api.onActiveVehicleChanged?.((payload) => {
+        applyActiveSelectionFromBroadcast(payload.transportId, payload.vehicleKey ?? null);
+      }) ?? (() => {}),
+    );
+    // Orchestration status (engine welcome / capabilities / roster) so the 3D
+    // world's fleet ops - synchronized takeoff + formations - work in the pop-out.
+    cleanups.push(
+      api.onOrchestrationStatus?.((status) => {
+        useOrchestrationStore.getState().applyStatus(status);
+      }) ?? (() => {}),
+    );
 
     cleanups.push(
       api.onConnectionState((state) => {
@@ -42,7 +85,15 @@ export function useDetachedSubscriptions(): void {
     );
     cleanups.push(
       api.onTelemetryBatch((batch) => {
-        updateBatch(batch);
+        // Accumulate per-vehicle telemetry so multi-vehicle pop-outs render the
+        // whole fleet; mirror only the active vehicle into the flat store the
+        // single-vehicle views read (matches App.tsx routing).
+        const vehicleKey = batch.__vehicleKey ?? '__primary__';
+        useFleetTelemetryStore.getState().applyBatch(vehicleKey, batch);
+        const activeKey = useActiveVehicleStore.getState().activeVehicleKey;
+        if (vehicleKey === '__primary__' || activeKey === null || vehicleKey === activeKey) {
+          updateBatch(batch);
+        }
       }),
     );
     cleanups.push(
@@ -62,6 +113,11 @@ export function useDetachedSubscriptions(): void {
         addStatusMessage(msg.severity, msg.severityLabel as never, msg.text);
       }),
     );
+    // Mission waypoints reach pop-out views (e.g. the 3D sim world) so they can
+    // render the FC's mission. safeSend already broadcasts to every window.
+    cleanups.push(api.onMissionComplete((items) => setMissionItems(items)));
+    cleanups.push(api.onMissionCurrent((seq) => setCurrentSeq(seq)));
+    cleanups.push(api.onFenceComplete((items) => setFenceItems(items)));
 
     return () => {
       for (const fn of cleanups) fn();
@@ -76,5 +132,8 @@ export function useDetachedSubscriptions(): void {
     updateFlight,
     updateBatch,
     addStatusMessage,
+    setMissionItems,
+    setCurrentSeq,
+    setFenceItems,
   ]);
 }

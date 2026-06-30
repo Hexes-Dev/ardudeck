@@ -27,6 +27,9 @@ import { TelemetryDashboard } from '../components/telemetry/TelemetryDashboard';
 import { MavlinkInspectorView } from '../components/inspector/MavlinkInspectorView';
 import { InspectorGraphsView } from '../components/inspector/InspectorGraphsView';
 import { ObjectEditorApp } from '../area-editor/ObjectEditorApp';
+import SimWorldView from '../components/sim/SimWorldView';
+import { CameraPanel } from '../components/camera/CameraPanel';
+import { SafetyMonitorPanel } from '../components/panels/SafetyMonitorPanel';
 
 export interface DetachedComponentDef {
   /** React component to render. Receives `props` as-is from the URL. */
@@ -52,6 +55,9 @@ export const COMPONENT_REGISTRY: Record<string, DetachedComponentDef> = {
   map: { Component: MapPanel as ComponentType<Record<string, unknown>>, defaultBounds: { width: 960, height: 720 } },
   'telemetry-dashboard': { Component: TelemetryDashboard as ComponentType<Record<string, unknown>>, defaultBounds: { width: 1280, height: 800 } },
   'area-editor': { Component: ObjectEditorApp as ComponentType<Record<string, unknown>>, defaultBounds: { width: 1400, height: 900 } },
+  'sim-world': { Component: SimWorldView as ComponentType<Record<string, unknown>>, defaultBounds: { width: 1280, height: 800 } },
+  camera: { Component: CameraPanel as ComponentType<Record<string, unknown>>, defaultBounds: { width: 960, height: 600 } },
+  'safety-monitor': { Component: SafetyMonitorPanel as ComponentType<Record<string, unknown>>, defaultBounds: { width: 420, height: 520 } },
 };
 
 export function getDetachedComponent(componentId: string): DetachedComponentDef | undefined {

@@ -19,6 +19,7 @@ import type {
 } from '../../shared/ipc-channels.js';
 import { IPC_CHANNELS } from '../../shared/ipc-channels.js';
 import { ardupilotSitlDownloader } from './ardupilot-sitl-downloader.js';
+import { simEngineProcess } from '../sim/sim-engine-process.js';
 
 const DEFAULT_MODELS: Record<ArduPilotVehicleType, string> = {
   copter: 'quad',
@@ -47,7 +48,7 @@ const COPTER_FRAME_CLASS: Record<string, number> = {
  * This ensures essential parameters (like FRAME_CLASS) are set on first boot
  * or after EEPROM wipe, avoiding the "Check frame class" arming error.
  */
-function generateDefaultParams(
+export function generateDefaultParams(
   vehicleType: ArduPilotVehicleType,
   model: string,
   simBattVoltage?: number,
@@ -251,10 +252,15 @@ class ArduPilotSitlProcessManager {
   private buildArgs(config: ArduPilotSitlConfig): string[] {
     const args: string[] = [];
 
+    // ArduDeck in-app simulator: SITL uses our headless engine as its external
+    // flight dynamics model. The engine binds UDP 9002 and runs our 6DOF
+    // physics; SITL just streams servo PWM to it and reads state back.
+    if (config.useArduDeckSim) {
+      args.push('-MJSON:127.0.0.1');
+    } else if (config.customFramePath && config.customFrameMotors) {
     // Custom frame JSON overrides the built-in -M model when provided. SITL
     // expects `<type>:<absolute path>` where type is the physics class
     // (quad/hexa/octa) — derived from the frame's motor count.
-    if (config.customFramePath && config.customFrameMotors) {
       const typePrefix =
         config.customFrameMotors === 8 ? 'octa' :
         config.customFrameMotors === 6 ? 'hexa' :
@@ -297,6 +303,14 @@ class ArduPilotSitlProcessManager {
     if (this._isRunning) {
       this.stop();
     }
+
+    // The custom JSON-FDM sim engine (the never-working WS experiment) is shelved:
+    // SITL always runs its own built-in physics. Force the engine path off so a
+    // stale persisted `useArduDeckSim=true` can't emit `-MJSON` and leave SITL
+    // waiting forever for a dead external FDM (→ no clock, no GPS, frozen battery).
+    // Custom frames are passed straight to `-M<type>:<file>` as before — they load
+    // fine in built-in SITL ("Loaded model params from ...").
+    config = { ...config, useArduDeckSim: false };
 
     const platformCheck = this.isPlatformSupported();
     if (!platformCheck.supported) {
@@ -366,7 +380,28 @@ class ArduPilotSitlProcessManager {
       // relative one resolved against SITL's cwd. The only reliable solution
       // is to write the file INSIDE SITL's cwd (the binary's directory) and
       // pass a bare filename to `-Mtype:<filename>`.
-      if (config.customFramePath) {
+      // ArduDeck in-app simulator: start the headless physics engine BEFORE
+      // SITL so its JSON FDM UDP socket is bound when SITL connects. The engine
+      // (not SITL) consumes the custom frame, so we skip SITL-side frame staging
+      // and pass the original frame path straight to the engine.
+      if (config.useArduDeckSim) {
+        const engineKind =
+          config.vehicleType === 'plane' ? 'plane' :
+          config.vehicleType === 'rover' ? 'rover' : 'copter';
+        const windIntensity = config.simWindIntensity ?? 0;
+        const engineResult = await simEngineProcess.start({
+          kind: engineKind,
+          framePath: config.customFramePath,
+          home: config.homeLocation,
+          noise: config.simSensorNoise ?? false,
+          battery: config.simBatterySag ?? true,
+          wind: windIntensity > 0 ? `0,0,0,${windIntensity},1` : undefined,
+        });
+        if (!engineResult.success) {
+          this._isRunning = false;
+          return { success: false, error: `sim-engine failed to start: ${engineResult.error}` };
+        }
+      } else if (config.customFramePath) {
         try {
           const { stageFramePathForLaunch } = await import('./custom-frame-storage.js');
           const sitlCwd = path.dirname(binaryPath);
@@ -435,6 +470,8 @@ class ArduPilotSitlProcessManager {
         this._isRunning = false;
         this.process = null;
         this._currentConfig = null;
+        // If SITL dies, tear down the sim engine too so it isn't orphaned.
+        simEngineProcess.stop();
         // Early-crash detection: an exit within the first few seconds with
         // a fatal signal (or a non-zero code, since some crashes don't
         // surface a signal on Windows) almost always means the binary can't
@@ -473,6 +510,8 @@ class ArduPilotSitlProcessManager {
   }
 
   stop(): void {
+    // Tear down the in-app sim engine alongside SITL (no-op if not running).
+    simEngineProcess.stop();
     if (this.process) {
       try {
         this.process.kill('SIGTERM');
@@ -504,6 +543,7 @@ class ArduPilotSitlProcessManager {
    * SITL silently fails to bind.
    */
   async stopAndWait(timeoutMs: number = 5000): Promise<void> {
+    simEngineProcess.stop();
     const proc = this.process;
     if (!proc) return;
     return new Promise<void>((resolve) => {
@@ -546,6 +586,7 @@ class ArduPilotSitlProcessManager {
       pid: this.process?.pid,
       vehicleType: this._currentConfig?.vehicleType,
       tcpPort: 5760,
+      simStateWsPort: simEngineProcess.wsPort ?? undefined,
     };
   }
 

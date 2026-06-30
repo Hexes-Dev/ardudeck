@@ -72,6 +72,36 @@ export function PersistentSurveyOverlay() {
           }}
         />,
       );
+      // Branch centerlines forked off the corridor — same dashed casing as the main one.
+      const branches = (g.config as { corridorBranches?: Array<Array<{ lat: number; lng: number }>> }).corridorBranches ?? [];
+      branches.forEach((br, bi) => {
+        if (br.length < 2) return;
+        const brPos = br.map((p) => [p.lat, p.lng] as [number, number]);
+        layers.push(
+          <Polyline
+            key={`corr-br-case-${g.id}-${bi}`}
+            positions={brPos}
+            pane={isSelected ? 'markerPane' : undefined}
+            interactive={false}
+            pathOptions={{ color: '#ffffff', weight: isSelected ? 7 : 5, opacity: 0.85 }}
+          />,
+        );
+        layers.push(
+          <Polyline
+            key={`corr-br-${g.id}-${bi}`}
+            positions={brPos}
+            pane={isSelected ? 'markerPane' : undefined}
+            pathOptions={{ color: g.color, weight: isSelected ? 4 : 3, dashArray: '10, 6' }}
+            eventHandlers={{
+              click: (e) => {
+                e.originalEvent.stopPropagation();
+                setSelectedGroupId(g.id);
+                loadFromGroup({ id: g.id, polygon: g.polygon, config: g.config });
+              },
+            }}
+          />,
+        );
+      });
       continue;
     }
 

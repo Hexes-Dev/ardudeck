@@ -3,6 +3,7 @@ import type { VehicleProfile } from '../../../stores/settings-store.js';
 import { useConnectionStore } from '../../../stores/connection-store.js';
 import { useParameterStore } from '../../../stores/parameter-store.js';
 import { useTelemetryStore } from '../../../stores/telemetry-store.js';
+import { useActiveVehicleStore } from '../../../stores/active-vehicle-store.js';
 import { useProfileApplyStore } from '../../../stores/profile-apply-store.js';
 import { useProfileApply } from './use-profile-apply.js';
 
@@ -24,6 +25,11 @@ export function ApplyProfileButton({ profile, onBeforeStart, size = 'compact' }:
   const isSitl = useConnectionStore(s => s.connectionState.isSitl ?? false);
   const paramCount = useParameterStore(s => s.parameters.size);
   const armed = useTelemetryStore(s => s.flight.armed);
+  // A fleet is live but there's no primary single connection. Profiles are a bulk
+  // parameter write, which runs over a DIRECT connection only (params are not
+  // routed per fleet vehicle) - so we surface that instead of a misleading
+  // "Connect first" when the operator clearly is connected to a fleet.
+  const fleetOnly = !isConnected && useActiveVehicleStore(s => Object.keys(s.knownVehicles).length > 0);
   const applyStatus = useProfileApplyStore(s => s.status);
   const activeProfileId = useProfileApplyStore(s => s.activeProfileId);
 
@@ -34,7 +40,7 @@ export function ApplyProfileButton({ profile, onBeforeStart, size = 'compact' }:
   const globallyBusy = applyStatus !== 'idle' && activeProfileId !== profile.id;
 
   const { label, variant, disabled, subLabel } = deriveButtonState({
-    isConnected, isSitl, armed, paramCount, inFlight, globallyBusy, applyStatus,
+    isConnected, isSitl, armed, paramCount, inFlight, globallyBusy, applyStatus, fleetOnly,
   });
 
   const sizeClasses = size === 'full'
@@ -79,6 +85,7 @@ function deriveButtonState(args: {
   inFlight: boolean;
   globallyBusy: boolean;
   applyStatus: string;
+  fleetOnly: boolean;
 }): {
   label: string;
   subLabel: string;
@@ -91,6 +98,9 @@ function deriveButtonState(args: {
   }
   if (args.globallyBusy) {
     return { label: 'Busy', subLabel: 'Another profile apply is in progress', variant: 'muted', disabled: true };
+  }
+  if (args.fleetOnly) {
+    return { label: 'Direct link to apply', subLabel: 'Vehicle profiles write parameters over a direct connection. Connect to one vehicle directly to apply this profile (not over the fleet link).', variant: 'muted', disabled: true };
   }
   if (!args.isConnected) {
     return { label: 'Connect first', subLabel: 'Connect to a vehicle to apply this profile', variant: 'muted', disabled: true };

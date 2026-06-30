@@ -17,6 +17,8 @@ export interface TelemetryBatch {
   escTelemetry?: EscTelemetryData;
   servoOutput?: ServoOutputData;
   sensorHealth?: SensorHealth;
+  /** Source vehicle key, tagged by the main process for per-vehicle routing. */
+  __vehicleKey?: string;
 }
 
 interface TelemetryStore extends TelemetryState {

@@ -3,32 +3,36 @@ import { useOsdStore } from '../../stores/osd-store';
 import {
   OSD_CHAR_WIDTH,
   OSD_CHAR_HEIGHT,
-  OSD_COLS,
+  getOsdCols,
   getOsdRows,
 } from '../../utils/osd/font-renderer';
 
 interface OsdCanvasProps {
   className?: string;
+  /** Display scale; overrides the store's manual zoom (used for fit-to-window). */
+  scale?: number;
 }
 
 /**
  * OSD Canvas - renders the OSD screen buffer using the loaded font
  * Memoized to prevent unnecessary re-renders
  */
-export const OsdCanvas = React.memo(function OsdCanvas({ className = '' }: OsdCanvasProps) {
+export const OsdCanvas = React.memo(function OsdCanvas({ className = '', scale: scaleProp }: OsdCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const currentFont = useOsdStore((s) => s.currentFont);
   const screenBuffer = useOsdStore((s) => s.screenBuffer);
   const renderVersion = useOsdStore((s) => s.renderVersion);
   const videoType = useOsdStore((s) => s.videoType);
-  const scale = useOsdStore((s) => s.scale);
+  const storeScale = useOsdStore((s) => s.scale);
+  const scale = scaleProp ?? storeScale;
   const showGrid = useOsdStore((s) => s.showGrid);
   const backgroundColor = useOsdStore((s) => s.backgroundColor);
 
   // Calculate canvas dimensions
+  const cols = getOsdCols(videoType);
   const rows = getOsdRows(videoType);
-  const canvasWidth = OSD_COLS * OSD_CHAR_WIDTH * scale;
+  const canvasWidth = cols * OSD_CHAR_WIDTH * scale;
   const canvasHeight = rows * OSD_CHAR_HEIGHT * scale;
 
   // Pre-render character canvases for the current font
@@ -80,7 +84,7 @@ export const OsdCanvas = React.memo(function OsdCanvas({ className = '' }: OsdCa
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
       ctx.lineWidth = 1;
 
-      for (let x = 0; x <= OSD_COLS; x++) {
+      for (let x = 0; x <= cols; x++) {
         ctx.beginPath();
         ctx.moveTo(x * OSD_CHAR_WIDTH * scale, 0);
         ctx.lineTo(x * OSD_CHAR_WIDTH * scale, canvasHeight);
@@ -122,6 +126,8 @@ export const OsdCanvas = React.memo(function OsdCanvas({ className = '' }: OsdCa
     showGrid,
     backgroundColor,
     scale,
+    cols,
+    rows,
   ]);
 
   return (
@@ -129,7 +135,7 @@ export const OsdCanvas = React.memo(function OsdCanvas({ className = '' }: OsdCa
       ref={canvasRef}
       width={canvasWidth}
       height={canvasHeight}
-      className={`border border rounded ${className}`}
+      className={`border border-subtle rounded ${className}`}
       style={{
         imageRendering: 'pixelated',
       }}
@@ -151,8 +157,9 @@ export const OsdPreview = React.memo(function OsdPreview({
   const videoType = useOsdStore((s) => s.videoType);
   const scale = useOsdStore((s) => s.scale);
 
+  const cols = getOsdCols(videoType);
   const rows = getOsdRows(videoType);
-  const aspectRatio = (OSD_COLS * OSD_CHAR_WIDTH) / (rows * OSD_CHAR_HEIGHT);
+  const aspectRatio = (cols * OSD_CHAR_WIDTH) / (rows * OSD_CHAR_HEIGHT);
 
   return (
     <div className={`relative ${className}`}>
@@ -161,7 +168,7 @@ export const OsdPreview = React.memo(function OsdPreview({
         className="relative mx-auto"
         style={{
           aspectRatio: aspectRatio.toFixed(4),
-          maxWidth: OSD_COLS * OSD_CHAR_WIDTH * scale,
+          maxWidth: cols * OSD_CHAR_WIDTH * scale,
         }}
       >
         <OsdCanvas className="w-full h-full" />
@@ -181,7 +188,7 @@ export const OsdPreview = React.memo(function OsdPreview({
 
       {/* Video type badge */}
       <div className="absolute top-2 right-2 bg-black/50 text-white text-xs px-2 py-0.5 rounded">
-        {videoType} {rows}×{OSD_COLS}
+        {videoType} {cols}×{rows}
       </div>
     </div>
   );

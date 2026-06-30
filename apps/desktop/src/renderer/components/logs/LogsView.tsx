@@ -4,6 +4,7 @@ import { LogListPanel } from './LogListPanel';
 import { HealthReportPanel } from './HealthReportPanel';
 import { LogExplorerPanel } from './LogExplorerPanel';
 import { AiAnalysisPanel } from './AiAnalysisPanel';
+import { FleetForensicsPanel } from './FleetForensicsPanel';
 
 export function LogsView() {
   const activeTab = useLogStore((s) => s.activeTab);
@@ -17,6 +18,7 @@ export function LogsView() {
     { id: 'report' as const, label: 'Health Report', disabled: !currentLog },
     { id: 'explorer' as const, label: 'Explorer', disabled: !currentLog },
     ...(aiProvider ? [{ id: 'ai' as const, label: 'AI Analysis', disabled: !currentLog }] : []),
+    { id: 'fleet' as const, label: 'Fleet Forensics' },
   ];
 
   return (
@@ -56,6 +58,7 @@ export function LogsView() {
         {activeTab === 'report' && currentLog && <HealthReportPanel />}
         {activeTab === 'explorer' && currentLog && <LogExplorerPanel />}
         {activeTab === 'ai' && currentLog && <AiAnalysisPanel />}
+        {activeTab === 'fleet' && <FleetForensicsPanel />}
       </div>
     </div>
   );

@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useState } from 'react';
 import { useConnectionStore } from '../../stores/connection-store';
+import { useActiveVehicleStore } from '../../stores/active-vehicle-store';
 import { useUpdateStore } from '../../stores/update-store';
 import { useNavigationStore } from '../../stores/navigation-store';
 import { useTheme } from '../../hooks/useTheme';
@@ -18,6 +19,13 @@ export function AppShell({ children }: AppShellProps) {
   const { connectionState, disconnect } = useConnectionStore();
   const { currentVersion, status, fetchVersion } = useUpdateStore();
   const setView = useNavigationStore((s) => s.setView);
+
+  // Fleet (multi-vehicle/swarm) connects over background transports that don't
+  // set the primary connection flag. Surface it as its own status so the pill
+  // isn't stuck on "Disconnected" while a live fleet is selected.
+  const fleetCount = useActiveVehicleStore((s) => Object.keys(s.knownVehicles).length);
+  const activeVehicleKey = useActiveVehicleStore((s) => s.activeVehicleKey);
+  const fleetConnected = !connectionState.isConnected && fleetCount > 0;
 
   useTheme();
 
@@ -94,6 +102,17 @@ export function AppShell({ children }: AppShellProps) {
               <svg className="w-3 h-3 text-content-tertiary opacity-0 group-hover:opacity-100 group-hover:text-red-400 transition-all" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
               </svg>
+            </button>
+          ) : fleetConnected ? (
+            <button
+              onClick={() => setView('telemetry')}
+              title="Fleet connected over multi-vehicle links. Click to open telemetry."
+              className="group flex items-center gap-2.5 px-3 py-1.5 rounded-full bg-surface border border-emerald-500/30 hover:border-emerald-500/50 transition-colors cursor-pointer"
+            >
+              <div className="status-dot status-dot-connected" />
+              <span className="text-sm font-medium text-content-secondary group-hover:text-content">
+                Fleet ({fleetCount}){activeVehicleKey ? '' : ' · none selected'}
+              </span>
             </button>
           ) : (
             <div className={`flex items-center gap-2.5 px-3 py-1.5 rounded-full bg-surface border ${

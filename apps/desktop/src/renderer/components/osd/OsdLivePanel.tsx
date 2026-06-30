@@ -43,7 +43,7 @@ export function OsdLivePanel() {
   return (
     <div className="flex flex-col h-full">
       {/* Connection status */}
-      <div className="px-3 py-2 border-b border">
+      <div className="px-3 py-2 border-b border-subtle">
         <h3 className="text-xs font-medium text-content mb-1">Live Telemetry</h3>
         {connectionState.isConnected ? (
           <p className="text-[10px] text-green-400">
@@ -60,14 +60,14 @@ export function OsdLivePanel() {
       <div className="flex-1 overflow-y-auto">
         {/* Mode switches */}
         {connectionState.isConnected && (
-          <div className="border-b border py-2">
+          <div className="border-b border-subtle py-2">
             <OsdModeSwitchPanel />
           </div>
         )}
 
         {/* Raw RC controls (collapsed by default) */}
         {connectionState.isConnected && (
-          <div className="border-b border">
+          <div className="border-b border-subtle">
             <button
               className="w-full flex items-center gap-2 px-3 py-2 hover:bg-surface text-left"
               onClick={() => setRcExpanded(!rcExpanded)}

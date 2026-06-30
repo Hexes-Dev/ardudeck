@@ -23,6 +23,16 @@ export interface TacticalIconOptions {
   selected: boolean;
   mode: string;
   designation?: string;
+  /** Formation leader - gets a gold ring + LEAD chip so it's unmistakable on the map. */
+  isLeader?: boolean;
+  /** Compact label: show only the SYS id until hovered (used for non-active fleet markers
+   *  so a tight cluster doesn't become a pile of overlapping readouts). */
+  compact?: boolean;
+  /** Force this marker above all others (the active/primary vehicle). */
+  topmost?: boolean;
+  /** Vehicle identity colour for the body/arrow/speed vector (so the fleet is colour-coded,
+   *  matching the strip cards + waypoints). The disc ring still encodes state. */
+  bodyColor?: string;
 }
 
 /** Values updated via DOM manipulation (no icon rebuild) */
@@ -48,26 +58,42 @@ export function createTacticalVehicleIcon(opts: TacticalIconOptions): L.DivIcon 
   const colors = STATE_COLORS[opts.state];
   const modeColor = getModeCategoryColor(opts.mode);
   const glowClass = colors.glow ? ` ${colors.glow}` : '';
+  // The drone glyph + heading arrow + speed vector take the vehicle's identity colour when
+  // given; the disc ring keeps the state colour so armed/critical is still readable.
+  const bodyFill = opts.bodyColor ?? colors.fill;
 
   const selectionRing = opts.selected
     ? `<circle cx="${SVG_CENTER}" cy="${SVG_CENTER}" r="28" fill="none" stroke="#22d3ee" stroke-width="2"
          stroke-dasharray="5 4" class="tactical-selection-ring" />`
     : '';
 
+  // Leader: a solid gold ring (distinct from the cyan dashed selection ring).
+  const leaderRing = opts.isLeader
+    ? `<circle cx="${SVG_CENTER}" cy="${SVG_CENTER}" r="25" fill="none" stroke="#fbbf24" stroke-width="2.5"
+         class="tactical-leader-ring" />`
+    : '';
+  const leaderChip = opts.isLeader
+    ? `<span style="background:#fbbf24;color:#1f2937;font-weight:700;border-radius:2px;padding:0 3px;margin-right:4px;font-size:8px;letter-spacing:0.3px;">LEAD</span>`
+    : '';
+
+  // Disc ring uses the bright state colour so the fleet stays state-readable even when each
+  // body is its own identity colour.
   const bgDisc = `<circle cx="${SVG_CENTER}" cy="${SVG_CENTER}" r="22"
-    fill="rgba(0,0,0,0.55)" stroke="${colors.border}" stroke-width="1.5" />`;
+    fill="rgba(0,0,0,0.55)" stroke="${colors.fill}" stroke-width="2" />`;
 
   const iconBody = iconDef.strokeOnly
-    ? `<path d="${iconDef.svgPath}" fill="none" stroke="${colors.fill}" stroke-width="2.5"
+    ? `<path d="${iconDef.svgPath}" fill="none" stroke="${bodyFill}" stroke-width="2.5"
             stroke-linejoin="round" stroke-linecap="round" />`
-    : `<path d="${iconDef.svgPath}" fill="${colors.fill}" stroke="${colors.border}" stroke-width="1.5"
+    : `<path d="${iconDef.svgPath}" fill="${bodyFill}" stroke="${colors.border}" stroke-width="1.5"
             stroke-linejoin="round" stroke-linecap="round" />`;
 
   const designationHtml = opts.designation
-    ? `<span style="color:#d1d5db;margin-right:4px;">${opts.designation}</span>`
+    ? `<span style="color:#f1f5f9;font-weight:600;">${opts.designation}</span>`
     : '';
+  // SYS id sits on its own top line; mode + telemetry go below it.
+  const labelLine1 = opts.designation || opts.isLeader ? `<div>${leaderChip}${designationHtml}</div>` : '';
 
-  const labelBorder = opts.selected ? '#22d3ee' : colors.border;
+  const labelBorder = opts.isLeader ? '#fbbf24' : opts.selected ? '#22d3ee' : colors.border;
 
   // Heading arrow as an HTML div - CSS triangle positioned above the disc, rotated with heading
   const showArrow = opts.vehicleClass !== 'antenna';
@@ -87,7 +113,7 @@ export function createTacticalVehicleIcon(opts: TacticalIconOptions): L.DivIcon 
           width:0;height:0;
           border-left:8px solid transparent;
           border-right:8px solid transparent;
-          border-bottom:14px solid ${colors.fill};
+          border-bottom:14px solid ${bodyFill};
           filter:drop-shadow(0 0 1px #000) drop-shadow(0 0 1px #000);
         "></div>
       </div>` : '';
@@ -98,8 +124,9 @@ export function createTacticalVehicleIcon(opts: TacticalIconOptions): L.DivIcon 
            style="transform:rotate(0deg);overflow:visible;">
         ${bgDisc}
         ${selectionRing}
+        ${leaderRing}
         <line class="tvi-speed" x1="${SVG_CENTER}" y1="${SVG_CENTER}" x2="${SVG_CENTER}" y2="${SVG_CENTER}"
-              stroke="${colors.fill}" stroke-width="2" stroke-opacity="0.7" stroke-linecap="round" />
+              stroke="${bodyFill}" stroke-width="2" stroke-opacity="0.7" stroke-linecap="round" />
         <g transform="translate(${SHAPE_OFFSET},${SHAPE_OFFSET})">
           ${iconBody}
         </g>
@@ -155,14 +182,15 @@ export function createTacticalVehicleIcon(opts: TacticalIconOptions): L.DivIcon 
         font-size:10px;
         line-height:1.4;
       ">
-        <div>${designationHtml}<span style="color:${modeColor};" class="tvi-mode">${opts.mode}</span></div>
-        <div style="color:#d1d5db;"><span class="tvi-alt">0.0</span><span style="color:#6b7280;">m</span> <span class="tvi-spd">0.0</span><span style="color:#6b7280;">m/s</span></div>
+        ${labelLine1}
+        <div class="tvi-detail-block"><span style="color:${modeColor};" class="tvi-mode">${opts.mode}</span></div>
+        <div class="tvi-detail-block" style="color:#d1d5db;"><span class="tvi-alt">0.0</span><span style="color:#6b7280;">m</span> <span class="tvi-spd">0.0</span><span style="color:#6b7280;">m/s</span></div>
       </div>
     </div>
   `;
 
   return L.divIcon({
-    className: 'tactical-vehicle-marker',
+    className: `tactical-vehicle-marker${opts.compact ? ' tvi-compact' : ''}${opts.topmost ? ' tvi-topmost' : ''}`,
     html,
     iconSize: [ICON_SIZE, ICON_SIZE],
     iconAnchor: [ICON_SIZE / 2, ICON_SIZE / 2],

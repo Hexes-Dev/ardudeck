@@ -9,7 +9,7 @@ import { useOsdDrag } from '../../hooks/useOsdDrag';
 import type { OsdElementId } from '../../stores/osd-store';
 import type { OsdElementPosition } from '../../stores/osd-store';
 import type { ElementSize } from '../../utils/osd/element-registry';
-import type { VideoType } from '../../utils/osd/font-renderer';
+import { type VideoType, getOsdCols, getOsdRows } from '../../utils/osd/font-renderer';
 
 interface Props {
   elementId: OsdElementId;
@@ -46,7 +46,8 @@ export function OsdElementOverlay({
 }: Props) {
   const charWidth = CHAR_WIDTH * scale;
   const charHeight = CHAR_HEIGHT * scale;
-  const gridRows = videoType === 'PAL' ? 16 : 13;
+  const gridCols = getOsdCols(videoType);
+  const gridRows = getOsdRows(videoType);
 
   const { isDragging, handlePointerDown, handlePointerMove, handlePointerUp } = useOsdDrag({
     elementId,
@@ -54,7 +55,7 @@ export function OsdElementOverlay({
     elementHeight: size.height,
     charWidth,
     charHeight,
-    gridCols: 30,
+    gridCols,
     gridRows,
     onPositionChange,
   });

@@ -31,6 +31,7 @@ import {
   type GraphSpec,
 } from '../../stores/inspector-store';
 import { useConnectionStore } from '../../stores/connection-store';
+import { useActiveVehicleIdentity } from '../../hooks/useFleet';
 import { useResolvedTheme } from '../../hooks/useTheme';
 import { FieldGraph } from './FieldGraph';
 
@@ -143,7 +144,10 @@ export function MavlinkInspectorView(): JSX.Element {
   const compidFilter = useInspectorStore((s) => s.compidFilter);
   const setCompidFilter = useInspectorStore((s) => s.setCompidFilter);
   const reset = useInspectorStore((s) => s.reset);
-  const isConnected = useConnectionStore((s) => s.connectionState.isConnected);
+  // Fleet-aware: the inspector groups packets by sysid:compid and shows the whole
+  // fleet, so it is "live" whenever the primary link OR a fleet is up - not just
+  // the idle primary connection.
+  const isConnected = useActiveVehicleIdentity().connected;
   const resolvedTheme = useResolvedTheme();
 
   // Store-backed state — these survive component unmount (view switches).

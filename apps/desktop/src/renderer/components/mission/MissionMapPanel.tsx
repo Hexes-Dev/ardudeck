@@ -47,6 +47,9 @@ import { AirspaceOverlay } from '../map/overlays/AirspaceOverlay';
 import { AirspaceLegend } from '../map/overlays/AirspaceLegend';
 import { MapLayersControl } from '../map/overlays/MapLayersControl';
 import { WindParticleOverlay } from '../map/overlays/WindParticleOverlay';
+import { TrafficOverlay } from '../map/overlays/TrafficOverlay';
+import { TrafficAltitudeFilter } from '../map/overlays/TrafficAltitudeFilter';
+import { ZoneAlertBanner } from '../map/overlays/ZoneAlertBanner';
 import { WindControls } from '../map/overlays/WindControls';
 import { WindRoseCard } from '../map/overlays/WindRoseCard';
 import { ApiKeyDialog } from '../map/overlays/ApiKeyDialog';
@@ -95,8 +98,10 @@ interface PathSegment {
   color: string;
 }
 
-// Build colored path segments from ALL mission items (not just location ones)
-function buildSegmentedPath(allItems: MissionItem[]): PathSegment[] {
+// Build colored path segments from ALL mission items (not just location ones).
+// When `groupColorOf` is supplied (fleet / multi-mission), each leg is coloured by
+// its group's colour instead of the command/state segment colour.
+function buildSegmentedPath(allItems: MissionItem[], groupColorOf?: (groupId: string | undefined) => string | undefined): PathSegment[] {
   // Extract navigation waypoints with locations for drawing (skip 0,0 null coordinates)
   const navWaypoints = allItems.filter(
     item => isNavigationCommand(item.command) && commandHasLocation(item.command) && hasValidCoordinates(item.latitude, item.longitude),
@@ -133,7 +138,7 @@ function buildSegmentedPath(allItems: MissionItem[]): PathSegment[] {
       // WP of one group to the first of the next isn't a real flight leg.
       const crossesGroup = !!(prevNav && prevNav.groupId && item.groupId && prevNav.groupId !== item.groupId);
       if (prevNav && !crossesGroup) {
-        const color = getSegmentColor(item.command, cameraActive, roiActive, speedOverride);
+        const color = groupColorOf?.(item.groupId) ?? getSegmentColor(item.command, cameraActive, roiActive, speedOverride);
         const isSpline =
           prevNav.command === MAV_CMD.NAV_SPLINE_WAYPOINT ||
           item.command === MAV_CMD.NAV_SPLINE_WAYPOINT;
@@ -280,7 +285,7 @@ function getCommandShape(cmd: number): string {
 }
 
 // Create waypoint marker icon
-function createWaypointIcon(wp: MissionItem, isSelected: boolean, isCurrent: boolean, segmentColor?: string, displayNumber?: number): L.DivIcon {
+function createWaypointIcon(wp: MissionItem, isSelected: boolean, isCurrent: boolean, segmentColor?: string, displayNumber?: number, groupColor?: string): L.DivIcon {
   // For regular waypoints, use segment color to reflect mission state (camera, ROI, speed)
   // For special commands (takeoff, land, loiter, etc.), keep their distinct command color
   const commandColor = getCommandColor(wp.command);
@@ -290,8 +295,11 @@ function createWaypointIcon(wp: MissionItem, isSelected: boolean, isCurrent: boo
   const size = isSelected ? 38 : 28;
   const shape = getCommandShape(wp.command);
   const displayText = shape || (displayNumber ?? wp.seq + 1).toString();
-  const borderColor = isCurrent ? '#fbbf24' : 'rgba(255,255,255,0.95)';
-  const borderWidth = isCurrent ? 3 : isSelected ? 3 : 2;
+  // In a fleet (multiple groups assigned to vehicles), ring each marker in its
+  // group's (vehicle's) colour so the per-vehicle missions are distinguishable;
+  // the fill still encodes the command type. Selected/current keep their styling.
+  const borderColor = isCurrent ? '#fbbf24' : isSelected ? 'rgba(255,255,255,0.95)' : (groupColor ?? 'rgba(255,255,255,0.95)');
+  const borderWidth = isCurrent ? 3 : isSelected ? 3 : (groupColor ? 3 : 2);
 
   // Selected state: layered halo (white inner ring + bright cyan outer ring + glow).
   // Cyan #22d3ee is reserved for selection so it never collides with command colors
@@ -483,6 +491,7 @@ function MapOverlayLayers({ baseLayer }: { baseLayer: string }) {
       {activeOverlays.has('dipul') && <DipulOverlay />}
       {activeOverlays.has('wind') && <WindParticleOverlay />}
       {activeOverlays.has('wind') && <WindRoseCard />}
+      {(activeOverlays.has('traffic') || activeOverlays.has('gliders') || activeOverlays.has('remoteid')) && <TrafficOverlay />}
     </>
   );
 }
@@ -583,6 +592,31 @@ function FocusOnSelected({ waypoints, selectedSeq }: { waypoints: MissionItem[];
     }
     prevSelectedRef.current = selectedSeq;
   }, [selectedSeq, waypoints, map]);
+
+  return null;
+}
+
+// Explicit "focus" action from the WP list - always pan AND zoom in on the
+// requested waypoint (unlike FocusOnSelected, which only nudges off-screen
+// WPs at the current zoom). Driven by a nonce so re-focusing the same WP
+// re-centres.
+function FocusController({ waypoints }: { waypoints: MissionItem[] }) {
+  const map = useMap();
+  const focusNonce = useMissionStore((s) => s.focusNonce);
+  const focusedSeq = useMissionStore((s) => s.focusedSeq);
+  const prevNonceRef = useRef(focusNonce);
+
+  useEffect(() => {
+    if (focusNonce === prevNonceRef.current) return;
+    prevNonceRef.current = focusNonce;
+    if (focusedSeq === null) return;
+    const wp = waypoints.find((w) => w.seq === focusedSeq);
+    if (!wp || wp.latitude === 0 || wp.longitude === 0) return;
+    map.setView([wp.latitude, wp.longitude], Math.max(map.getZoom(), 17), {
+      animate: true,
+      duration: 0.4,
+    });
+  }, [focusNonce, focusedSeq, waypoints, map]);
 
   return null;
 }
@@ -722,6 +756,7 @@ const DraggableMarker = memo(function DraggableMarker({
   readOnly = false,
   segmentColor,
   displayNumber,
+  groupColor,
 }: {
   wp: MissionItem;
   isSelected: boolean;
@@ -732,6 +767,7 @@ const DraggableMarker = memo(function DraggableMarker({
   onRightClick?: (e: L.LeafletMouseEvent, wp: MissionItem) => void;
   readOnly?: boolean;
   segmentColor?: string;
+  groupColor?: string;
 }) {
   const [position, setPosition] = useState<[number, number]>([wp.latitude, wp.longitude]);
   const markerRef = useRef<L.Marker>(null);
@@ -772,8 +808,8 @@ const DraggableMarker = memo(function DraggableMarker({
 
   // Memoize icon to prevent unnecessary recreations
   const icon = useMemo(
-    () => createWaypointIcon(wp, isSelected, isCurrent, segmentColor, displayNumber),
-    [wp.command, wp.seq, isSelected, isCurrent, segmentColor, displayNumber]
+    () => createWaypointIcon(wp, isSelected, isCurrent, segmentColor, displayNumber, groupColor),
+    [wp.command, wp.seq, isSelected, isCurrent, segmentColor, displayNumber, groupColor]
   );
 
   return (
@@ -967,6 +1003,19 @@ function MissionMapPanel2D({ readOnly = false }: MissionMapPanelProps) {
   const groupWaypointNumbers = useMemo(
     () => computeGroupWaypointNumbers(missionItems),
     [missionItems],
+  );
+
+  // Fleet/multi-mission: with more than one group, colour each waypoint + path leg
+  // by its group's (vehicle's) colour so the per-vehicle routes are distinguishable.
+  // A single mission keeps the classic command/segment colouring (colorByGroup off).
+  const colorByGroup = groups.length > 1;
+  const groupColorById = useMemo(
+    () => new Map(groups.map((g) => [g.id, g.color])),
+    [groups],
+  );
+  const groupColorOf = useMemo(
+    () => (groupId: string | undefined) => (groupId ? groupColorById.get(groupId) : undefined),
+    [groupColorById],
   );
 
   // Survey grids are read as their PATH plus light turn-point dots, NOT as
@@ -1192,8 +1241,8 @@ function MissionMapPanel2D({ readOnly = false }: MissionMapPanelProps) {
   // Build colored path segments from visible mission items (includes DO_* state
   // changes). Hidden groups are excluded so their legs vanish with their WPs.
   const pathSegments = useMemo(() => {
-    return buildSegmentedPath(visibleMissionItems);
-  }, [visibleMissionItems]);
+    return buildSegmentedPath(visibleMissionItems, colorByGroup ? groupColorOf : undefined);
+  }, [visibleMissionItems, colorByGroup, groupColorOf]);
 
   // Segment colors per item (for marker tinting)
   const itemColors = useMemo(() => computeItemColors(missionItems), [missionItems]);
@@ -1220,6 +1269,7 @@ function MissionMapPanel2D({ readOnly = false }: MissionMapPanelProps) {
         />
         <FitToBounds waypoints={waypoints} trigger={fitTrigger} />
         <FocusOnSelected waypoints={waypoints} selectedSeq={selectedSeq} />
+        <FocusController waypoints={waypoints} />
         <CenterOnGps />
         <CenterOnVehicle trigger={centerOnVehicleTrigger} />
 
@@ -1258,7 +1308,7 @@ function MissionMapPanel2D({ readOnly = false }: MissionMapPanelProps) {
             key={i}
             positions={seg.positions}
             pathOptions={{
-              color: showSegmentColors ? seg.color : SEGMENT_COLORS.default,
+              color: (colorByGroup || showSegmentColors) ? seg.color : SEGMENT_COLORS.default,
               weight: 3,
               opacity: 0.8,
             }}
@@ -1343,6 +1393,7 @@ function MissionMapPanel2D({ readOnly = false }: MissionMapPanelProps) {
             readOnly={readOnly}
             segmentColor={showSegmentColors ? itemColors.get(wp.seq) : undefined}
             displayNumber={groupWaypointNumbers.get(wp.seq)}
+            groupColor={colorByGroup ? groupColorOf(wp.groupId) : undefined}
           />
         ))}
 
@@ -1421,6 +1472,9 @@ function MissionMapPanel2D({ readOnly = false }: MissionMapPanelProps) {
           </>
         )}
       </MapContainer>
+
+      <TrafficAltitudeFilter />
+      <ZoneAlertBanner />
 
       {/* Survey config panel lives as a docked tab next to Waypoints; see
           MissionPlanningView. The map no longer renders it as a floating overlay. */}

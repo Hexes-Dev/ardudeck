@@ -2,7 +2,7 @@
  * Survey Map Overlay - Renders survey polygon, flight lines, photo dots,
  * camera footprints, and drawing preview on the map.
  */
-import { useMemo, useCallback, useState, useEffect, memo } from 'react';
+import { useMemo, useCallback, useState, useEffect, memo, Fragment } from 'react';
 import { Polygon, Polyline, CircleMarker, Marker, Tooltip, Pane, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
 import { useSurveyStore } from '../../stores/survey-store';
@@ -98,10 +98,13 @@ export function SurveyMapOverlay() {
   const drawingVertices = useSurveyStore((s) => s.drawingVertices);
   const polygon = useSurveyStore((s) => s.polygon);
   const pattern = useSurveyStore((s) => s.config.pattern);
+  const corridorBranches = useSurveyStore((s) => s.config.corridorBranches);
   const result = useSurveyStore((s) => s.result);
   const showFootprints = useSurveyStore((s) => s.showFootprints);
   const updateVertex = useSurveyStore((s) => s.updateVertex);
   const removeVertex = useSurveyStore((s) => s.removeVertex);
+  const updateBranchVertex = useSurveyStore((s) => s.updateBranchVertex);
+  const removeBranchVertex = useSurveyStore((s) => s.removeBranchVertex);
   const maxEditableVertices = useSettingsStore((s) => s.surveyPerformance.maxEditableVertices);
   const maxPhotoMarkers = useSettingsStore((s) => s.surveyPerformance.maxPhotoMarkers);
   const polygonEditMode = useSurveyStore((s) => s.polygonEditMode);
@@ -184,8 +187,8 @@ export function SurveyMapOverlay() {
           grid/flight lines and the boundary (which live in lower panes). */}
       <Pane name="vertexTooltipPane" style={{ zIndex: 680 }} />
 
-      {/* Drawing preview */}
-      {drawMode === 'polygon' && drawingPositions.length > 0 && (
+      {/* Drawing preview (polygon outline or a corridor branch centerline) */}
+      {(drawMode === 'polygon' || drawMode === 'branch') && drawingPositions.length > 0 && (
         <>
           <Polyline
             positions={drawingPositions}
@@ -233,6 +236,32 @@ export function SurveyMapOverlay() {
                 pathOptions={{ color: SURVEY_POLYGON_COLOR, weight: 4, dashArray: '10, 6' }}
                 eventHandlers={{ click: (e) => e.originalEvent.stopPropagation() }}
               />
+              {/* Branch centerlines forked off the corridor, with draggable
+                  vertex handles (right-click a handle to delete). */}
+              {(corridorBranches ?? []).map((br, bi) => {
+                if (br.length < 2) return null;
+                const brPos = br.map(toLf);
+                return (
+                  <Fragment key={`branch-${bi}`}>
+                    <Polyline positions={brPos} interactive={false} pathOptions={{ color: '#ffffff', weight: 7, opacity: 0.85 }} />
+                    <Polyline
+                      positions={brPos}
+                      pathOptions={{ color: SURVEY_POLYGON_COLOR, weight: 4, dashArray: '10, 6' }}
+                      eventHandlers={{ click: (e) => e.originalEvent.stopPropagation() }}
+                    />
+                    {br.map((v, vi) => (
+                      <VertexMarker
+                        key={`branch-${bi}-v${vi}`}
+                        position={v}
+                        index={vi}
+                        canDelete
+                        onDragEnd={(idx, lat, lng) => updateBranchVertex(bi, idx, lat, lng)}
+                        onDelete={(idx) => removeBranchVertex(bi, idx)}
+                      />
+                    ))}
+                  </Fragment>
+                );
+              })}
             </>
           ) : (
             <>

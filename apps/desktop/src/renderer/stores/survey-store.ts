@@ -9,6 +9,7 @@ import type { CameraPreset } from '../components/survey/survey-types';
 import '../components/survey/generators';
 import { getSurveyGenerator, patternToGeneratorId } from '../components/survey/generator-registry';
 import { surveyToMissionItems } from '../components/survey/mission-builder';
+import { computeTerrainFollowAltitudes } from '../components/survey/survey-terrain-follow';
 import { calculateAltitudeForGSD } from '../components/survey/survey-stats';
 import { simplifyPolygon } from '../components/survey/geo-math';
 import { runWithActivity } from './activity-store';
@@ -19,7 +20,7 @@ import { useMissionStore } from './mission-store';
 import { MAV_CMD } from '../../shared/mission-types';
 import { isSurveyGroup, createSurveyGroup, GROUP_COLOR_PALETTE, type SurveyGroup } from '../../shared/mission-group-types';
 
-type DrawMode = 'none' | 'polygon';
+type DrawMode = 'none' | 'polygon' | 'branch';
 
 // A recompute is "heavy" (worth a progress indicator + a yielded frame so it
 // paints) when the polygon is dense or the last result was large. Cheap edits
@@ -63,6 +64,12 @@ interface SurveyStore {
   addVertex: (lat: number, lng: number) => void;
   completePolygon: () => void;
   cancelDrawing: () => void;
+  /** Begin drawing a branch centerline on the current corridor (map clicks). */
+  startBranchDraw: () => void;
+  /** Finish the in-progress branch and add it to the corridor's config. */
+  completeBranch: () => void;
+  /** Remove all branches from the current corridor config. */
+  clearCorridorBranches: () => void;
 
   /**
    * Link the survey panel to a previously-committed SurveyGroup so further
@@ -93,6 +100,8 @@ interface SurveyStore {
   setCameraOffOutside: (v: boolean) => void;
   setGridMode: (mode: 'plane' | 'copter') => void;
   setAltitudeReference: (ref: AltitudeReference) => void;
+  /** Toggle continuous DEM terrain-follow (bakes ground+AGL per waypoint). */
+  setTerrainFollow: (on: boolean) => void;
   setShowFootprints: (show: boolean) => void;
   setGroundPattern: (pattern: GroundPattern) => void;
   setSpiralDirection: (direction: 'inward' | 'outward') => void;
@@ -115,6 +124,10 @@ interface SurveyStore {
   // Polygon editing
   updateVertex: (index: number, lat: number, lng: number) => void;
   removeVertex: (index: number) => void;
+  /** Move a vertex of a corridor branch centerline (live edit). */
+  updateBranchVertex: (branchIndex: number, vertexIndex: number, lat: number, lng: number) => void;
+  /** Delete a vertex of a corridor branch (drops the branch if it would fall below 2 points). */
+  removeBranchVertex: (branchIndex: number, vertexIndex: number) => void;
 
   /**
    * Explicit polygon-edit mode. While active, vertex edits mutate only the
@@ -257,6 +270,47 @@ function buildSurveyGroupEntry(
   return { group, items };
 }
 
+/**
+ * Push a freshly-generated result through to the live-linked SurveyGroup so the
+ * committed mission tracks the on-screen draft. Extracted so both the synchronous
+ * generate path and the async terrain-follow pass re-sync identically.
+ */
+function syncResultToEditingGroup(
+  editingGroupId: string,
+  polygon: LatLng[],
+  fullConfig: SurveyConfig,
+  result: SurveyResult,
+): void {
+  let items = surveyToMissionItems(result, fullConfig);
+  const missionStore = useMissionStore.getState();
+  const externalTakeoff = missionStore.missionItems.some(
+    (it) => it.command === MAV_CMD.NAV_TAKEOFF && it.groupId !== editingGroupId,
+  );
+  if (externalTakeoff && items[0]?.command === MAV_CMD.NAV_TAKEOFF) {
+    items = items.slice(1);
+  }
+  const currentGroup = missionStore.groups.find((g) => g.id === editingGroupId);
+  if (currentGroup && isSurveyGroup(currentGroup)) {
+    const probe: SurveyGroup = {
+      ...currentGroup,
+      polygon: polygon.map((p) => ({ lat: p.lat, lng: p.lng })),
+      config: fullConfig as unknown as Record<string, unknown>,
+    };
+    const signature = computeSurveyGroupSignature(probe);
+    missionStore.syncSurveyGroupFromDraft(
+      editingGroupId,
+      probe.polygon,
+      probe.config,
+      items,
+      signature,
+    );
+  }
+}
+
+// Monotonic token so a slow terrain fetch from an earlier config can't clobber a
+// newer generate (the classic async-race guard).
+let terrainFollowSeq = 0;
+
 // Module-level flag — true after the initial hydration from settings, used to
 // suppress the persistence subscriber during the very first applyPresetConfig
 // call (otherwise we'd save the hydrated config back to itself before any
@@ -297,6 +351,28 @@ export const useSurveyStore = create<SurveyStore>()(subscribeWithSelector((set, 
 
   cancelDrawing: () => {
     set({ drawMode: 'none', drawingVertices: [] });
+  },
+
+  startBranchDraw: () => {
+    // Only meaningful for a corridor survey; a branch is another centerline.
+    if (get().config.pattern !== 'corridor') return;
+    set({ drawMode: 'branch', drawingVertices: [] });
+  },
+
+  completeBranch: () => {
+    const { drawingVertices, config } = get();
+    if (drawingVertices.length < 2) { set({ drawMode: 'none', drawingVertices: [] }); return; }
+    const branches = [...(config.corridorBranches ?? []), [...drawingVertices]];
+    set({ config: { ...config, corridorBranches: branches }, drawMode: 'none', drawingVertices: [] });
+    get().requestRecompute({ immediate: true });
+  },
+
+  clearCorridorBranches: () => {
+    const { config } = get();
+    if (!config.corridorBranches || config.corridorBranches.length === 0) return;
+    const { corridorBranches: _omit, ...rest } = config;
+    set({ config: rest });
+    get().requestRecompute({ immediate: true });
   },
 
   setPattern: (pattern) => {
@@ -358,6 +434,13 @@ export const useSurveyStore = create<SurveyStore>()(subscribeWithSelector((set, 
 
   setAltitudeReference: (altitudeReference) => {
     set({ config: { ...get().config, altitudeReference } });
+  },
+
+  setTerrainFollow: (terrainFollow) => {
+    set({ config: { ...get().config, terrainFollow } });
+    // Turning it on triggers the async DEM bake; turning it off must regenerate
+    // so the baked altitudes are dropped back to the flat config value.
+    get().requestRecompute({ immediate: true });
   },
 
   setShowFootprints: (showFootprints) => {
@@ -474,6 +557,40 @@ export const useSurveyStore = create<SurveyStore>()(subscribeWithSelector((set, 
     else get().requestRecompute({ immediate: true });
   },
 
+  updateBranchVertex: (branchIndex, vertexIndex, lat, lng) => {
+    const { config, polygonEditMode } = get();
+    const branches = config.corridorBranches;
+    const line = branches?.[branchIndex];
+    if (!branches || !line) return;
+    const newLine = line.map((p, i) => (i === vertexIndex ? { lat, lng } : p));
+    const next = branches.map((b, bi) => (bi === branchIndex ? newLine : b));
+    set({ config: { ...config, corridorBranches: next } });
+    if (polygonEditMode) set({ pendingRecompute: true });
+    else get().requestRecompute({ immediate: true });
+  },
+
+  removeBranchVertex: (branchIndex, vertexIndex) => {
+    const { config, polygonEditMode } = get();
+    const branches = config.corridorBranches;
+    const line = branches?.[branchIndex];
+    if (!branches || !line) return;
+    let next: LatLng[][];
+    if (line.length <= 2) {
+      next = branches.filter((_, bi) => bi !== branchIndex); // would degenerate -> drop branch
+    } else {
+      const nl = line.filter((_, i) => i !== vertexIndex);
+      next = branches.map((b, bi) => (bi === branchIndex ? nl : b));
+    }
+    if (next.length > 0) {
+      set({ config: { ...config, corridorBranches: next } });
+    } else {
+      const { corridorBranches: _omit, ...rest } = config;
+      set({ config: rest });
+    }
+    if (polygonEditMode) set({ pendingRecompute: true });
+    else get().requestRecompute({ immediate: true });
+  },
+
   enterPolygonEdit: () => {
     const { polygon } = get();
     set({
@@ -520,10 +637,14 @@ export const useSurveyStore = create<SurveyStore>()(subscribeWithSelector((set, 
   generateSurvey: (opts) => {
     const sync = opts?.sync ?? true;
     const { polygon, config, editingGroupId } = get();
-    if (!polygon || polygon.length < 3) return;
+    // Corridors are an open centerline (2+ points); area patterns need a ring (3+).
+    const minPoints = config.pattern === 'corridor' ? 2 : 3;
+    if (!polygon || polygon.length < minPoints) return;
 
     const fullConfig: SurveyConfig = { ...config, polygon };
     const result = runGenerator(fullConfig);
+    // A new generation supersedes any in-flight terrain fetch.
+    const seq = ++terrainFollowSeq;
     set({ result });
 
     // Live-edit sync: when the survey panel is editing an existing
@@ -533,37 +654,26 @@ export const useSurveyStore = create<SurveyStore>()(subscribeWithSelector((set, 
     // previously-inserted WPs stale. Skipped on initial open (sync: false) so
     // opening a group for edit doesn't clobber its committed altitudes.
     if (sync && editingGroupId && result) {
-      // Strip the leading NAV_TAKEOFF if the mission already has one
-      // outside this group, so we don't accumulate duplicates on every
-      // regeneration. Mirrors the logic in SurveyConfigPanel.handleInsertSurvey.
-      let items = surveyToMissionItems(result, fullConfig);
-      const missionStore = useMissionStore.getState();
-      const externalTakeoff = missionStore.missionItems.some(
-        (it) =>
-          it.command === MAV_CMD.NAV_TAKEOFF && it.groupId !== editingGroupId,
-      );
-      if (externalTakeoff && items[0]?.command === MAV_CMD.NAV_TAKEOFF) {
-        items = items.slice(1);
-      }
-      // Build a fake SurveyGroup-shaped object just for signature compute.
-      const currentGroup = missionStore.groups.find(
-        (g) => g.id === editingGroupId,
-      );
-      if (currentGroup && isSurveyGroup(currentGroup)) {
-        const probe: SurveyGroup = {
-          ...currentGroup,
-          polygon: polygon.map((p) => ({ lat: p.lat, lng: p.lng })),
-          config: fullConfig as unknown as Record<string, unknown>,
-        };
-        const signature = computeSurveyGroupSignature(probe);
-        missionStore.syncSurveyGroupFromDraft(
-          editingGroupId,
-          probe.polygon,
-          probe.config,
-          items,
-          signature,
-        );
-      }
+      syncResultToEditingGroup(editingGroupId, polygon, fullConfig, result);
+    }
+
+    // Continuous terrain-follow: sample the DEM at every waypoint and bake
+    // ground+AGL absolute altitudes. Runs after the synchronous path so the
+    // preview appears instantly, then refines once elevations resolve. Cached +
+    // batched, so a slider that doesn't move waypoints is a pure cache hit.
+    if (config.terrainFollow && result && result.waypoints.length > 0) {
+      void (async () => {
+        const outcome = await computeTerrainFollowAltitudes(result, fullConfig);
+        // Stale guard: a newer generate ran while we were fetching.
+        if (seq !== terrainFollowSeq || !outcome) return;
+        const current = get().result;
+        if (current !== result) return;
+        const terrainResult: SurveyResult = { ...result, altitudes: outcome.altitudes };
+        set({ result: terrainResult });
+        if (get().editingGroupId === editingGroupId && editingGroupId) {
+          syncResultToEditingGroup(editingGroupId, polygon, fullConfig, terrainResult);
+        }
+      })();
     }
   },
 
@@ -779,9 +889,11 @@ useSurveyStore.subscribe(
   (state) => state.config,
   (config) => {
     if (isHydratingFromSettings) return;
-    // The Omit<SurveyConfig, 'polygon'> shape carries no polygon field already,
-    // but the cast keeps us tolerant of future shape changes.
-    useSettingsStore.getState().setSurveySavedConfig(config as unknown as Record<string, unknown>);
+    // corridorBranches are world-space centerlines tied to a specific corridor —
+    // scene-specific like the polygon, so strip them too. Persisting them would
+    // wrongly graft old branches onto a freshly drawn corridor next session.
+    const { corridorBranches: _scene, ...persistable } = config as unknown as Record<string, unknown>;
+    useSettingsStore.getState().setSurveySavedConfig(persistable);
   },
 );
 

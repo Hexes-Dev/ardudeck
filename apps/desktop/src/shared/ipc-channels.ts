@@ -12,6 +12,34 @@ export const IPC_CHANNELS = {
   COMMS_START_PORT_WATCH: 'comms:start-port-watch',
   COMMS_STOP_PORT_WATCH: 'comms:stop-port-watch',
 
+  // Multi-vehicle connection registry (transports x vehicles)
+  COMMS_LIST_TRANSPORTS: 'comms:list-transports',
+  COMMS_LIST_VEHICLES: 'comms:list-vehicles',
+  COMMS_SET_ACTIVE: 'comms:set-active',
+  /** Main → renderer: the active vehicle changed (broadcast so every window,
+      e.g. the 3D world pop-out, follows the same selection as the main view). */
+  COMMS_ACTIVE_CHANGED: 'comms:active-changed',
+  /** Renderer → main: attach an extra background MAVLink transport. */
+  COMMS_ADD_TRANSPORT: 'comms:add-transport',
+  /** Renderer → main: detach a background transport (refuses the primary). */
+  COMMS_REMOVE_TRANSPORT: 'comms:remove-transport',
+  /** Renderer → main: connect to an orchestration server (MAVLink passthrough). */
+  COMMS_ADD_ORCHESTRATION_LINK: 'comms:add-orchestration-link',
+  /** Renderer → main: submit a group intent to an orchestration link. */
+  COMMS_SUBMIT_INTENT: 'comms:submit-intent',
+  /** Main → renderer: orchestration server welcome / control-plane updates. */
+  COMMS_ORCHESTRATION_STATUS: 'comms:orchestration-status',
+  /** Renderer → main: send a command to a specific vehicle (by vehicleKey). */
+  MAVLINK_VEHICLE_COMMAND: 'mavlink:vehicle-command',
+  /** Renderer → main: upload a mission to a specific vehicle (by vehicleKey). */
+  MISSION_UPLOAD_TO_VEHICLE: 'mission:upload-to-vehicle',
+  /** Main → renderer: per-vehicle mission upload progress. */
+  MISSION_VEHICLE_PROGRESS: 'mission:vehicle-progress',
+  /** Main → renderer: a new (sysid, compid) was seen on a transport. */
+  COMMS_VEHICLE_DISCOVERED: 'comms:vehicle-discovered',
+  /** Main → renderer: a vehicle/transport is going away (session cleared). */
+  COMMS_VEHICLE_LOST: 'comms:vehicle-lost',
+
   // MAVLink messages
   MAVLINK_PACKET: 'mavlink:packet',
   MAVLINK_SEND: 'mavlink:send',
@@ -71,9 +99,13 @@ export const IPC_CHANNELS = {
   MAVLINK_SIGNING_SEND_TO_FC: 'mavlink:signing-send-to-fc',
   MAVLINK_SIGNING_REMOVE_KEY: 'mavlink:signing-remove-key',
   MAVLINK_SIGNING_STATUS: 'mavlink:signing-status',
+  // Secure-link compliance: tamper-evident audit log + exportable evidence pack
+  MAVLINK_SIGNING_AUDIT_GET: 'mavlink:signing-audit-get',
+  MAVLINK_SIGNING_EVIDENCE_EXPORT: 'mavlink:signing-evidence-export',
 
   // Connection state
   CONNECTION_STATE: 'connection:state',
+  CONNECTION_GET_STATE: 'connection:get-state',
 
   // Console/debug
   CONSOLE_LOG: 'console:log',
@@ -169,6 +201,10 @@ export const IPC_CHANNELS = {
   // Settings/Vehicle profiles
   SETTINGS_GET: 'settings:get',
   SETTINGS_SAVE: 'settings:save',
+
+  // Simulator authored obstacles (persisted per test site)
+  SIM_OBSTACLES_GET: 'sim-obstacles:get',
+  SIM_OBSTACLES_SAVE: 'sim-obstacles:save',
 
   // Firmware flash
   FIRMWARE_DETECT_BOARD: 'firmware:detect-board',
@@ -291,6 +327,8 @@ export const IPC_CHANNELS = {
 
   // MSP OSD Configuration
   MSP_GET_OSD_CONFIG: 'msp:get-osd-config',
+  MSP_SET_OSD_CONFIG: 'msp:set-osd-config',
+  MSP_UPLOAD_OSD_FONT: 'msp:upload-osd-font',
 
   // MSP RX Configuration
   MSP_GET_RX_CONFIG: 'msp:get-rx-config',
@@ -372,6 +410,29 @@ export const IPC_CHANNELS = {
   ARDUPILOT_SITL_RC_SEND: 'ardupilot-sitl:rc-send',
   ARDUPILOT_SITL_RC_START: 'ardupilot-sitl:rc-start',
   ARDUPILOT_SITL_RC_STOP: 'ardupilot-sitl:rc-stop',
+
+  // ArduPilot SITL swarm (multiple instances → fleet)
+  SWARM_SITL_START: 'swarm-sitl:start',
+  SWARM_SITL_STOP: 'swarm-sitl:stop',
+  SWARM_SITL_STATUS: 'swarm-sitl:status',
+  /** Per-instance lifecycle push (spawned / ready / exited) for auto-connect. */
+  SWARM_SITL_INSTANCE: 'swarm-sitl:instance',
+  /** Combined swarm status push (running flag + instance list). */
+  SWARM_SITL_STATE: 'swarm-sitl:state',
+  /** Aggregated stdout/stderr line tagged with the originating instance. */
+  SWARM_SITL_LOG: 'swarm-sitl:log',
+  // Local orchestrator (the invisible multi-vehicle engine: a localhost child
+  // process the desktop spawns, like SITL, that manages every link and is reached
+  // over one WebSocket).
+  ORCHESTRATOR_START: 'orchestrator:start',
+  ORCHESTRATOR_STOP: 'orchestrator:stop',
+  ORCHESTRATOR_STATUS: 'orchestrator:status',
+  /** Replace the source list and restart the engine to apply it. */
+  ORCHESTRATOR_SET_SOURCES: 'orchestrator:set-sources',
+  /** Combined orchestrator status push (running flag + sources). */
+  ORCHESTRATOR_STATE: 'orchestrator:state',
+  /** Orchestrator stdout/stderr line. */
+  ORCHESTRATOR_LOG: 'orchestrator:log',
   ARDUPILOT_SITL_LIST_FRAMES: 'ardupilot-sitl:list-frames',
   ARDUPILOT_SITL_REFRESH_FRAMES: 'ardupilot-sitl:refresh-frames',
 
@@ -570,6 +631,13 @@ export const IPC_CHANNELS = {
   OVERLAY_GET_WIND: 'overlay:get-wind',
   OVERLAY_GEOCODE: 'overlay:geocode',
 
+  // Traffic overlays (ADS-B + glider/OGN)
+  TRAFFIC_UPDATE: 'traffic:update', // main -> renderer push of a TrafficBatch
+  TRAFFIC_SET_VIEWPORT: 'traffic:set-viewport',
+  TRAFFIC_SET_ENABLED: 'traffic:set-enabled',
+  TRAFFIC_GET_CONFIG: 'traffic:get-config',
+  TRAFFIC_SET_CONFIG: 'traffic:set-config',
+
   // Log download & diagnostics
   LOG_LIST_REQUEST: 'log:list-request',
   LOG_LIST_ITEM: 'log:list-item',
@@ -601,6 +669,14 @@ export const IPC_CHANNELS = {
   LOG_RECENT_ADD: 'log:recent-add',
   LOG_RECENT_REMOVE: 'log:recent-remove',
   LOG_RECENT_CLEAR: 'log:recent-clear',
+  // Fleet Forensics: cross-vehicle log history roll-up
+  FLEET_LOG_HISTORY_GET: 'fleet-log:history-get',
+  FLEET_LOG_HISTORY_CLEAR: 'fleet-log:history-clear',
+  // Fleet log fetch over the orchestrator (list / download / progress events)
+  FLEET_LOG_LIST_REQUEST: 'fleet-log:list-request',
+  FLEET_LOG_FETCH: 'fleet-log:fetch',
+  FLEET_LOG_FETCH_CANCEL: 'fleet-log:fetch-cancel',
+  FLEET_LOG_JOB_EVENT: 'fleet-log:job-event',
 
   // Area Editor (separate window)
   AREA_EDITOR_OPEN: 'area-editor:open',
@@ -618,9 +694,39 @@ export const IPC_CHANNELS = {
 
   // KML / KMZ area export
   EXPORT_AREAS_KML: 'export:areas-kml',
+
+  // ==================== Camera / video ====================
+  /** Renderer → main: start a stream for a source; returns CameraStartResult. */
+  CAMERA_START: 'camera:start',
+  /** Renderer → main: stop a stream by source id. */
+  CAMERA_STOP: 'camera:stop',
+  /** Renderer → main: snapshot the live stream of a source. */
+  CAMERA_SNAPSHOT: 'camera:snapshot',
+  /** Renderer → main: toggle recording for a source. */
+  CAMERA_RECORD_TOGGLE: 'camera:record-toggle',
+  /** Renderer → main: query MediaEngineStatus. */
+  CAMERA_ENGINE_STATUS: 'camera:engine-status',
+  /** Renderer → main: download the media-engine binaries on demand; returns MediaEngineStatus. */
+  CAMERA_ENGINE_INSTALL: 'camera:engine-install',
+  /** Main → renderer: media-engine install progress log line. */
+  CAMERA_ENGINE_INSTALL_LOG: 'camera:engine-install-log',
+  /** Renderer → main: gimbal command (GimbalCommand) for a vehicle. */
+  CAMERA_GIMBAL_COMMAND: 'camera:gimbal-command',
+  /** Renderer → main: camera command (zoom/focus, CameraCommand) for a vehicle. */
+  CAMERA_CAMERA_COMMAND: 'camera:camera-command',
+  /** Main → renderer: VIDEO_STREAM_INFORMATION discovered for a vehicle. */
+  CAMERA_VIDEO_STREAM_INFO: 'camera:video-stream-info',
+  /** Main → renderer: GIMBAL_DEVICE_ATTITUDE_STATUS for a vehicle. */
+  CAMERA_GIMBAL_ATTITUDE: 'camera:gimbal-attitude',
+  /** Main → renderer: GIMBAL_MANAGER_INFORMATION for a vehicle. */
+  CAMERA_GIMBAL_INFO: 'camera:gimbal-info',
 } as const;
 
 export type IpcChannels = typeof IPC_CHANNELS[keyof typeof IPC_CHANNELS];
+
+// Camera/video feature types live in their own module; re-exported here so the
+// preload bridge and renderer can import them alongside the other IPC types.
+export * from './camera-types';
 
 /**
  * Connection options for comms:connect
@@ -645,6 +751,145 @@ export interface ConnectOptions {
   udpClientLocalPort?: number;
   /** Force a specific protocol, skipping auto-detection */
   protocol?: 'mavlink' | 'msp';
+}
+
+/**
+ * Multi-vehicle connection registry - IPC projections.
+ *
+ * The main-process ConnectionRegistry owns the live transport/vehicle objects.
+ * These are the serializable snapshots sent to the renderer for the vehicle
+ * selector and fleet UI. Keys/ids mirror the registry exactly.
+ */
+
+/** Serializable snapshot of a transport in the registry. */
+export interface TransportInfoIpc {
+  id: string;
+  /** Connection kind, from the original config. */
+  kind: 'serial' | 'tcp' | 'udp';
+  /** Human-readable label for display (e.g. "UDP :14550", "/dev/ttyACM0"). */
+  label: string;
+  packetsRx: number;
+  packetsTx: number;
+  lastPacketAt: number | null;
+  lastError: string | null;
+  /** Number of vehicles discovered on this transport. */
+  vehicleCount: number;
+  /** True for the legacy primary connection (cannot be removed; use disconnect). */
+  isPrimary: boolean;
+}
+
+/** Serializable snapshot of a vehicle in the registry. */
+export interface VehicleInfoIpc {
+  /** `${transportId}:${sysid}.${compid}` */
+  key: string;
+  transportId: string;
+  sysid: number;
+  compid: number;
+  /** MAV_TYPE from the latest heartbeat. */
+  mavType: number;
+  boardId: string | null;
+  boardUid: string | null;
+  lastHeartbeatAt: number;
+  /** Whether this vehicle is the currently-active selection. */
+  isActive: boolean;
+}
+
+/** Payload for `COMMS_SET_ACTIVE`. Either field may be null to clear. */
+export interface SetActiveSelectionPayload {
+  transportId: string | null;
+  vehicleKey?: string | null;
+}
+
+/** A command targeted at a single vehicle (see `MAVLINK_VEHICLE_COMMAND`). */
+export type VehicleCommand =
+  | { kind: 'arm'; force?: boolean }
+  | { kind: 'disarm'; force?: boolean }
+  | { kind: 'rtl' }
+  | { kind: 'takeoff'; altitude: number }
+  | { kind: 'setmode'; customMode: number }
+  | { kind: 'mission-start' };
+
+/** A group intent submitted to an orchestration server (see `COMMS_SUBMIT_INTENT`). */
+export interface OrchestrationIntentIpc {
+  /** e.g. 'survey-split', 'formation', 'pause', 'resume', 'abort'. */
+  kind: string;
+  /** Target vehicles by sysid (optional - server may infer a group). */
+  vehicleSysids?: number[];
+  /** Opaque, intent-specific payload. */
+  payload?: unknown;
+}
+
+/** One vehicle in the orchestration server's fleet roster. */
+export interface OrchestrationRosterEntry {
+  /** Durable per-vehicle identity assigned by the orchestrator. */
+  uuid: string;
+  /** Unique sysid the server presents on the passthrough channel (what we demux by). */
+  virtualSysid: number;
+  /** The vehicle's real MAVLink sysid (server-internal; for display/diagnostics). */
+  realSysid: number;
+  /** Index of the server-side link this vehicle arrived on. */
+  linkId: number;
+  /** Transport class of that link: 'udp' | 'tcp' | 'serial' | 'other'. */
+  bearer: string;
+}
+
+/**
+ * One vehicle source the local orchestrator should terminate. The friendly UI maps a
+ * picker choice to one of these; the engine turns each into an orchestrator link/peer arg.
+ */
+export type OrchestratorSource =
+  /** Listen for vehicles pushing MAVLink to a local UDP port (the common default). */
+  | { kind: 'udp'; port: number; label?: string }
+  /** Dial a vehicle/forwarder over TCP (e.g. an LTE or Starlink endpoint). */
+  | { kind: 'tcp'; host: string; port: number; label?: string }
+  /** A serial radio (SiK) or ELRS backpack on a local serial port. */
+  | { kind: 'serial'; path: string; baud: number; label?: string }
+  /**
+   * A cellular / remote vehicle that dials IN to this machine (drone-initiated). The engine
+   * listens on the given port; point the drone's telemetry forwarder (mavlink-router /
+   * mavproxy `udpout`, or a TCP client) at this machine's reachable address. The listening
+   * socket survives signal loss and follows the drone across NAT rebinds, so a cellular link
+   * recovers on its own with no reconnect step.
+   */
+  | { kind: 'cellular'; proto: 'udp' | 'tcp'; port: number; label?: string }
+  /** Federate with another ground station's orchestrator. */
+  | { kind: 'peer'; url: string; label?: string };
+
+/** Local orchestrator status (see `ORCHESTRATOR_STATUS` / `ORCHESTRATOR_STATE`). */
+export interface OrchestratorStatus {
+  isRunning: boolean;
+  /** The WebSocket the desktop connects to once the engine is up. */
+  wsUrl: string;
+  /** Sources currently configured. */
+  sources: OrchestratorSource[];
+  /** Set when the last start failed (e.g. binary missing). */
+  error?: string;
+}
+
+/** Orchestration server status pushed to the renderer (see `COMMS_ORCHESTRATION_STATUS`). */
+export interface OrchestrationStatusIpc {
+  transportId: string;
+  kind: 'welcome' | 'control' | 'roster';
+  /** Present on `welcome`. */
+  serverName?: string;
+  serverVersion?: string;
+  capabilities?: string[];
+  /** Present on `control` (intent.ack / intent.status / error). */
+  control?: { type?: string; id?: string; state?: string; message?: string; [k: string]: unknown };
+  /** Present on `roster`: the server's current fleet identity mapping. */
+  roster?: OrchestrationRosterEntry[];
+}
+
+/** Per-vehicle mission upload progress (see `MISSION_VEHICLE_PROGRESS`). */
+export interface MissionVehicleProgress {
+  vehicleKey: string;
+  /** Items confirmed sent so far. */
+  sent: number;
+  /** Total items in the mission. */
+  total: number;
+  /** Terminal state for this vehicle's upload. */
+  state: 'uploading' | 'complete' | 'error';
+  error?: string;
 }
 
 /**
@@ -1212,6 +1457,24 @@ export interface ArduPilotSitlConfig {
    * prefix (4=quad, 6=hexa, 8=octa). Required when customFramePath is set.
    */
   customFrameMotors?: number;
+  /**
+   * Use ArduDeck's in-app simulator as SITL's external flight dynamics model.
+   * When set, the headless sim-engine is spawned first (it binds the JSON FDM
+   * UDP port and runs our own 6DOF physics), and SITL launches with
+   * `--model JSON:127.0.0.1` instead of its built-in physics. The custom frame
+   * (if any) is fed to the engine rather than to SITL.
+   */
+  useArduDeckSim?: boolean;
+  /**
+   * In-app simulator fidelity controls, forwarded to the sim-engine at launch.
+   * Only meaningful when `useArduDeckSim` is set.
+   */
+  /** Wind intensity 0..1 (0 = calm air). */
+  simWindIntensity?: number;
+  /** Inject realistic IMU/GPS sensor noise. */
+  simSensorNoise?: boolean;
+  /** Model battery voltage sag under load. */
+  simBatterySag?: boolean;
 }
 
 /**
@@ -1226,6 +1489,12 @@ export interface ArduPilotSitlStatus {
   vehicleType?: ArduPilotVehicleType;
   /** Port number SITL is listening on */
   tcpPort?: number;
+  /**
+   * When running against ArduDeck's in-app simulator, the WebSocket port the
+   * sim-engine streams vehicle state on (renderer connects here for the 3D
+   * world). Undefined when using built-in/external physics.
+   */
+  simStateWsPort?: number;
 }
 
 /**
@@ -1242,6 +1511,69 @@ export interface ArduPilotSitlExitData {
   vehicleType?: ArduPilotVehicleType;
   model?: string;
   releaseTrack?: ArduPilotReleaseTrack;
+}
+
+/**
+ * Spatial arrangement of swarm spawn points around the base home location.
+ * `grid` packs instances into a roughly-square lattice, `line` lays them out
+ * in an east-west row, `circle` spreads them evenly around a ring.
+ */
+export type SwarmFormation = 'grid' | 'line' | 'circle';
+
+/**
+ * Swarm SITL launch request. The per-vehicle airframe (vehicleType / model /
+ * releaseTrack / speedup) and the BASE home location are taken from the same
+ * fields the single-SITL config uses; the swarm-specific fields below control
+ * how many instances spawn and how their spawn points are spread.
+ */
+export interface SwarmSitlConfig {
+  vehicleType: ArduPilotVehicleType;
+  model?: string;
+  releaseTrack: ArduPilotReleaseTrack;
+  /** Center of the formation. Each instance is offset from here. */
+  homeLocation: { lat: number; lng: number; alt: number; heading: number };
+  speedup?: number;
+  /** Wipe each instance's EEPROM on first start. */
+  wipeOnStart?: boolean;
+  /** Number of vehicles to spawn (2-20). */
+  count: number;
+  /** Nominal distance between neighbouring spawn points, metres. */
+  spacingM: number;
+  /** Spawn-point arrangement around the base home. */
+  formation: SwarmFormation;
+}
+
+/** Lifecycle state of one swarm instance. */
+export type SwarmInstanceState = 'spawning' | 'ready' | 'exited' | 'error';
+
+/**
+ * One spawned SITL instance. `tcpPort` is the MAVLink TCP port the desktop
+ * connects to (5760 + 10*index, via ArduPilot's `-I` instance offset);
+ * `sysid` is the MAVLink system id written to SYSID_THISMAV so each vehicle
+ * is distinct on the link.
+ */
+export interface SwarmInstanceStatus {
+  index: number;
+  sysid: number;
+  tcpPort: number;
+  home: { lat: number; lng: number; alt: number; heading: number };
+  state: SwarmInstanceState;
+  pid?: number;
+  error?: string;
+}
+
+/** Aggregated swarm status. */
+export interface SwarmSitlStatus {
+  isRunning: boolean;
+  instances: SwarmInstanceStatus[];
+}
+
+/** A single stdout/stderr line emitted by a swarm instance. */
+export interface SwarmSitlLogLine {
+  index: number;
+  sysid: number;
+  isError: boolean;
+  line: string;
 }
 
 /**

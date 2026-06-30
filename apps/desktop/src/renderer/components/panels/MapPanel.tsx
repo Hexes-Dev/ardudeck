@@ -13,6 +13,15 @@ import { useEditModeStore } from '../../stores/edit-mode-store';
 import { Mission3DPanel } from '../mission/Mission3DPanel';
 import { TAKEOFF_AT_HOME_ICON } from '../mission/takeoff-icon';
 import { createTacticalVehicleIcon, updateTacticalIconDOM } from '../map/TacticalVehicleIcon';
+import { FleetMarkers } from '../fleet/FleetMarkers';
+import { MissionPathsToggle } from '../fleet/MissionPathsToggle';
+import { OfflineCacheBox } from '../map/OfflineCacheBox';
+import { OfflineCachePanel } from '../map/OfflineCachePanel';
+import { useTelemMapBoundsStore } from '../../stores/telem-map-bounds-store';
+import { deselectActiveVehicle } from '../../hooks/useFleet';
+import { useActiveVehicleStore } from '../../stores/active-vehicle-store';
+import { useVehicleColor } from '../../stores/vehicle-appearance-store';
+import { useTelemMissionViewStore } from '../../stores/telem-mission-view-store';
 import { mavTypeToTacticalClass, type VehicleState } from '../map/tactical-icon-pool';
 import { dispatchMapCommand, type ActiveCommandTarget, type MapCommand } from '../map/map-command-types';
 import { useCommandTargetStore, useSelfActiveTarget, SELF_VEHICLE_ID } from '../../stores/command-target-store';
@@ -30,7 +39,6 @@ import { TerrainOverlayLayer, type ElevationRange } from '../map/TerrainOverlayL
 import { ElevationLegend } from '../map/ElevationLegend';
 
 // Offline map download
-import { OfflineAreaDownload } from '../map/OfflineAreaDownload';
 
 // Cached area overlay
 import { CachedAreaOverlay } from '../map/CachedAreaOverlay';
@@ -46,6 +54,10 @@ import { AirspaceOverlay } from '../map/overlays/AirspaceOverlay';
 import { AirspaceLegend } from '../map/overlays/AirspaceLegend';
 import { MapLayersControl } from '../map/overlays/MapLayersControl';
 import { WindParticleOverlay } from '../map/overlays/WindParticleOverlay';
+import { TrafficOverlay } from '../map/overlays/TrafficOverlay';
+import { CameraFootprintOverlay } from '../map/overlays/CameraFootprintOverlay';
+import { TrafficAltitudeFilter } from '../map/overlays/TrafficAltitudeFilter';
+import { ZoneAlertBanner } from '../map/overlays/ZoneAlertBanner';
 import { WindControls } from '../map/overlays/WindControls';
 import { WindRoseCard } from '../map/overlays/WindRoseCard';
 import { ApiKeyDialog } from '../map/overlays/ApiKeyDialog';
@@ -216,15 +228,18 @@ function getCommandShape(cmd: number): string {
   }
 }
 
-// Create waypoint marker icon (read-only display)
-function createWaypointIcon(wp: MissionItem, isCurrent: boolean): L.DivIcon {
+// Create waypoint marker icon (read-only display). `groupColor`, when given,
+// rings the marker in that group's (vehicle's) identity colour so a fleet's
+// per-vehicle waypoints are distinguishable at a glance; the fill still encodes
+// the command type.
+function createWaypointIcon(wp: MissionItem, isCurrent: boolean, groupColor?: string): L.DivIcon {
   const baseColor = getCommandColor(wp.command);
   const bgColor = isCurrent ? '#f59e0b' : baseColor;
   const size = isCurrent ? 28 : 24;
   const shape = getCommandShape(wp.command);
   const displayText = shape || (wp.seq + 1).toString();
-  const borderColor = isCurrent ? '#fbbf24' : 'rgba(255,255,255,0.8)';
-  const borderWidth = isCurrent ? 3 : 2;
+  const borderColor = isCurrent ? '#fbbf24' : (groupColor ?? 'rgba(255,255,255,0.8)');
+  const borderWidth = isCurrent ? 3 : (groupColor ? 3 : 2);
 
   return L.divIcon({
     className: 'waypoint-marker',
@@ -1505,6 +1520,8 @@ function MapOverlayLayers({ baseLayer }: { baseLayer: string }) {
       {activeOverlays.has('dipul') && <DipulOverlay />}
       {activeOverlays.has('wind') && <WindParticleOverlay />}
       {activeOverlays.has('wind') && <WindRoseCard />}
+      {(activeOverlays.has('traffic') || activeOverlays.has('gliders') || activeOverlays.has('remoteid')) && <TrafficOverlay />}
+      {activeOverlays.has('camera') && <CameraFootprintOverlay />}
     </>
   );
 }
@@ -1542,64 +1559,109 @@ export const MapPanel = React.memo(function MapPanel() {
 // every telemetry frame, which is what made the telemetry map lag on big KMLs.
 // React.memo + no props means the parent's telemetry re-renders bail out here.
 const MissionOverlays = React.memo(function MissionOverlays() {
-  const { missionItems, homePosition: missionHome, currentSeq } = useMissionStore();
+  const missionItems = useMissionStore((s) => s.missionItems);
+  const groups = useMissionStore((s) => s.groups);
+  const missionHome = useMissionStore((s) => s.homePosition);
+  const currentSeq = useMissionStore((s) => s.currentSeq);
+  const activeVehicleKey = useActiveVehicleStore((s) => s.activeVehicleKey);
+  const viewMode = useTelemMissionViewStore((s) => s.mode);
 
-  const waypoints = useMemo(() =>
-    missionItems.filter(item =>
-      commandHasLocation(item.command) && hasValidCoordinates(item.latitude, item.longitude)
-    ),
-    [missionItems]
-  );
   const ghostTakeoffItems = useMemo(() =>
     missionItems.filter(item =>
       item.command === MAV_CMD.NAV_TAKEOFF && !hasValidCoordinates(item.latitude, item.longitude)
     ),
     [missionItems]
   );
-  const missionPath = useMemo(() => buildMissionPath(waypoints), [waypoints]);
 
-  // Small missions: a numbered pin per waypoint. Large/auto-generated missions:
-  // only the live target, route start/end, and meaningful commands keep a pin -
-  // the rest are noise and the path already shows them. See mission-markers.ts.
-  const markerPins = useMemo(
-    () => splitMissionMarkers(waypoints, currentSeq).pins,
-    [waypoints, currentSeq],
-  );
+  // Per-group render plan: each group draws its own coloured path + markers so a
+  // fleet's per-vehicle missions are distinguishable. Falls back to the single
+  // global mission for the common one-group case (colour = that group's colour).
+  const groupPlans = useMemo(() => {
+    const hasAssignments = groups.some((g) => g.assignedVehicleKey);
+    const byOrder = [...groups].sort((a, b) => a.order - b.order);
+    const plans: Array<{
+      id: string;
+      color: string;
+      dim: boolean;
+      waypoints: MissionItem[];
+    }> = [];
+    for (const g of byOrder) {
+      if (g.visible === false) continue;
+      const wps = missionItems.filter(
+        (it) =>
+          it.groupId === g.id &&
+          commandHasLocation(it.command) &&
+          hasValidCoordinates(it.latitude, it.longitude),
+      );
+      if (wps.length === 0) continue;
+
+      // Per-vehicle visibility/dimming only kicks in once the operator has
+      // actually assigned groups to vehicles; otherwise everything is solid
+      // (single-mission behaviour, unchanged).
+      const isUnassigned = !g.assignedVehicleKey;
+      const isActiveGroup = !!g.assignedVehicleKey && g.assignedVehicleKey === activeVehicleKey;
+      let dim = false;
+      if (hasAssignments && !isUnassigned && !isActiveGroup) {
+        if (viewMode === 'selected') continue; // hidden entirely
+        dim = true; // shown but de-emphasised
+      }
+      plans.push({ id: g.id, color: g.color, dim, waypoints: wps });
+    }
+    return plans;
+  }, [groups, missionItems, activeVehicleKey, viewMode]);
 
   return (
     <>
-      {/* Mission path - single polyline with curves through spline waypoints */}
-      {missionPath.positions.length > 1 && (
-        <Polyline
-          positions={missionPath.positions}
-          pathOptions={{ color: '#3b82f6', weight: 3, opacity: 0.8 }}
-        />
-      )}
-
-      {/* Loiter radius circles - param3 is radius for all loiter commands */}
-      {waypoints
-        .filter(wp =>
-          (wp.command === MAV_CMD.NAV_LOITER_UNLIM ||
-           wp.command === MAV_CMD.NAV_LOITER_TIME ||
-           wp.command === MAV_CMD.NAV_LOITER_TURNS) &&
-          wp.param3 > 0
-        )
-        .map((wp) => (
-          <Circle
-            key={`loiter-${wp.seq}`}
-            center={[wp.latitude, wp.longitude]}
-            radius={Math.abs(wp.param3)}
-            pathOptions={{
-              color: '#a855f7',
-              weight: 2,
-              opacity: 0.6,
-              fill: true,
-              fillColor: '#a855f7',
-              fillOpacity: 0.1,
-              dashArray: '5, 5',
-            }}
-          />
-        ))}
+      {groupPlans.map((plan) => {
+        const path = buildMissionPath(plan.waypoints);
+        // Dimmed groups: just the faint path (no markers) to cut clutter.
+        // Solid groups: numbered pins via splitMissionMarkers, ringed in colour.
+        const pins = plan.dim ? [] : splitMissionMarkers(plan.waypoints, currentSeq).pins;
+        const loiters = plan.dim
+          ? []
+          : plan.waypoints.filter(
+              (wp) =>
+                (wp.command === MAV_CMD.NAV_LOITER_UNLIM ||
+                  wp.command === MAV_CMD.NAV_LOITER_TIME ||
+                  wp.command === MAV_CMD.NAV_LOITER_TURNS) &&
+                wp.param3 > 0,
+            );
+        return (
+          <React.Fragment key={plan.id}>
+            {path.positions.length > 1 && (
+              <Polyline
+                positions={path.positions}
+                pathOptions={{ color: plan.color, weight: plan.dim ? 2 : 3, opacity: plan.dim ? 0.3 : 0.85 }}
+              />
+            )}
+            {loiters.map((wp) => (
+              <Circle
+                key={`loiter-${plan.id}-${wp.seq}`}
+                center={[wp.latitude, wp.longitude]}
+                radius={Math.abs(wp.param3)}
+                pathOptions={{
+                  color: '#a855f7', weight: 2, opacity: 0.6,
+                  fill: true, fillColor: '#a855f7', fillOpacity: 0.1, dashArray: '5, 5',
+                }}
+              />
+            ))}
+            {pins.map(({ wp, role }) => (
+              <Marker
+                key={`${plan.id}-${wp.seq}`}
+                position={[wp.latitude, wp.longitude]}
+                icon={
+                  role === 'start'
+                    ? START_ICON
+                    : role === 'end'
+                      ? END_ICON
+                      : createWaypointIcon(wp, wp.seq === currentSeq, plan.color)
+                }
+                zIndexOffset={role === 'current' ? 1000 : 0}
+              />
+            ))}
+          </React.Fragment>
+        );
+      })}
 
       {/* Mission home marker */}
       {missionHome && (
@@ -1617,23 +1679,6 @@ const MissionOverlays = React.memo(function MissionOverlays() {
           position={[missionHome.lat, missionHome.lon]}
           icon={TAKEOFF_AT_HOME_ICON}
           zIndexOffset={-500}
-        />
-      ))}
-
-      {/* Waypoint markers (read-only). Small missions get a numbered pin each;
-          large missions get only key waypoints + start/end + the live target. */}
-      {markerPins.map(({ wp, role }) => (
-        <Marker
-          key={wp.seq}
-          position={[wp.latitude, wp.longitude]}
-          icon={
-            role === 'start'
-              ? START_ICON
-              : role === 'end'
-                ? END_ICON
-                : createWaypointIcon(wp, wp.seq === currentSeq)
-          }
-          zIndexOffset={role === 'current' ? 1000 : 0}
         />
       ))}
 
@@ -1676,8 +1721,9 @@ const TelemetryMap2D = React.memo(function TelemetryMap2D() {
   const [terrainFixedRange, setTerrainFixedRange] = useState<ElevationRange>({ min: 0, max: 1500 });
   const [terrainRelativeMode, setTerrainRelativeMode] = useState(false);
   const [headingLineLength, setHeadingLineLength] = useState(100); // meters
-  const [mapBounds, setMapBounds] = useState<{ north: number; south: number; east: number; west: number } | null>(null);
-  const handleBoundsChange = useCallback((b: { north: number; south: number; east: number; west: number }) => setMapBounds(b), []);
+  const handleBoundsChange = useCallback((b: { north: number; south: number; east: number; west: number }) => {
+    useTelemMapBoundsStore.getState().setBounds(b);
+  }, []);
   const lastUpdateRef = useRef<number>(0);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -1727,6 +1773,27 @@ const TelemetryMap2D = React.memo(function TelemetryMap2D() {
   const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(null);
   const VEHICLE_ID = 'vehicle-1';
 
+  // Fleet mode: there is no primary connection, but an active fleet vehicle is
+  // always selected (auto-promoted / clicked in the fleet strip or its map
+  // marker). The big primary marker below renders that active vehicle, so in
+  // fleet mode it IS the selected command target - clicking a fleet marker sets
+  // the global active vehicle, and right-click commands that vehicle (commands
+  // route via activeFlightTarget() in the main process). Single-vehicle mode is
+  // unchanged: you must click the marker to select before commanding.
+  const activeVehicleKey = useActiveVehicleStore((s) => s.activeVehicleKey);
+  const formationLeaderKey = useActiveVehicleStore((s) => s.formationLeaderKey);
+  const fleetActive = !connectionState.isConnected && activeVehicleKey !== null;
+  // The big primary marker renders the active vehicle; mark it as leader when the
+  // active vehicle is the formation leader (after "form up", the leader IS active).
+  const activeIsLeader = fleetActive && activeVehicleKey === formationLeaderKey;
+
+  // Active vehicle identity (fleet mode): its SYS id label + identity colour, matching the
+  // strip card / its waypoints. Single-vehicle mode keeps the plain state-coloured marker.
+  const activeVehicle = useActiveVehicleStore((s) => (activeVehicleKey ? s.knownVehicles[activeVehicleKey] : undefined));
+  const activeIdentityColor = useVehicleColor(activeVehicleKey ?? '', activeVehicle?.sysid ?? 1);
+  const activeDesignation = fleetActive && activeVehicle ? `SYS ${activeVehicle.sysid}` : undefined;
+  const activeBodyColor = fleetActive ? activeIdentityColor : undefined;
+
   // Tactical icon properties
   const tacticalClass = mavTypeToTacticalClass(connectionState.mavType);
   const vehicleState: VehicleState = useMemo(() => {
@@ -1736,7 +1803,7 @@ const TelemetryMap2D = React.memo(function TelemetryMap2D() {
     return 'disarmed';
   }, [flight.armed, battery.remaining, gps.fixType]);
 
-  const isSelected = selectedVehicleId === VEHICLE_ID;
+  const isSelected = selectedVehicleId === VEHICLE_ID || fleetActive;
 
   // Icon is only rebuilt when stable props change (state, mode, selection, vehicle class).
   // Heading/speed/alt are updated via cheap DOM mutations to avoid flicker.
@@ -1746,8 +1813,12 @@ const TelemetryMap2D = React.memo(function TelemetryMap2D() {
       state: vehicleState,
       selected: isSelected,
       mode: flight.mode,
+      isLeader: activeIsLeader,
+      topmost: true,
+      designation: activeDesignation,
+      bodyColor: activeBodyColor,
     }),
-    [tacticalClass, vehicleState, isSelected, flight.mode],
+    [tacticalClass, vehicleState, isSelected, flight.mode, activeIsLeader, activeDesignation, activeBodyColor],
   );
 
   // Ref to the Leaflet marker for DOM-based updates
@@ -1838,10 +1909,10 @@ const TelemetryMap2D = React.memo(function TelemetryMap2D() {
 
   // Right-click handler: open go-to popup (only when vehicle selected AND armed)
   const handleMapContextMenu = useCallback((lat: number, lon: number) => {
-    if (!selectedVehicleId) return;
+    if (!selectedVehicleId && !fleetActive) return;
     if (!useTelemetryStore.getState().flight.armed) return; // safety: no commands when disarmed
     setCommandPopup({ lat, lon });
-  }, [selectedVehicleId]);
+  }, [selectedVehicleId, fleetActive]);
 
   // Command confirm: dispatch the chosen MapCommand and visualize the target.
   // The popup decides the dispatch path (native vs script) and passes through
@@ -1969,6 +2040,8 @@ const TelemetryMap2D = React.memo(function TelemetryMap2D() {
           </span>
         </div>
       )}
+      <TrafficAltitudeFilter />
+      <ZoneAlertBanner />
       {/* Top toolbar */}
       <div data-tour="telemetry-map-overlays" className="absolute top-2 right-2 z-[1000] flex flex-col gap-1">
         <MapLayersControl
@@ -1977,7 +2050,7 @@ const TelemetryMap2D = React.memo(function TelemetryMap2D() {
           onSelectLayer={(k) => setCurrentLayer(k as TelemetryLayerKey)}
           showTerrain={showTerrain}
           onToggleTerrain={() => setShowTerrain(!showTerrain)}
-          extra={<OfflineAreaDownload bounds={mapBounds} activeLayer={currentLayer} />}
+          extra={<MissionPathsToggle />}
         />
         <button
           onClick={() => setFollowVehicle(!followVehicle)}
@@ -2300,19 +2373,31 @@ const TelemetryMap2D = React.memo(function TelemetryMap2D() {
         {/* Map overlays (self-subscribed to avoid re-rendering terrain) */}
         <MapOverlayLayers baseLayer={currentLayer} />
 
-        {/* Vehicle marker - tactical icon */}
-        <Marker
-          ref={vehicleMarkerRef}
-          position={vehiclePosition}
-          zIndexOffset={5000}
-          icon={tacticalIcon}
-          eventHandlers={{
-            click: (e) => {
-              L.DomEvent.stopPropagation(e.originalEvent);
-              setSelectedVehicleId(prev => prev === VEHICLE_ID ? null : VEHICLE_ID);
-            },
-          }}
-        />
+        {/* Vehicle marker - tactical icon. Hidden when nothing is selected in fleet mode
+            (the deselected vehicle reverts to an ordinary fleet marker via FleetMarkers). */}
+        {(connectionState.isConnected || activeVehicleKey !== null) && (
+          <Marker
+            ref={vehicleMarkerRef}
+            position={vehiclePosition}
+            zIndexOffset={5000}
+            icon={tacticalIcon}
+            eventHandlers={{
+              click: (e) => {
+                L.DomEvent.stopPropagation(e.originalEvent);
+                // In fleet mode, clicking the active vehicle deselects it; single-vehicle
+                // mode keeps the local select toggle for the command popup.
+                if (fleetActive) deselectActiveVehicle();
+                else setSelectedVehicleId(prev => prev === VEHICLE_ID ? null : VEHICLE_ID);
+              },
+            }}
+          />
+        )}
+
+        {/* Other connected vehicles (multi-vehicle). Renders nothing for a single vehicle. */}
+        <FleetMarkers />
+
+        {/* Adjustable rectangle for selecting an area to cache offline. */}
+        <OfflineCacheBox />
 
         {/* Imperative command layer - popup/target/line managed via refs, immune to re-renders */}
         <CommandLayer
@@ -2323,6 +2408,9 @@ const TelemetryMap2D = React.memo(function TelemetryMap2D() {
           onCancel={handleCommandCancel}
         />
       </MapContainer>
+
+      {/* Offline cache-area control panel (visible only in cache mode). */}
+      <OfflineCachePanel activeLayer={currentLayer} />
     </div>
   );
 });

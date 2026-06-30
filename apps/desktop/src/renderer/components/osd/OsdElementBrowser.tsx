@@ -21,6 +21,8 @@ export function OsdElementBrowser({ selectedElement, onSelect }: Props) {
   const elementPositions = useOsdStore((s) => s.elementPositions);
   const toggleElement = useOsdStore((s) => s.toggleElement);
   const currentFont = useOsdStore((s) => s.currentFont);
+  const supportedElements = useOsdStore((s) => s.supportedElements);
+  const target = useOsdStore((s) => s.target);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedCategories, setExpandedCategories] = useState<Set<OsdElementCategory>>(() => {
@@ -98,13 +100,13 @@ export function OsdElementBrowser({ selectedElement, onSelect }: Props) {
   return (
     <div className="flex flex-col h-full">
       {/* Search */}
-      <div className="p-3 border-b border">
+      <div className="p-3 border-b border-subtle">
         <input
           type="text"
           placeholder="Search elements..."
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
-          className="w-full bg-surface-raised text-content text-xs rounded px-2.5 py-1.5 border border focus:border-blue-500 focus:outline-none placeholder-content-tertiary"
+          className="w-full bg-surface-raised text-content text-xs rounded px-2.5 py-1.5 border border-subtle focus:border-blue-500 focus:outline-none placeholder-content-tertiary"
         />
         <div className="mt-1.5 text-[10px] text-content-secondary">
           {totalEnabled} of {ELEMENT_REGISTRY.length} enabled
@@ -151,6 +153,8 @@ export function OsdElementBrowser({ selectedElement, onSelect }: Props) {
                     const pos = elementPositions[def.id];
                     if (!pos) return null;
                     const isSelected = selectedElement === def.id;
+                    const unsupported =
+                      target === 'ardupilot' && supportedElements != null && !supportedElements.has(def.id);
 
                     return (
                       <ElementRow
@@ -158,6 +162,7 @@ export function OsdElementBrowser({ selectedElement, onSelect }: Props) {
                         def={def}
                         position={pos}
                         isSelected={isSelected}
+                        unsupported={unsupported}
                         currentFont={currentFont}
                         onSelect={onSelect}
                         onToggle={toggleElement}
@@ -181,6 +186,7 @@ function ElementRow({
   def,
   position,
   isSelected,
+  unsupported,
   currentFont,
   onSelect,
   onToggle,
@@ -188,6 +194,7 @@ function ElementRow({
   def: OsdElementDefinition;
   position: OsdElementPosition;
   isSelected: boolean;
+  unsupported: boolean;
   currentFont: ReturnType<typeof useOsdStore.getState>['currentFont'];
   onSelect: (id: OsdElementId) => void;
   onToggle: (id: OsdElementId) => void;
@@ -207,9 +214,10 @@ function ElementRow({
       className={`
         flex items-center gap-1.5 pl-7 pr-3 py-1 cursor-pointer
         ${isSelected ? 'bg-blue-500/15' : 'hover:bg-surface-overlay-subtle'}
+        ${unsupported ? 'opacity-45' : ''}
       `}
       onClick={() => onSelect(def.id)}
-      title={def.description}
+      data-tip={unsupported ? 'Not available on the connected board' : def.description}
     >
       <input
         type="checkbox"

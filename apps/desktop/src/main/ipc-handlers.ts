@@ -8,6 +8,17 @@ import { join } from 'path';
 import { existsSync } from 'fs';
 import Store from 'electron-store';
 import {
+  recordSigningEvent,
+  getAuditLog,
+  verifyAuditChain,
+  buildEvidencePack,
+  renderPostureReport,
+  type SecureLinkPosture,
+} from './signing/signing-audit.js';
+import { extractFlightSummary, type LogLike, type HealthLike } from './logs/fleet-log-summary.js';
+import { recordFlight, getFleetHistory, clearFleetHistory } from './logs/fleet-log-history.js';
+import type { AuthoredObstacle, SimObstacleStoreSchema } from '../shared/sim-obstacle-types.js';
+import {
   listSerialPorts,
   scanPorts,
   SerialTransport,
@@ -20,7 +31,12 @@ import {
 import { registerCompanionIpcHandlers } from './companion/companion-ipc-handlers.js';
 import { registerDroneBridgeIpcHandlers } from './dronebridge/dronebridge-ipc-handlers.js';
 import { setupOverlayHandlers, getApiKey } from './overlays/overlay-ipc-handlers.js';
+import { setupTrafficHandlers } from './traffic/traffic-ipc-handlers.js';
 import { getAllWindows, getMainWindow } from './window-manager.js';
+import { connectionRegistry } from './connection/connection-registry.js';
+import { OrchestrationServerLink } from './connection/orchestration-link.js';
+import { makeVehicleKey } from './connection/types.js';
+import type { TransportConfig, TransportEntry, TransportId, VehicleEntry } from './connection/types.js';
 import {
   MAVLinkParser,
   type MAVLinkPacket,
@@ -93,7 +109,7 @@ import {
   REQUEST_DATA_STREAM_CRC_EXTRA,
   type ParamValue,
 } from '@ardudeck/mavlink-ts';
-import { IPC_CHANNELS, SEVERITY_LABELS, type ConnectOptions, type ConnectionState, type ConsoleLogEntry, type SavedLayout, type LayoutStoreSchema, type SettingsStoreSchema, type SigningStatus, type TelemetrySpeed } from '../shared/ipc-channels.js';
+import { IPC_CHANNELS, SEVERITY_LABELS, type ConnectOptions, type ConnectionState, type ConsoleLogEntry, type SavedLayout, type LayoutStoreSchema, type SettingsStoreSchema, type SigningStatus, type TelemetrySpeed, type TransportInfoIpc, type VehicleInfoIpc, type SetActiveSelectionPayload, type VehicleCommand, type MissionVehicleProgress, type OrchestrationIntentIpc, type OrchestrationStatusIpc, type OrchestratorSource, type OrchestratorStatus, type CameraSourceConfig, type GimbalCommand, type CameraCommand } from '../shared/ipc-channels.js';
 import { initAutoUpdater, checkForUpdates, downloadUpdate, installUpdate } from './updater.js';
 import type { ParamValuePayload, ParameterProgress } from '../shared/parameter-types.js';
 import { PARAMETER_METADATA_URLS, mavTypeToVehicleType, type VehicleType, type ParameterMetadata, type ParameterMetadataStore } from '../shared/parameter-metadata.js';
@@ -121,13 +137,21 @@ import {
   serializeFileTransferProtocol,
   FILE_TRANSFER_PROTOCOL_ID,
   FILE_TRANSFER_PROTOCOL_CRC_EXTRA,
+  VIDEO_STREAM_INFORMATION_ID,
+  deserializeVideoStreamInformation,
+  GIMBAL_DEVICE_ATTITUDE_STATUS_ID,
+  deserializeGimbalDeviceAttitudeStatus,
+  GIMBAL_MANAGER_INFORMATION_ID,
+  deserializeGimbalManagerInformation,
 } from '@ardudeck/mavlink-ts';
 import { LogDownloadManager, type LogListEntry } from './mavlink-log/index.js';
 import { decodeServoOutputRaw } from './servo-output-decode.js';
 import { writeFile, readFile } from 'node:fs/promises';
 import { createDataFlashParser, runHealthChecks } from '@ardudeck/dataflash-parser';
 import { sitlProcess } from './sitl/sitl-process.js';
-import { ardupilotSitlProcess, ardupilotSitlDownloader, ardupilotRcSender } from './sitl/index.js';
+import { mediaEngine } from './media/media-engine.js';
+import { ardupilotSitlProcess, swarmSitlProcess, ardupilotSitlDownloader, ardupilotRcSender } from './sitl/index.js';
+import { orchestratorProcess } from './orchestrator/orchestrator-process.js';
 import {
   initUnifiedLogger,
   shutdownLogger,
@@ -159,7 +183,7 @@ import {
   type BridgeConfig,
   type VirtualRCState,
 } from './simulators/index.js';
-import type { SitlConfig, SitlStatus, ArduPilotSitlConfig, ArduPilotSitlStatus, ArduPilotVehicleType, ArduPilotReleaseTrack, ArduPilotSitlBinaryInfo } from '../shared/ipc-channels.js';
+import type { SitlConfig, SitlStatus, ArduPilotSitlConfig, ArduPilotSitlStatus, ArduPilotVehicleType, ArduPilotReleaseTrack, ArduPilotSitlBinaryInfo, SwarmSitlConfig, SwarmSitlStatus } from '../shared/ipc-channels.js';
 import { openAreaEditorWindow, setMainMapViewport } from './area-editor-window.js';
 
 // =============================================================================
@@ -213,6 +237,12 @@ const layoutStore = new Store<LayoutStoreSchema>({
   },
 });
 
+// Simulator authored obstacles (persisted per test site)
+const simObstaclesStore = new Store<SimObstacleStoreSchema>({
+  name: 'sim-obstacles',
+  defaults: { sites: {} },
+});
+
 // Settings/vehicle profile storage
 const settingsStore = new Store<SettingsStoreSchema>({
   name: 'settings',
@@ -244,6 +274,10 @@ const settingsStore = new Store<SettingsStoreSchema>({
 
 let currentTransport: Transport | null = null;
 let currentVehicleType = 0; // 1=plane, 2=copter, etc.
+// Multi-vehicle shadow: the registry id for the primary (legacy) transport.
+// The ConnectionRegistry mirrors the active connection so vehicles are tracked
+// by (transport, sysid, compid). Single-vehicle reads stay on the legacy globals.
+let primaryTransportId: TransportId | null = null;
 // Tracks last armed state reported to renderer so we only log on transitions
 let lastReportedArmed: boolean | null = null;
 let mavlinkParser: MAVLinkParser | null = null;
@@ -412,6 +446,12 @@ function autoLoadSigningKey(): void {
     if (signingSentToFc) {
       signingEnabled = true;
       console.log('[MAVLink Signing] Key loaded + signing enabled at startup (previously sent to FC)');
+      recordSigningEvent({
+        event: 'startup-auto-enable',
+        actor: 'startup',
+        fingerprint: signingFingerprint(signingKey),
+        detail: 'Signing re-enabled at startup from a key previously delivered to the FC',
+      });
     } else {
       console.log('[MAVLink Signing] Key loaded from storage at startup');
     }
@@ -492,18 +532,34 @@ async function passphraseToKey(passphrase: string): Promise<Uint8Array> {
 /**
  * Get current signing status.
  */
+/** 6-byte (12 hex char) fingerprint of a signing key, the format used everywhere. */
+function signingFingerprint(key: Uint8Array): string {
+  return Array.from(key.slice(0, 6)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 function getSigningStatus(): SigningStatus {
   return {
     enabled: signingEnabled,
     hasKey: signingKey !== null,
     sentToFc: signingSentToFc,
-    keyFingerprint: signingKey
-      ? Array.from(signingKey.slice(0, 6)).map(b => b.toString(16).padStart(2, '0')).join('')
-      : undefined,
+    keyFingerprint: signingKey ? signingFingerprint(signingKey) : undefined,
     keyBase64: signingKey
       ? Buffer.from(signingKey).toString('base64')
       : undefined,
     keyMismatch: signingKeyMismatch,
+    savedKeys: getSavedKeyFingerprints(),
+  };
+}
+
+/** Snapshot the current secure-link posture for the compliance evidence pack. */
+function getSecureLinkPosture(): SecureLinkPosture {
+  return {
+    signingEnabled,
+    hasKey: signingKey !== null,
+    sentToFc: signingSentToFc,
+    fcSigning: connectionState.fcSigning ?? false,
+    keyMismatch: signingKeyMismatch,
+    activeFingerprint: signingKey ? signingFingerprint(signingKey) : undefined,
     savedKeys: getSavedKeyFingerprints(),
   };
 }
@@ -674,7 +730,90 @@ async function sendStreamRateRequests(mainWindow: BrowserWindow, speed: Telemetr
 
   currentTelemetrySpeed = speed;
   const r = STREAM_RATE_PRESETS[speed]!;
-  sendLog(mainWindow, 'info', `Telemetry rate: ${speed}`, `${sent}/${messageIntervals.length} cmds sent — ATT ${r.attitude}Hz, POS ${r.position}Hz, OTHER ${r.other}Hz`);
+  sendLog(mainWindow, 'info', `Telemetry rate: ${speed}`, `${sent}/${messageIntervals.length} cmds sent - ATT ${r.attitude}Hz, POS ${r.position}Hz, OTHER ${r.other}Hz`);
+}
+
+/**
+ * Request telemetry streams on a SPECIFIC transport for a SPECIFIC vehicle.
+ *
+ * Unlike sendStreamRateRequests (which only targets the primary currentTransport),
+ * this is transport-agnostic and used for background / fleet / swarm / orchestration
+ * links. ArduPilot only streams telemetry to a GCS that explicitly requests it: a
+ * passively-listening multi-vehicle transport gets HEARTBEAT-only (mode/armed/type
+ * show, but GPS/battery/position/attitude stay at zero) until we ask. SITL's SRx_*
+ * stream-rate params are NOT honored on a TCP link in current ArduPilot master, so
+ * the request must come from us. A single REQUEST_DATA_STREAM is durable (the FC
+ * keeps streaming without continuous GCS heartbeats), but real radio links drop
+ * packets, so we send a few times.
+ */
+async function requestStreamsOnTransport(
+  transport: Transport,
+  sysid: number,
+  compid: number,
+  speed: TelemetrySpeed,
+): Promise<void> {
+  const rates = STREAM_RATE_PRESETS[speed];
+  if (!rates) return;
+
+  const messageIntervals = [
+    { msgId: 30, hz: rates.attitude },  // ATTITUDE
+    { msgId: 33, hz: rates.position },  // GLOBAL_POSITION_INT
+    { msgId: 24, hz: rates.other },     // GPS_RAW_INT
+    { msgId: 1,  hz: rates.other },     // SYS_STATUS (battery)
+    { msgId: 65, hz: rates.other },     // RC_CHANNELS
+    { msgId: 74, hz: rates.other },     // VFR_HUD
+    { msgId: 27, hz: rates.other },     // RAW_IMU
+  ];
+
+  const legacyStreams = [
+    { streamId: 2,  hz: rates.other },     // EXTENDED_STATUS
+    { streamId: 6,  hz: rates.position },  // POSITION
+    { streamId: 10, hz: rates.attitude },  // EXTRA1 (ATTITUDE)
+    { streamId: 11, hz: rates.position },  // EXTRA2 (VFR_HUD)
+    { streamId: 12, hz: rates.other },     // EXTRA3 (battery, etc.)
+    { streamId: 1,  hz: rates.other },     // RAW_SENSORS (GPS_RAW_INT)
+  ];
+
+  for (const req of messageIntervals) {
+    if (!transport.isOpen) return;
+    try {
+      const intervalUs = Math.round(1_000_000 / req.hz);
+      const cmdPayload = serializeCommandLong({
+        targetSystem: sysid,
+        targetComponent: compid,
+        command: 511, // MAV_CMD_SET_MESSAGE_INTERVAL
+        confirmation: 0,
+        param1: req.msgId,
+        param2: intervalUs,
+        param3: 0, param4: 0, param5: 0, param6: 0, param7: 0,
+      });
+      const pkt = await sendMavlinkPacket(COMMAND_LONG_ID, cmdPayload, COMMAND_LONG_CRC_EXTRA);
+      await transport.write(pkt);
+      await new Promise(resolve => setTimeout(resolve, 15));
+    } catch {
+      // Best-effort; the legacy REQUEST_DATA_STREAM below is the reliable fallback.
+    }
+  }
+
+  // Legacy REQUEST_DATA_STREAM groups - universally supported and verified to
+  // start full telemetry on ArduPilot master where SET_MESSAGE_INTERVAL/SRx params do not.
+  for (const req of legacyStreams) {
+    if (!transport.isOpen) return;
+    try {
+      const payload = serializeRequestDataStream({
+        targetSystem: sysid,
+        targetComponent: compid,
+        reqStreamId: req.streamId,
+        reqMessageRate: req.hz,
+        startStop: 1,
+      });
+      const pkt = await sendMavlinkPacket(REQUEST_DATA_STREAM_ID, payload, REQUEST_DATA_STREAM_CRC_EXTRA);
+      await transport.write(pkt);
+      await new Promise(resolve => setTimeout(resolve, 15));
+    } catch {
+      // Best-effort.
+    }
+  }
 }
 
 // BSOD FIX: MAVLink processing state to prevent overlapping packet processing
@@ -682,8 +821,17 @@ let processingMavlink = false;
 const pendingMavlinkData: Uint8Array[] = [];
 
 // Battery fix: Coalesce MAVLink telemetry into a single IPC batch at 10Hz max
-let mavlinkTelemetryBatch: Record<string, unknown> = {};
+// Telemetry batches keyed by source vehicleKey, so a second vehicle or an
+// antenna tracker sharing the primary link accumulates into its own batch and
+// never corrupts the primary vehicle's telemetry. `'__primary__'` is used
+// before the primary transport is registered (early bytes during connect).
+let mavlinkTelemetryBatches: Record<string, Record<string, unknown>> = {};
 let mavlinkBatchTimer: NodeJS.Timeout | null = null;
+// Source vehicleKey for the packet currently being parsed. Set at the top of
+// parseTelemetry and read by queueMavlinkTelemetry; safe because parseTelemetry
+// and every queue call it triggers run synchronously with no awaits between.
+let parseVehicleKey = '__primary__';
+const PRIMARY_BATCH_KEY = '__primary__';
 
 // RC channel merge: msg 65 (RC_CHANNELS, 18ch) + msg 35 (RC_CHANNELS_RAW, 8ch) fallback.
 // Some FCs (e.g. ELRS over MAVLink) may send stale stick data in msg 65 but fresh data in msg 35.
@@ -719,11 +867,16 @@ function resetRcChannelState(): void {
 }
 
 function queueMavlinkTelemetry(mainWindow: BrowserWindow, fields: Record<string, unknown>) {
-  Object.assign(mavlinkTelemetryBatch, fields);
+  const batch = (mavlinkTelemetryBatches[parseVehicleKey] ??= {});
+  Object.assign(batch, fields);
   if (!mavlinkBatchTimer) {
     mavlinkBatchTimer = setTimeout(() => {
-      safeSend(mainWindow, IPC_CHANNELS.TELEMETRY_BATCH, mavlinkTelemetryBatch);
-      mavlinkTelemetryBatch = {};
+      // One TELEMETRY_BATCH per vehicle, tagged so the renderer routes it to the
+      // right per-vehicle slice. The active vehicle drives the legacy view.
+      for (const [vehicleKey, b] of Object.entries(mavlinkTelemetryBatches)) {
+        safeSend(mainWindow, IPC_CHANNELS.TELEMETRY_BATCH, { ...b, __vehicleKey: vehicleKey });
+      }
+      mavlinkTelemetryBatches = {};
       mavlinkBatchTimer = null;
     }, 100); // 10Hz max
   }
@@ -750,9 +903,425 @@ function cleanupTransportListeners(): void {
   transportCloseHandler = null;
   processingMavlink = false;
   pendingMavlinkData.length = 0;
+  // Multi-vehicle shadow: tear down the registry mirror alongside the legacy
+  // listeners. Every teardown path funnels through here, so this is the single
+  // place the primary session is unregistered.
+  clearPrimarySession();
 }
 
-// Auto-reconnect state for expected reboots (EEPROM save, CLI save, etc.)
+/** Config used for the most recent primary session, reused on auto-reconnect. */
+let lastPrimaryConfig: TransportConfig | null = null;
+
+/**
+ * Multi-vehicle shadow: register the current legacy transport + parser into the
+ * ConnectionRegistry as the primary session. Called once the connection is
+ * confirmed to be MAVLink (past MSP detection). Re-registers cleanly if a stale
+ * primary id is still around. Pass `config` on a fresh connect; omit it on
+ * auto-reconnect to reuse the original connection's config.
+ */
+function registerPrimarySession(config?: TransportConfig): void {
+  if (config) lastPrimaryConfig = config;
+  const cfg = config ?? lastPrimaryConfig;
+  if (!cfg) return;
+  // Drop any stale primary session FIRST, notifying the renderer (VEHICLE_LOST)
+  // so it reaps the old vehicle. A bare unregister() here would leave the
+  // renderer's knownVehicles holding the previous transport-scoped key; the
+  // reconnect then registers a fresh transport (new UUID -> new key) and the old
+  // entry lingers as a dead "clone" - one per SITL stop/start cycle, presenting a
+  // single SITL as a phantom swarm. clearPrimarySession() no-ops if none is set.
+  clearPrimarySession();
+  if (currentTransport && mavlinkParser) {
+    primaryTransportId = connectionRegistry.register(currentTransport, mavlinkParser, cfg);
+  }
+}
+
+/** Multi-vehicle shadow: drop the primary session from the registry, if any. */
+function clearPrimarySession(): void {
+  if (!primaryTransportId) return;
+  // Notify the renderer of every vehicle going away before we drop the entry.
+  const transport = connectionRegistry.getTransport(primaryTransportId);
+  const win = getMainWindow();
+  if (transport && win) {
+    for (const vehicle of transport.vehicles.values()) {
+      safeSend(win, IPC_CHANNELS.COMMS_VEHICLE_LOST, vehicle.key);
+    }
+  }
+  connectionRegistry.unregister(primaryTransportId);
+  primaryTransportId = null;
+}
+
+/** Human-readable label for a transport, for the fleet/connection UI. */
+function transportLabel(config: TransportConfig): string {
+  switch (config.type) {
+    case 'serial':
+      return config.port ? `${config.port} @ ${config.baudRate ?? 115200}` : 'Serial';
+    case 'tcp':
+      return `TCP ${config.host ?? ''}:${config.tcpPort ?? ''}`;
+    case 'udp':
+      return config.udpMode === 'client'
+        ? `UDP client ${config.udpRemoteHost ?? ''}:${config.udpRemotePort ?? ''}`
+        : `UDP :${config.udpPort ?? 14550}`;
+    default:
+      return 'Link';
+  }
+}
+
+/** Project a registry transport entry to its serializable IPC shape. */
+function toTransportInfoIpc(t: TransportEntry): TransportInfoIpc {
+  return {
+    id: t.id,
+    kind: t.config.type,
+    label: transportLabel(t.config),
+    packetsRx: t.stats.packetsRx,
+    packetsTx: t.stats.packetsTx,
+    lastPacketAt: t.stats.lastPacketAt,
+    lastError: t.stats.lastError,
+    vehicleCount: t.vehicles.size,
+    isPrimary: t.id === primaryTransportId,
+  };
+}
+
+/** Project a registry vehicle entry to its serializable IPC shape. */
+function toVehicleInfoIpc(v: VehicleEntry): VehicleInfoIpc {
+  return {
+    key: v.key,
+    transportId: v.transportId,
+    sysid: v.sysid,
+    compid: v.compid,
+    mavType: v.mavType,
+    boardId: v.boardId,
+    boardUid: v.boardUid,
+    lastHeartbeatAt: v.lastHeartbeatAt,
+    isActive: connectionRegistry.getActiveVehicleKey() === v.key,
+  };
+}
+
+/**
+ * Resolve a vehicleKey to the transport and MAVLink addressing needed to send
+ * to it. Falls back to the active/primary connection when the key is null or
+ * unknown, so legacy single-vehicle callers keep targeting the primary vehicle.
+ */
+function resolveVehicleTarget(
+  vehicleKey: string | null,
+): { transport: Transport; sysid: number; compid: number } | null {
+  if (vehicleKey) {
+    const vehicle = connectionRegistry.getVehicleByKey(vehicleKey);
+    if (vehicle) {
+      const entry = connectionRegistry.getTransport(vehicle.transportId);
+      if (entry?.transport.isOpen) {
+        return { transport: entry.transport, sysid: vehicle.sysid, compid: vehicle.compid };
+      }
+    }
+  }
+  if (currentTransport?.isOpen && connectionState.isConnected) {
+    return { transport: currentTransport, sysid: connectionState.systemId ?? 1, compid: 1 };
+  }
+  // Fleet safety net: no active key pinned and no primary connection (pure fleet
+  // mode). Fall back to the first registered vehicle on an open transport so map
+  // commands still reach a real vehicle rather than silently no-op'ing.
+  for (const v of connectionRegistry.listVehicles()) {
+    const entry = connectionRegistry.getTransport(v.transportId);
+    if (entry?.transport.isOpen) {
+      return { transport: entry.transport, sysid: v.sysid, compid: v.compid };
+    }
+  }
+  return null;
+}
+
+/**
+ * Transport + sysid for the operator's currently-selected fleet vehicle, falling
+ * back to the primary connection when nothing distinct is selected. Flight-control
+ * commands (arm / mode / takeoff) target this so clicking a vehicle in the fleet
+ * list switches control to it, not just the telemetry view. In the single-vehicle
+ * case the active key is the primary vehicle, so behavior is unchanged.
+ */
+function activeFlightTarget(): { transport: Transport; sysid: number } | null {
+  const resolved = resolveVehicleTarget(connectionRegistry.getActiveVehicleKey());
+  return resolved ? { transport: resolved.transport, sysid: resolved.sysid } : null;
+}
+
+/** Send a COMMAND_LONG to a specific vehicle (or the active vehicle if null). */
+async function sendCommandLongToVehicle(
+  vehicleKey: string | null,
+  command: number,
+  params: Partial<Record<'param1' | 'param2' | 'param3' | 'param4' | 'param5' | 'param6' | 'param7', number>>,
+): Promise<boolean> {
+  const target = resolveVehicleTarget(vehicleKey);
+  if (!target) {
+    const mw = getMainWindow();
+    if (mw) sendLog(mw, 'warn', `Vehicle command ${command}: no target vehicle`);
+    return false;
+  }
+  const payload = serializeCommandLong({
+    targetSystem: target.sysid,
+    targetComponent: 1,
+    command,
+    confirmation: 0,
+    param1: params.param1 ?? 0,
+    param2: params.param2 ?? 0,
+    param3: params.param3 ?? 0,
+    param4: params.param4 ?? 0,
+    param5: params.param5 ?? 0,
+    param6: params.param6 ?? 0,
+    param7: params.param7 ?? 0,
+  });
+  const packet = await sendMavlinkPacket(COMMAND_LONG_ID, payload, COMMAND_LONG_CRC_EXTRA);
+  await target.transport.write(packet);
+  connectionState.packetsSent++;
+  return true;
+}
+
+/**
+ * Build a Transport for a background (non-primary) connection. Pure factory:
+ * does not open, attach listeners, or touch module state. Kept separate from
+ * the primary COMMS_CONNECT switch so that path stays bit-for-bit unchanged.
+ */
+function buildBackgroundTransport(options: ConnectOptions): Transport {
+  switch (options.type) {
+    case 'serial':
+      if (!options.port) throw new Error('Port required for serial connection');
+      return new SerialTransport(options.port, { baudRate: options.baudRate ?? 115200 });
+    case 'tcp':
+      if (!options.host || !options.tcpPort) throw new Error('Host and port required for TCP');
+      return new TcpTransport({ host: options.host, port: options.tcpPort });
+    case 'udp':
+      if (options.udpMode === 'client') {
+        if (!options.udpRemoteHost || !options.udpRemotePort) {
+          throw new Error('Remote host and port required for UDP client mode');
+        }
+        return new UdpTransport({
+          localPort: options.udpClientLocalPort ?? 14550,
+          remoteHost: options.udpRemoteHost,
+          remotePort: options.udpRemotePort,
+        });
+      }
+      return new UdpTransport({ localPort: options.udpPort ?? 14550 });
+    default:
+      throw new Error(`Invalid connection type: ${options.type ?? 'undefined'}. Must be 'serial', 'tcp', or 'udp'.`);
+  }
+}
+
+/**
+ * Pure, side-effect-free telemetry decode for NON-primary (background /
+ * orchestration) links. Extracts only the fields the fleet view needs from the
+ * common telemetry messages. Unlike parseTelemetry it does NOT drive the param /
+ * mission / fence state machines or mutate connectionState - those stay bound to
+ * the primary connection. Returns null for messages it doesn't decode.
+ */
+function decodeFleetTelemetry(packet: MAVLinkPacket): Record<string, unknown> | null {
+  const { msgid, payload } = packet;
+  switch (msgid) {
+    case MSG_HEARTBEAT: {
+      if (payload.length < 8) return null;
+      const customMode = readUint32(payload, 0);
+      const vehicleType = payload[4]!;
+      const baseMode = payload[6]!;
+      const systemStatus = payload[7]!;
+      if (NON_VEHICLE_TYPES.has(vehicleType)) return null;
+      const armed = (baseMode & 0x80) !== 0 && systemStatus >= 3;
+      let modeName = `Mode ${customMode}`;
+      if (vehicleType === 1 || (vehicleType >= 19 && vehicleType <= 25)) modeName = PLANE_MODES[customMode] || modeName;
+      else if (vehicleType === 2 || (vehicleType >= 13 && vehicleType <= 15) || vehicleType === 29 || vehicleType === 35) modeName = COPTER_MODES[customMode] || modeName;
+      else if (vehicleType === 10 || vehicleType === 11) modeName = ROVER_MODES[customMode] || modeName;
+      else if (vehicleType === 12) modeName = SUB_MODES[customMode] || modeName;
+      const flight: FlightState = { mode: modeName, modeNum: customMode, armed, isFlying: armed && (baseMode & 0x04) !== 0 };
+      return { flight };
+    }
+    case MSG_GLOBAL_POSITION_INT: {
+      if (payload.length < 28) return null;
+      const position: PositionData = {
+        lat: readInt32(payload, 4) / 1e7,
+        lon: readInt32(payload, 8) / 1e7,
+        alt: readInt32(payload, 12) / 1000,
+        relativeAlt: readInt32(payload, 16) / 1000,
+        vx: readInt16(payload, 20) / 100,
+        vy: readInt16(payload, 22) / 100,
+        vz: readInt16(payload, 24) / 100,
+      };
+      return { position };
+    }
+    case MSG_GPS_RAW_INT: {
+      if (payload.length < 30) return null;
+      const gps: GpsData = {
+        fixType: payload[28]!,
+        satellites: payload[29]!,
+        hdop: readUint16(payload, 20) / 100,
+        vdop: readUint16(payload, 22) / 100,
+        lat: readInt32(payload, 8) / 1e7,
+        lon: readInt32(payload, 12) / 1e7,
+        alt: readInt32(payload, 16) / 1000,
+      };
+      return { gps };
+    }
+    case MSG_SYS_STATUS: {
+      if (payload.length < 31) return null;
+      const battery: BatteryData = {
+        voltage: readUint16(payload, 14) / 1000,
+        current: readInt16(payload, 16) / 100,
+        remaining: payload[30] === 255 ? -1 : payload[30]!,
+      };
+      return { battery };
+    }
+    case MSG_VFR_HUD: {
+      if (payload.length < 20) return null;
+      const vfrHud: VfrHudData = {
+        airspeed: readFloat(payload, 0),
+        groundspeed: readFloat(payload, 4),
+        heading: readInt16(payload, 16),
+        throttle: readUint16(payload, 18),
+        alt: readFloat(payload, 8),
+        climb: readFloat(payload, 12),
+      };
+      return { vfrHud };
+    }
+    case MSG_ATTITUDE: {
+      if (payload.length < 28) return null;
+      const r2d = 180 / Math.PI;
+      const attitude: AttitudeData = {
+        roll: readFloat(payload, 4) * r2d,
+        pitch: readFloat(payload, 8) * r2d,
+        yaw: readFloat(payload, 12) * r2d,
+        rollSpeed: readFloat(payload, 16) * r2d,
+        pitchSpeed: readFloat(payload, 20) * r2d,
+        yawSpeed: readFloat(payload, 24) * r2d,
+      };
+      return { attitude };
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * MAVLink data handler for a background transport (extra link or orchestration
+ * server). Records heartbeats for vehicle discovery AND routes full per-vehicle
+ * telemetry (position / attitude / battery / mode) so the fleet renders these
+ * vehicles live, keyed by their own (transport, sysid, compid). It stays clear
+ * of the primary's connectionState and param / mission state machines - those
+ * remain bound to the primary link. Telemetry is batched at 10Hz per vehicle.
+ */
+function createBackgroundDiscoveryHandler(
+  transportId: TransportId,
+  mainWindow: BrowserWindow,
+): (data: Uint8Array) => Promise<void> {
+  const queue: Uint8Array[] = [];
+  let processing = false;
+  const telBatches = new Map<string, Record<string, unknown>>();
+  let flushTimer: NodeJS.Timeout | null = null;
+
+  const scheduleFlush = () => {
+    if (flushTimer) return;
+    flushTimer = setTimeout(() => {
+      flushTimer = null;
+      for (const [vehicleKey, fields] of telBatches) {
+        safeSend(mainWindow, IPC_CHANNELS.TELEMETRY_BATCH, { ...fields, __vehicleKey: vehicleKey });
+      }
+      telBatches.clear();
+    }, 100);
+  };
+
+  return async (data: Uint8Array) => {
+    queue.push(data);
+    if (processing) return;
+    processing = true;
+    try {
+      while (queue.length > 0) {
+        const entry = connectionRegistry.getTransport(transportId);
+        if (!entry) return;
+        const chunk = queue.shift()!;
+        for await (const packet of entry.parser.parse(chunk)) {
+          connectionRegistry.recordPacketRx(transportId);
+          // In pure fleet mode there is no primary connection to detect the wire
+          // version from, so adopt it from the fleet link (the orchestrator emits
+          // v2). Keeps mission/fence uploads to fleet vehicles on MISSION_ITEM_INT
+          // (full 1e7 precision) rather than the low-precision v1 default. Never
+          // clobber a live primary connection's own detection.
+          if (!connectionState.isConnected) {
+            detectedMavlinkVersion = packet.isMavlink2 ? 2 : 1;
+          }
+          if (packet.msgid === 0 && packet.payload.length >= 8) {
+            const vehicleType = packet.payload[4]!;
+            if (NON_VEHICLE_TYPES.has(vehicleType)) continue;
+            const result = connectionRegistry.recordHeartbeat(
+              transportId, packet.sysid, packet.compid, vehicleType,
+            );
+            if (result?.isNew) {
+              // Auto-promote the first discovered fleet vehicle to active so the
+              // command seam (activeFlightTarget) has a target in pure fleet mode
+              // (no primary connection). Without this, map commands / arm / mode
+              // silently no-op until the user happens to click a fleet card. The
+              // renderer auto-promotes the same first-discovered vehicle, so the
+              // two stay in agreement; an explicit click re-syncs both.
+              if (connectionRegistry.getActiveVehicleKey() === null) {
+                connectionRegistry.setActive(transportId, result.vehicle.key);
+              }
+              safeSend(mainWindow, IPC_CHANNELS.COMMS_VEHICLE_DISCOVERED, toVehicleInfoIpc(result.vehicle));
+              // Background/fleet links are passive: ArduPilot only streams telemetry
+              // to a GCS that requests it, so a freshly-discovered vehicle on this
+              // transport emits HEARTBEAT-only until we ask. Request its streams now
+              // (and once more shortly after, to survive packet loss on radio links).
+              const reqStreams = () => {
+                const live = connectionRegistry.getTransport(transportId);
+                if (live?.transport?.isOpen) {
+                  void requestStreamsOnTransport(
+                    live.transport, packet.sysid, packet.compid, currentTelemetrySpeed,
+                  ).catch(() => {});
+                }
+              };
+              reqStreams();
+              setTimeout(reqStreams, 1500);
+            }
+          }
+          const fields = decodeFleetTelemetry(packet);
+          if (fields) {
+            const vehicleKey = makeVehicleKey(transportId, packet.sysid, packet.compid);
+            const batch = telBatches.get(vehicleKey) ?? {};
+            Object.assign(batch, fields);
+            telBatches.set(vehicleKey, batch);
+            scheduleFlush();
+          }
+
+          // Drive a per-vehicle mission upload whose target is on THIS link, so
+          // MISSION_UPLOAD_TO_VEHICLE works for background / orchestration links.
+          // Match the source sysid too: the orchestrator rewrites each vehicle's
+          // north-bound source to its virtual sysid (== target.sysid), so a second
+          // vehicle on the same link can't hijack this vehicle's upload handshake.
+          if (
+            missionUploadState?.target &&
+            entry.transport === missionUploadState.target.transport &&
+            packet.sysid === missionUploadState.target.sysid
+          ) {
+            if (packet.msgid === MSG_MISSION_REQUEST || packet.msgid === MSG_MISSION_REQUEST_INT) {
+              handleMissionRequestForUpload(mainWindow, packet);
+            } else if (packet.msgid === MSG_MISSION_ACK) {
+              handleMissionAckForUpload(mainWindow, packet);
+            }
+          }
+
+          // Drive a per-vehicle mission DOWNLOAD whose target is on THIS link
+          // (same source-sysid match), so MISSION_DOWNLOAD reads back the selected
+          // fleet vehicle's mission over a background / orchestration link.
+          if (
+            missionDownloadState?.target &&
+            entry.transport === missionDownloadState.target.transport &&
+            packet.sysid === missionDownloadState.target.sysid
+          ) {
+            if (packet.msgid === MSG_MISSION_COUNT) {
+              handleMissionCountForDownload(mainWindow, packet.payload);
+            } else if (packet.msgid === MSG_MISSION_ITEM || packet.msgid === MSG_MISSION_ITEM_INT) {
+              handleMissionItemForDownload(mainWindow, packet.msgid, packet.payload);
+            }
+          }
+        }
+      }
+    } finally {
+      processing = false;
+    }
+  };
+}
+
+// Auto-reconnect state for expected reboots (EEPROM save, CLI save, etc.) and for
+// unexpected drops (signal loss, power cycle, cable unplug) when `auto` is set.
 let pendingReconnect: {
   reason: string;
   portPath?: string; // For serial
@@ -764,8 +1333,21 @@ let pendingReconnect: {
   attempt: number;
   maxAttempts: number;
   timeoutMs: number;
+  /** Full original connect options - drives generic (serial/tcp/udp) auto-reconnect. */
+  options?: ConnectOptions;
+  /** True for unexpected-drop recovery: exponential backoff, effectively unbounded. */
+  auto?: boolean;
 } | null = null;
 let reconnectTimer: NodeJS.Timeout | null = null;
+/** The last options we successfully connected with, so an unexpected drop can re-dial the
+ * exact same link without any user action. Cleared on a user-initiated disconnect. */
+let lastConnectOptions: ConnectOptions | null = null;
+/** USB identity of the connected serial port, so reconnect can find the device even if it
+ * re-enumerates to a different path (e.g. /dev/ttyUSB0 -> ttyUSB1, COM4 -> COM5). */
+let lastSerialUsbId: { vendorId?: string; productId?: string; serialNumber?: string } | null = null;
+/** Set while a user-initiated disconnect is tearing down, so the transport `close` handler
+ * doesn't mistake it for a drop and auto-reconnect. */
+let suppressAutoReconnect = false;
 
 let logId = 0;
 let connectionState: ConnectionState = {
@@ -823,6 +1405,10 @@ let missionDownloadState: {
   expected: number;
   received: Map<number, MissionItem>;
   timeout: NodeJS.Timeout | null;
+  // Per-vehicle override (multi-vehicle / fleet): when set, the download targets
+  // this transport+sysid instead of the legacy primary, and its MISSION_COUNT /
+  // MISSION_ITEM responses are routed in from the background-link handler.
+  target?: { transport: Transport; sysid: number };
 } | null = null;
 
 // Mission upload state
@@ -830,7 +1416,303 @@ let missionUploadState: {
   items: MissionItem[];
   currentSeq: number;
   timeout: NodeJS.Timeout | null;
+  // Per-vehicle override: when set, the upload targets this transport+sysid
+  // instead of the legacy primary, and completion is reported via onComplete
+  // instead of the legacy MISSION_UPLOAD_COMPLETE / MISSION_ERROR events.
+  target?: { transport: Transport; sysid: number };
+  onComplete?: (ok: boolean, error?: string) => void;
 } | null = null;
+
+/**
+ * Terminal-state helper for an in-flight mission upload. Centralizes timer
+ * cleanup and routes completion: a per-vehicle upload resolves its onComplete
+ * callback; a legacy single-vehicle upload emits the original IPC events so the
+ * existing mission view is unchanged.
+ */
+function settleMissionUpload(mainWindow: BrowserWindow, ok: boolean, error?: string): void {
+  const state = missionUploadState;
+  if (!state) return;
+  if (state.timeout) clearTimeout(state.timeout);
+  missionUploadState = null;
+  if (state.onComplete) {
+    state.onComplete(ok, error);
+    return;
+  }
+  if (ok) {
+    sendLog(mainWindow, 'info', `Mission upload complete: ${state.items.length} items`);
+    safeSend(mainWindow, IPC_CHANNELS.MISSION_UPLOAD_COMPLETE, state.items.length);
+  } else {
+    safeSend(mainWindow, IPC_CHANNELS.MISSION_ERROR, error ?? 'Mission upload failed');
+  }
+}
+
+/**
+ * Handle an incoming MISSION_REQUEST / MISSION_REQUEST_INT against the active
+ * upload (singleton missionUploadState). Sends the requested item to the upload
+ * target. Shared by the primary data handler and the background-link handler so
+ * a per-vehicle upload works regardless of which link the FC's request arrives
+ * on. No-op when no upload is in progress.
+ */
+function handleMissionRequestForUpload(mainWindow: BrowserWindow, packet: MAVLinkPacket): void {
+  const { msgid, payload } = packet;
+  if (!missionUploadState) return;
+  try {
+    // Some FCs use v2 byte order (size-sorted) even in v1 packets.
+    // v1: target_system(1), target_component(1), seq(2) - seq at offset 2.
+    // v2: seq(2), target_system(1), target_component(1) - seq at offset 0.
+    const seqAtOffset0 = payload[0]! | (payload[1]! << 8);
+    const seqAtOffset2 = payload[2]! | (payload[3]! << 8);
+    const looksLikeV2Order =
+      (payload[2] === 0xff && payload[3] === 0xbe) ||
+      (payload[2] === 0xff && payload[3] === 0x01) ||
+      seqAtOffset2 > 1000;
+    const seq = msgid === MSG_MISSION_REQUEST_INT || looksLikeV2Order ? seqAtOffset0 : seqAtOffset2;
+
+    if (seq < missionUploadState.items.length) {
+      sendMissionItem(mainWindow, missionUploadState.items[seq]!);
+      missionUploadState.currentSeq = seq;
+      const progress: MissionProgress = {
+        total: missionUploadState.items.length,
+        transferred: seq + 1,
+        operation: 'upload',
+      };
+      safeSend(mainWindow, IPC_CHANNELS.MISSION_PROGRESS, progress);
+      if (missionUploadState.timeout) clearTimeout(missionUploadState.timeout);
+      missionUploadState.timeout = setTimeout(() => {
+        settleMissionUpload(mainWindow, false, 'Upload timeout: FC stopped requesting items');
+      }, 5000);
+    }
+  } catch (err) {
+    sendLog(mainWindow, 'error', 'Failed to parse MISSION_REQUEST', String(err));
+  }
+}
+
+/**
+ * Handle an incoming MISSION_ACK for the active upload only (settle it). Used by
+ * the background-link handler; the primary handler's MISSION_ACK case has its
+ * own richer handling (clear/download). Returns true if it settled an upload.
+ */
+function handleMissionAckForUpload(mainWindow: BrowserWindow, packet: MAVLinkPacket): boolean {
+  if (!missionUploadState) return false;
+  const ackType = packet.payload.length >= 3 ? packet.payload[2]! : 0;
+  if (ackType === MAV_MISSION_RESULT.ACCEPTED) {
+    settleMissionUpload(mainWindow, true);
+  } else {
+    settleMissionUpload(mainWindow, false, `Mission error: ${getMissionResultName(ackType)}`);
+  }
+  return true;
+}
+
+/**
+ * Parse a (non-fence) MISSION_COUNT against the active mission DOWNLOAD and kick
+ * off item requests. Shared by the primary data handler and the background-link
+ * handler so a per-vehicle download works whichever link the FC replies on. The
+ * caller has already excluded the fence case. No-op when no download is active.
+ */
+function handleMissionCountForDownload(mainWindow: BrowserWindow, payload: Uint8Array): void {
+  if (!missionDownloadState) {
+    sendLog(mainWindow, 'debug', `Received MISSION_COUNT but no download in progress`);
+    return;
+  }
+  try {
+    // MISSION_COUNT byte order (some FCs use v2 size-sorted order even in v1):
+    // v1: target_system(1), target_component(1), count(2) - count at offset 2
+    // v2: count(2), target_system(1), target_component(1), [mission_type(1)] - count at offset 0
+    const countAtOffset0 = payload[0]! | (payload[1]! << 8);
+    const countAtOffset2 = payload[2]! | (payload[3]! << 8);
+    const looksLikeV2Order = (payload[2] === 0xFF && payload[3] === 0xBE) ||
+                             (payload[2] === 0xFF && payload[3] === 0x01) ||
+                             countAtOffset2 > 1000;
+    const count = (payload.length >= 5 || looksLikeV2Order) ? countAtOffset0 : countAtOffset2;
+    missionDownloadState.expected = count;
+    sendLog(mainWindow, 'debug', `Mission has ${count} items (payload len: ${payload.length})`);
+
+    if (count === 0) {
+      safeSend(mainWindow, IPC_CHANNELS.MISSION_COMPLETE, []);
+      missionDownloadState = null;
+    } else {
+      requestMissionItem(mainWindow, 0);
+    }
+  } catch (err) {
+    sendLog(mainWindow, 'error', 'Failed to parse MISSION_COUNT', String(err));
+  }
+}
+
+/**
+ * Parse a (non-fence) MISSION_ITEM / MISSION_ITEM_INT against the active mission
+ * DOWNLOAD: store the item, report progress, request the next, and complete + ACK
+ * when all are in. Shared by the primary and background-link handlers. The caller
+ * has already excluded the fence case. No-op when no download is active.
+ */
+function handleMissionItemForDownload(mainWindow: BrowserWindow, msgid: number, payload: Uint8Array): void {
+  if (!missionDownloadState) return;
+  try {
+    let item: MissionItem;
+    if (msgid === MSG_MISSION_ITEM_INT) {
+      const msg = deserializeMissionItemInt(payload);
+      item = {
+        seq: msg.seq, frame: msg.frame as MavFrame, command: msg.command,
+        current: msg.current === 1, autocontinue: msg.autocontinue === 1,
+        param1: msg.param1, param2: msg.param2, param3: msg.param3, param4: msg.param4,
+        latitude: msg.x / 1e7, longitude: msg.y / 1e7, altitude: msg.z,
+      };
+    } else {
+      const msg = deserializeMissionItem(payload);
+      item = {
+        seq: msg.seq, frame: msg.frame as MavFrame, command: msg.command,
+        current: msg.current === 1, autocontinue: msg.autocontinue === 1,
+        param1: msg.param1, param2: msg.param2, param3: msg.param3, param4: msg.param4,
+        latitude: msg.x, longitude: msg.y, altitude: msg.z,
+      };
+    }
+
+    missionDownloadState.received.set(item.seq, item);
+    safeSend(mainWindow, IPC_CHANNELS.MISSION_ITEM, item);
+    safeSend(mainWindow, IPC_CHANNELS.MISSION_PROGRESS, {
+      total: missionDownloadState.expected,
+      transferred: missionDownloadState.received.size,
+      operation: 'download',
+    } satisfies MissionProgress);
+
+    if (missionDownloadState.timeout) clearTimeout(missionDownloadState.timeout);
+    missionDownloadState.timeout = setTimeout(() => {
+      if (missionDownloadState && missionDownloadState.received.size < missionDownloadState.expected) {
+        safeSend(mainWindow, IPC_CHANNELS.MISSION_ERROR,
+          `Timeout: received ${missionDownloadState.received.size}/${missionDownloadState.expected} mission items`);
+        missionDownloadState = null;
+      }
+    }, 5000);
+
+    if (missionDownloadState.received.size >= missionDownloadState.expected) {
+      sendMissionAck(mainWindow, MAV_MISSION_RESULT.ACCEPTED);
+      const items = Array.from(missionDownloadState.received.values()).sort((a, b) => a.seq - b.seq);
+      safeSend(mainWindow, IPC_CHANNELS.MISSION_COMPLETE, items);
+      sendLog(mainWindow, 'info', `Downloaded ${items.length} mission items`);
+      if (missionDownloadState.timeout) clearTimeout(missionDownloadState.timeout);
+      missionDownloadState = null;
+    } else {
+      requestMissionItem(mainWindow, item.seq + 1);
+    }
+  } catch (err) {
+    sendLog(mainWindow, 'error', 'Failed to parse mission item', String(err));
+  }
+}
+
+// Helper: Send a single fence item to the FC (MISSION_ITEM_INT, mission_type=FENCE).
+async function sendFenceItem(mainWindow: BrowserWindow, item: FenceItem): Promise<void> {
+  if (!currentTransport?.isOpen || !connectionState.isConnected) return;
+  const targetSystem = connectionState.systemId ?? 1;
+  let packet: Uint8Array;
+
+  if (detectedMavlinkVersion === 2) {
+    const payload = serializeMissionItemInt({
+      targetSystem,
+      targetComponent: 1,
+      seq: item.seq,
+      frame: item.frame,
+      command: item.command,
+      current: 0,
+      autocontinue: 1,
+      param1: item.param1,
+      param2: item.param2,
+      param3: item.param3,
+      param4: item.param4,
+      x: Math.round(item.latitude * 1e7),
+      y: Math.round(item.longitude * 1e7),
+      z: item.altitude,
+      missionType: MAV_MISSION_TYPE.FENCE,
+    });
+    packet = await sendMavlinkPacket(MISSION_ITEM_INT_ID, payload, MISSION_ITEM_INT_CRC_EXTRA);
+  } else {
+    // Fence transfer effectively requires MAVLink v2; send v1 ITEM as a best effort.
+    const fullPayload = serializeMissionItem({
+      targetSystem, targetComponent: 1, seq: item.seq, frame: item.frame, command: item.command,
+      current: 0, autocontinue: 1, param1: item.param1, param2: item.param2, param3: item.param3, param4: item.param4,
+      x: item.latitude, y: item.longitude, z: item.altitude, missionType: 0,
+    });
+    packet = serializeV1(MISSION_ITEM_ID, fullPayload.slice(0, 37), MISSION_ITEM_CRC_EXTRA_V1, { sysid: 255, compid: 190 });
+  }
+
+  currentTransport.write(packet).catch((err) => {
+    sendLog(mainWindow, 'error', `Failed to send fence item ${item.seq}`, String(err));
+  });
+}
+
+// Handle a MISSION_REQUEST(_INT) the FC sends while pulling our fence upload.
+function handleFenceRequestForUpload(mainWindow: BrowserWindow, packet: MAVLinkPacket): void {
+  const { msgid, payload } = packet;
+  if (!fenceUploadState) return;
+  try {
+    const seqAtOffset0 = payload[0]! | (payload[1]! << 8);
+    const seqAtOffset2 = payload[2]! | (payload[3]! << 8);
+    const looksLikeV2Order =
+      (payload[2] === 0xff && payload[3] === 0xbe) ||
+      (payload[2] === 0xff && payload[3] === 0x01) ||
+      seqAtOffset2 > 1000;
+    const seq = msgid === MSG_MISSION_REQUEST_INT || looksLikeV2Order ? seqAtOffset0 : seqAtOffset2;
+
+    if (seq < fenceUploadState.items.length) {
+      void sendFenceItem(mainWindow, fenceUploadState.items[seq]!);
+      fenceUploadState.currentSeq = seq;
+      safeSend(mainWindow, IPC_CHANNELS.FENCE_PROGRESS, {
+        total: fenceUploadState.items.length,
+        transferred: seq + 1,
+        operation: 'upload',
+      });
+      if (fenceUploadState.timeout) clearTimeout(fenceUploadState.timeout);
+      fenceUploadState.timeout = setTimeout(() => {
+        safeSend(mainWindow, IPC_CHANNELS.FENCE_ERROR, 'Upload timeout: FC stopped requesting fence items');
+        fenceUploadState = null;
+      }, 5000);
+    }
+  } catch (err) {
+    sendLog(mainWindow, 'error', 'Failed to parse fence MISSION_REQUEST', String(err));
+  }
+}
+
+// Handle a fence MISSION_ITEM(_INT) arriving during a fence download.
+function handleFenceItemReceived(mainWindow: BrowserWindow, msgid: number, payload: Uint8Array): void {
+  if (!fenceDownloadState) return;
+  try {
+    let item: FenceItem;
+    if (msgid === MSG_MISSION_ITEM_INT) {
+      const msg = deserializeMissionItemInt(payload);
+      item = { seq: msg.seq, command: msg.command, frame: msg.frame, param1: msg.param1, param2: msg.param2, param3: msg.param3, param4: msg.param4, latitude: msg.x / 1e7, longitude: msg.y / 1e7, altitude: msg.z };
+    } else {
+      const msg = deserializeMissionItem(payload);
+      item = { seq: msg.seq, command: msg.command, frame: msg.frame, param1: msg.param1, param2: msg.param2, param3: msg.param3, param4: msg.param4, latitude: msg.x, longitude: msg.y, altitude: msg.z };
+    }
+
+    fenceDownloadState.received.set(item.seq, item);
+    safeSend(mainWindow, IPC_CHANNELS.FENCE_ITEM, item);
+    safeSend(mainWindow, IPC_CHANNELS.FENCE_PROGRESS, {
+      total: fenceDownloadState.expected,
+      transferred: fenceDownloadState.received.size,
+      operation: 'download',
+    });
+
+    if (fenceDownloadState.timeout) clearTimeout(fenceDownloadState.timeout);
+    fenceDownloadState.timeout = setTimeout(() => {
+      if (fenceDownloadState && fenceDownloadState.received.size < fenceDownloadState.expected) {
+        safeSend(mainWindow, IPC_CHANNELS.FENCE_ERROR, `Timeout: received ${fenceDownloadState.received.size}/${fenceDownloadState.expected} fence items`);
+        fenceDownloadState = null;
+      }
+    }, 5000);
+
+    if (fenceDownloadState.received.size >= fenceDownloadState.expected) {
+      void sendMissionAck(mainWindow, MAV_MISSION_RESULT.ACCEPTED, MAV_MISSION_TYPE.FENCE);
+      const items = Array.from(fenceDownloadState.received.values()).sort((a, b) => a.seq - b.seq);
+      safeSend(mainWindow, IPC_CHANNELS.FENCE_COMPLETE, items);
+      sendLog(mainWindow, 'info', `Downloaded ${items.length} fence items`);
+      if (fenceDownloadState.timeout) clearTimeout(fenceDownloadState.timeout);
+      fenceDownloadState = null;
+    } else {
+      void requestMissionItem(mainWindow, item.seq + 1, MAV_MISSION_TYPE.FENCE);
+    }
+  } catch (err) {
+    sendLog(mainWindow, 'error', 'Failed to parse fence item', String(err));
+  }
+}
 
 // Track pending clear operation
 let missionClearPending = false;
@@ -1078,6 +1960,13 @@ const MISSION_ACK_CRC_EXTRA_V1 = 153;
 function parseTelemetry(mainWindow: BrowserWindow, packet: MAVLinkPacket): void {
   const { msgid, payload } = packet;
 
+  // Scope all telemetry from this packet to its source vehicle. Every
+  // queueMavlinkTelemetry call below runs synchronously within this function,
+  // so this module var is a safe per-packet channel.
+  parseVehicleKey = primaryTransportId
+    ? makeVehicleKey(primaryTransportId, packet.sysid, packet.compid)
+    : PRIMARY_BATCH_KEY;
+
   // Log mission-related messages for debugging
   const missionMsgIds = [39, 40, 41, 42, 43, 44, 45, 46, 47, 51, 73];
   if (missionMsgIds.includes(msgid)) {
@@ -1086,6 +1975,60 @@ function parseTelemetry(mainWindow: BrowserWindow, packet: MAVLinkPacket): void 
   }
 
   switch (msgid) {
+    // Camera / gimbal discovery. These ride peripheral component ids (camera,
+    // gimbal) so they're scoped to the ACTIVE vehicle key (which keys off the
+    // autopilot component) rather than the sender's compid.
+    case VIDEO_STREAM_INFORMATION_ID: {
+      try {
+        const v = deserializeVideoStreamInformation(payload);
+        const vehicleKey = connectionRegistry.getActiveVehicleKey() ?? parseVehicleKey;
+        safeSend(mainWindow, IPC_CHANNELS.CAMERA_VIDEO_STREAM_INFO, {
+          vehicleKey,
+          streamId: v.streamId,
+          name: v.name,
+          uri: v.uri,
+          type: v.type,
+          framerate: v.framerate,
+          resolutionH: v.resolutionH,
+          resolutionV: v.resolutionV,
+          hfovDeg: v.hfov,
+        });
+      } catch { /* malformed — ignore */ }
+      break;
+    }
+    case GIMBAL_DEVICE_ATTITUDE_STATUS_ID: {
+      try {
+        const g = deserializeGimbalDeviceAttitudeStatus(payload);
+        // q is [w,x,y,z]; convert to roll/pitch/yaw degrees for display + geolocation.
+        const [w, x, y, z] = [g.q[0] ?? 1, g.q[1] ?? 0, g.q[2] ?? 0, g.q[3] ?? 0];
+        const RAD = 180 / Math.PI;
+        const rollDeg = Math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y)) * RAD;
+        const sp = Math.max(-1, Math.min(1, 2 * (w * y - z * x)));
+        const pitchDeg = Math.asin(sp) * RAD;
+        const yawDeg = Math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)) * RAD;
+        const vehicleKey = connectionRegistry.getActiveVehicleKey() ?? parseVehicleKey;
+        safeSend(mainWindow, IPC_CHANNELS.CAMERA_GIMBAL_ATTITUDE, { vehicleKey, rollDeg, pitchDeg, yawDeg });
+      } catch { /* malformed — ignore */ }
+      break;
+    }
+    case GIMBAL_MANAGER_INFORMATION_ID: {
+      try {
+        const g = deserializeGimbalManagerInformation(payload);
+        const RAD = 180 / Math.PI;
+        const vehicleKey = connectionRegistry.getActiveVehicleKey() ?? parseVehicleKey;
+        safeSend(mainWindow, IPC_CHANNELS.CAMERA_GIMBAL_INFO, {
+          vehicleKey,
+          capFlags: g.capFlags,
+          rollMinDeg: g.rollMin * RAD,
+          rollMaxDeg: g.rollMax * RAD,
+          pitchMinDeg: g.pitchMin * RAD,
+          pitchMaxDeg: g.pitchMax * RAD,
+          yawMinDeg: g.yawMin * RAD,
+          yawMaxDeg: g.yawMax * RAD,
+        });
+      } catch { /* malformed — ignore */ }
+      break;
+    }
     case MSG_HEARTBEAT: {
       // MAVLink wire order: custom_mode(4), type(1), autopilot(1), base_mode(1), system_status(1), mavlink_version(1)
       const customMode = readUint32(payload, 0);
@@ -1327,7 +2270,7 @@ function parseTelemetry(mainWindow: BrowserWindow, packet: MAVLinkPacket): void 
           msgid === MSG_ESC_TELEMETRY_5_TO_8 ? 4 : 8;
 
         // Build a sparse motors array preserving any previously-received groups
-        const existingEsc = (mavlinkTelemetryBatch.escTelemetry as EscTelemetryData | undefined)?.motors ?? [];
+        const existingEsc = (mavlinkTelemetryBatches[parseVehicleKey]?.escTelemetry as EscTelemetryData | undefined)?.motors ?? [];
         const motors: Array<EscMotorTelemetry | undefined> = existingEsc.slice();
         while (motors.length < baseMotorIndex + 4) motors.push(undefined);
 
@@ -1658,207 +2601,49 @@ function parseTelemetry(mainWindow: BrowserWindow, packet: MAVLinkPacket): void 
 
     // Mission messages - wrap in try-catch for payload size variations
     case MSG_MISSION_COUNT: {
-      // FC responded with mission count during download
-      if (!missionDownloadState) {
-        sendLog(mainWindow, 'debug', `Received MISSION_COUNT but no download in progress`);
+      // Fence download uses the same message with mission_type=FENCE (offset 4 in
+      // v2 size-sorted order: count(2), sys(1), comp(1), mission_type(1)).
+      if ((payload.length >= 5 ? payload[4]! : 0) === MAV_MISSION_TYPE.FENCE && fenceDownloadState) {
+        const count = payload[0]! | (payload[1]! << 8);
+        fenceDownloadState.expected = count;
+        if (count === 0) {
+          safeSend(mainWindow, IPC_CHANNELS.FENCE_COMPLETE, []);
+          if (fenceDownloadState.timeout) clearTimeout(fenceDownloadState.timeout);
+          fenceDownloadState = null;
+        } else {
+          void requestMissionItem(mainWindow, 0, MAV_MISSION_TYPE.FENCE);
+        }
         break;
       }
 
-      try {
-        // MISSION_COUNT payload byte order:
-        // Some FCs use v2 byte order (size-sorted) even in v1 packets!
-        // v1 order: target_system(1), target_component(1), count(2) - count at offset 2
-        // v2 order: count(2), target_system(1), target_component(1), [mission_type(1)] - count at offset 0
-        //
-        // Detection: If bytes 2-3 are our GCS IDs (255, 190) or count at offset 2 is unreasonable,
-        // assume v2 byte order (count at offset 0)
-        let count: number;
-        const countAtOffset0 = payload[0]! | (payload[1]! << 8);
-        const countAtOffset2 = payload[2]! | (payload[3]! << 8);
-
-        // Check if bytes 2-3 look like GCS IDs (255, 190) - indicates v2 order
-        const looksLikeV2Order = (payload[2] === 0xFF && payload[3] === 0xBE) ||
-                                 (payload[2] === 0xFF && payload[3] === 0x01) ||  // compid 1
-                                 countAtOffset2 > 1000;  // Unreasonable count
-
-        if (payload.length >= 5 || looksLikeV2Order) {
-          // v2 byte order: count is at offset 0
-          count = countAtOffset0;
-          sendLog(mainWindow, 'debug', `MISSION_COUNT using v2 byte order: count=${count}`);
-        } else {
-          // v1 byte order: count is at offset 2
-          count = countAtOffset2;
-          sendLog(mainWindow, 'debug', `MISSION_COUNT using v1 byte order: count=${count}`);
-        }
-        missionDownloadState.expected = count;
-
-        sendLog(mainWindow, 'debug', `Mission has ${count} items (payload len: ${payload.length})`);
-
-        if (count === 0) {
-          // Empty mission
-          safeSend(mainWindow, IPC_CHANNELS.MISSION_COMPLETE, []);
-          missionDownloadState = null;
-        } else {
-          // Request first item
-          requestMissionItem(mainWindow, 0);
-        }
-      } catch (err) {
-        sendLog(mainWindow, 'error', 'Failed to parse MISSION_COUNT', String(err));
-      }
+      // FC responded with mission count during download (shared with the
+      // background-link handler so per-vehicle fleet downloads work too).
+      handleMissionCountForDownload(mainWindow, payload);
       break;
     }
 
     case MSG_MISSION_ITEM:
     case MSG_MISSION_ITEM_INT: {
-      // FC sent mission item during download (MISSION_ITEM for v1, MISSION_ITEM_INT for v2)
-      if (!missionDownloadState) break;
-
-      try {
-        let item: MissionItem;
-
-        if (msgid === MSG_MISSION_ITEM_INT) {
-          // MAVLink v2 format with int32 lat/lon
-          const msg = deserializeMissionItemInt(payload);
-          item = {
-            seq: msg.seq,
-            frame: msg.frame as MavFrame,
-            command: msg.command,
-            current: msg.current === 1,
-            autocontinue: msg.autocontinue === 1,
-            param1: msg.param1,
-            param2: msg.param2,
-            param3: msg.param3,
-            param4: msg.param4,
-            latitude: msg.x / 1e7,   // INT format uses lat*1e7
-            longitude: msg.y / 1e7,
-            altitude: msg.z,
-          };
-        } else {
-          // MAVLink v1 format with float lat/lon
-          const msg = deserializeMissionItem(payload);
-          item = {
-            seq: msg.seq,
-            frame: msg.frame as MavFrame,
-            command: msg.command,
-            current: msg.current === 1,
-            autocontinue: msg.autocontinue === 1,
-            param1: msg.param1,
-            param2: msg.param2,
-            param3: msg.param3,
-            param4: msg.param4,
-            latitude: msg.x,   // Float format
-            longitude: msg.y,
-            altitude: msg.z,
-          };
-        }
-
-        missionDownloadState.received.set(item.seq, item);
-
-        // Send item to renderer
-        safeSend(mainWindow, IPC_CHANNELS.MISSION_ITEM, item);
-
-        // Send progress
-        const progress: MissionProgress = {
-          total: missionDownloadState.expected,
-          transferred: missionDownloadState.received.size,
-          operation: 'download',
-        };
-        safeSend(mainWindow, IPC_CHANNELS.MISSION_PROGRESS, progress);
-
-        // Reset timeout
-        if (missionDownloadState.timeout) {
-          clearTimeout(missionDownloadState.timeout);
-        }
-        missionDownloadState.timeout = setTimeout(() => {
-          if (missionDownloadState && missionDownloadState.received.size < missionDownloadState.expected) {
-            safeSend(mainWindow, IPC_CHANNELS.MISSION_ERROR,
-              `Timeout: received ${missionDownloadState.received.size}/${missionDownloadState.expected} mission items`);
-            missionDownloadState = null;
-          }
-        }, 5000);
-
-        // Check if complete
-        if (missionDownloadState.received.size >= missionDownloadState.expected) {
-          // All items received, send ACK and complete
-          sendMissionAck(mainWindow, MAV_MISSION_RESULT.ACCEPTED);
-
-          // Convert map to sorted array
-          const items = Array.from(missionDownloadState.received.values())
-            .sort((a, b) => a.seq - b.seq);
-
-          safeSend(mainWindow, IPC_CHANNELS.MISSION_COMPLETE, items);
-          sendLog(mainWindow, 'info', `Downloaded ${items.length} mission items`);
-
-          if (missionDownloadState.timeout) {
-            clearTimeout(missionDownloadState.timeout);
-          }
-          missionDownloadState = null;
-        } else {
-          // Request next item
-          requestMissionItem(mainWindow, item.seq + 1);
-        }
-      } catch (err) {
-        sendLog(mainWindow, 'error', 'Failed to parse mission item', String(err));
+      // Fence items reuse this message with a trailing mission_type=FENCE byte
+      // (offset 37 once the v2 extension is present).
+      if ((payload.length >= 38 ? payload[37]! : 0) === MAV_MISSION_TYPE.FENCE && fenceDownloadState) {
+        handleFenceItemReceived(mainWindow, msgid, payload);
+        break;
       }
+
+      // FC sent mission item during download (shared with the background-link
+      // handler so per-vehicle fleet downloads work too).
+      handleMissionItemForDownload(mainWindow, msgid, payload);
       break;
     }
 
     case MSG_MISSION_REQUEST:
     case MSG_MISSION_REQUEST_INT: {
-      // FC requesting mission item during upload
-      console.log(`[MISSION] Received MISSION_REQUEST (msg ${msgid}), uploadState=${!!missionUploadState}`);
-      if (!missionUploadState) {
-        sendLog(mainWindow, 'debug', `Received MISSION_REQUEST but no upload in progress`);
-        break;
-      }
-
-      try {
-        // MISSION_REQUEST payload byte order:
-        // Some FCs use v2 byte order (size-sorted) even in v1 packets!
-        // v1 order: target_system(1), target_component(1), seq(2) - seq at offset 2
-        // v2 order: seq(2), target_system(1), target_component(1), [mission_type(1)] - seq at offset 0
-        let seq: number;
-        const seqAtOffset0 = payload[0]! | (payload[1]! << 8);
-        const seqAtOffset2 = payload[2]! | (payload[3]! << 8);
-
-        // Check if bytes 2-3 look like GCS IDs (255, 190) - indicates v2 order
-        const looksLikeV2Order = (payload[2] === 0xFF && payload[3] === 0xBE) ||
-                                 (payload[2] === 0xFF && payload[3] === 0x01) ||
-                                 seqAtOffset2 > 1000;  // Unreasonable seq
-
-        if (msgid === MSG_MISSION_REQUEST_INT || looksLikeV2Order) {
-          // v2 byte order: seq is at offset 0
-          seq = seqAtOffset0;
-        } else {
-          // v1 byte order: seq is at offset 2
-          seq = seqAtOffset2;
-        }
-
-        sendLog(mainWindow, 'debug', `FC requesting mission item ${seq} (msg ${msgid}, raw: ${Array.from(payload.slice(0, 4)).map(b => b.toString(16).padStart(2, '0')).join(' ')})`);
-
-        if (seq < missionUploadState.items.length) {
-          sendMissionItem(mainWindow, missionUploadState.items[seq]!);
-          missionUploadState.currentSeq = seq;
-
-          // Send progress
-          const progress: MissionProgress = {
-            total: missionUploadState.items.length,
-            transferred: seq + 1,
-            operation: 'upload',
-          };
-          safeSend(mainWindow, IPC_CHANNELS.MISSION_PROGRESS, progress);
-
-          // Reset timeout
-          if (missionUploadState.timeout) {
-            clearTimeout(missionUploadState.timeout);
-          }
-          missionUploadState.timeout = setTimeout(() => {
-            safeSend(mainWindow, IPC_CHANNELS.MISSION_ERROR, 'Upload timeout: FC stopped requesting items');
-            missionUploadState = null;
-          }, 5000);
-        }
-      } catch (err) {
-        sendLog(mainWindow, 'error', 'Failed to parse MISSION_REQUEST', String(err));
+      // mission_type at offset 4 (v2: seq(2), sys(1), comp(1), mission_type(1)).
+      if ((payload.length >= 5 ? payload[4]! : 0) === MAV_MISSION_TYPE.FENCE || (fenceUploadState && !missionUploadState)) {
+        handleFenceRequestForUpload(mainWindow, packet);
+      } else {
+        handleMissionRequestForUpload(mainWindow, packet);
       }
       break;
     }
@@ -1871,16 +2656,35 @@ function parseTelemetry(mainWindow: BrowserWindow, packet: MAVLinkPacket): void 
         // type is at byte offset 2
         const ackType = payload.length >= 3 ? payload[2]! : 0;
 
+        // Fence ACK: mission_type=FENCE at offset 3 (v2: sys, comp, type, mission_type).
+        if ((payload.length >= 4 ? payload[3]! : 0) === MAV_MISSION_TYPE.FENCE) {
+          if (ackType === MAV_MISSION_RESULT.ACCEPTED) {
+            if (fenceUploadState) {
+              const n = fenceUploadState.items.length;
+              if (fenceUploadState.timeout) clearTimeout(fenceUploadState.timeout);
+              fenceUploadState = null;
+              safeSend(mainWindow, IPC_CHANNELS.FENCE_UPLOAD_COMPLETE, n);
+              sendLog(mainWindow, 'info', `Uploaded ${n} fence items`);
+            }
+            if (fenceClearPending) {
+              fenceClearPending = false;
+              safeSend(mainWindow, IPC_CHANNELS.FENCE_CLEAR_COMPLETE);
+              sendLog(mainWindow, 'info', 'Fence cleared from flight controller');
+            }
+          } else {
+            if (fenceUploadState) {
+              if (fenceUploadState.timeout) clearTimeout(fenceUploadState.timeout);
+              fenceUploadState = null;
+            }
+            fenceClearPending = false;
+            safeSend(mainWindow, IPC_CHANNELS.FENCE_ERROR, `Fence error: ${getMissionResultName(ackType)}`);
+          }
+          break;
+        }
+
         if (ackType === MAV_MISSION_RESULT.ACCEPTED) {
           if (missionUploadState) {
-            const itemCount = missionUploadState.items.length;
-            sendLog(mainWindow, 'info', `Mission upload complete: ${itemCount} items`);
-            if (missionUploadState.timeout) {
-              clearTimeout(missionUploadState.timeout);
-            }
-            missionUploadState = null;
-            // Send upload completion event to renderer
-            safeSend(mainWindow, IPC_CHANNELS.MISSION_UPLOAD_COMPLETE, itemCount);
+            settleMissionUpload(mainWindow, true);
           }
           if (missionClearPending) {
             sendLog(mainWindow, 'info', 'Mission cleared from flight controller');
@@ -1891,14 +2695,14 @@ function parseTelemetry(mainWindow: BrowserWindow, packet: MAVLinkPacket): void 
         } else {
           // Error
           const errorMsg = getMissionResultName(ackType);
-          safeSend(mainWindow, IPC_CHANNELS.MISSION_ERROR, `Mission error: ${errorMsg}`);
           sendLog(mainWindow, 'error', `Mission ACK error: ${errorMsg}`);
 
           if (missionUploadState) {
-            if (missionUploadState.timeout) {
-              clearTimeout(missionUploadState.timeout);
-            }
-            missionUploadState = null;
+            // Routes the error to the per-vehicle callback, or emits the legacy
+            // MISSION_ERROR event for a single-vehicle upload.
+            settleMissionUpload(mainWindow, false, `Mission error: ${errorMsg}`);
+          } else {
+            safeSend(mainWindow, IPC_CHANNELS.MISSION_ERROR, `Mission error: ${errorMsg}`);
           }
           if (missionDownloadState) {
             if (missionDownloadState.timeout) {
@@ -2060,11 +2864,16 @@ function parseTelemetry(mainWindow: BrowserWindow, packet: MAVLinkPacket): void 
 }
 
 // Helper: Request a mission item from FC
-async function requestMissionItem(mainWindow: BrowserWindow, seq: number): Promise<void> {
-  if (!currentTransport?.isOpen || !connectionState.isConnected) return;
+async function requestMissionItem(mainWindow: BrowserWindow, seq: number, missionType: number = MAV_MISSION_TYPE.MISSION): Promise<void> {
+  // A per-vehicle mission download targets that vehicle's transport+sysid; fence
+  // downloads and legacy single-vehicle downloads stay on the primary connection.
+  const dlTarget = missionType === MAV_MISSION_TYPE.MISSION ? missionDownloadState?.target : undefined;
+  const transport = dlTarget?.transport ?? currentTransport;
+  if (!transport?.isOpen) return;
+  if (!dlTarget && !connectionState.isConnected) return;
 
   let packet: Uint8Array;
-  const targetSystem = connectionState.systemId ?? 1;
+  const targetSystem = dlTarget?.sysid ?? connectionState.systemId ?? 1;
 
   if (detectedMavlinkVersion === 2) {
     // MAVLink v2: Use MISSION_REQUEST_INT (preferred, higher precision)
@@ -2072,7 +2881,7 @@ async function requestMissionItem(mainWindow: BrowserWindow, seq: number): Promi
       targetSystem,
       targetComponent: 1,
       seq,
-      missionType: MAV_MISSION_TYPE.MISSION,
+      missionType,
     });
     packet = await sendMavlinkPacket(MISSION_REQUEST_INT_ID, payload, MISSION_REQUEST_INT_CRC_EXTRA);
   } else {
@@ -2090,17 +2899,27 @@ async function requestMissionItem(mainWindow: BrowserWindow, seq: number): Promi
 
   sendLog(mainWindow, 'debug', `Requesting mission item ${seq} (MAVLink v${detectedMavlinkVersion})`);
 
-  currentTransport.write(packet).catch(err => {
+  transport.write(packet).catch(err => {
     sendLog(mainWindow, 'error', `Failed to request mission item ${seq}`, String(err));
   });
 }
 
 // Helper: Send a mission item to FC
 async function sendMissionItem(mainWindow: BrowserWindow, item: MissionItem): Promise<void> {
-  if (!currentTransport?.isOpen || !connectionState.isConnected) return;
+  // Honor a per-vehicle upload target (survey / multi-vehicle); fall back to the
+  // legacy primary connection for single-vehicle uploads.
+  const override = missionUploadState?.target;
+  const transport = override?.transport ?? currentTransport;
+  // A per-vehicle upload (fleet / orchestrator) carries its own open transport, and
+  // in pure multi-vehicle mode the primary connectionState is idle (isConnected
+  // false) - so gating on it here silently dropped every MISSION_ITEM and the
+  // upload timed out with "FC stopped requesting items". Only require the primary
+  // connection for legacy single-vehicle uploads (no override target).
+  if (!transport?.isOpen) return;
+  if (!override && !connectionState.isConnected) return;
 
   let packet: Uint8Array;
-  const targetSystem = connectionState.systemId ?? 1;
+  const targetSystem = override?.sysid ?? connectionState.systemId ?? 1;
 
   if (detectedMavlinkVersion === 2) {
     // MAVLink v2: Use MISSION_ITEM_INT (preferred, higher precision)
@@ -2150,24 +2969,29 @@ async function sendMissionItem(mainWindow: BrowserWindow, item: MissionItem): Pr
 
   sendLog(mainWindow, 'debug', `Sending mission item ${item.seq} (MAVLink v${detectedMavlinkVersion})`);
 
-  currentTransport.write(packet).catch(err => {
+  transport.write(packet).catch(err => {
     sendLog(mainWindow, 'error', `Failed to send mission item ${item.seq}`, String(err));
   });
 }
 
 // Helper: Send mission ACK
-async function sendMissionAck(mainWindow: BrowserWindow, result: number): Promise<void> {
-  if (!currentTransport?.isOpen || !connectionState.isConnected) return;
+async function sendMissionAck(mainWindow: BrowserWindow, result: number, missionType: number = MAV_MISSION_TYPE.MISSION): Promise<void> {
+  // Honor the per-vehicle mission-download target so the closing ACK reaches the
+  // fleet vehicle we downloaded from (not the idle primary).
+  const dlTarget = missionType === MAV_MISSION_TYPE.MISSION ? missionDownloadState?.target : undefined;
+  const transport = dlTarget?.transport ?? currentTransport;
+  if (!transport?.isOpen) return;
+  if (!dlTarget && !connectionState.isConnected) return;
 
   let packet: Uint8Array;
-  const targetSystem = connectionState.systemId ?? 1;
+  const targetSystem = dlTarget?.sysid ?? connectionState.systemId ?? 1;
 
   if (detectedMavlinkVersion === 2) {
     const payload = serializeMissionAck({
       targetSystem,
       targetComponent: 1,
       type: result,
-      missionType: MAV_MISSION_TYPE.MISSION,
+      missionType,
     });
     packet = await sendMavlinkPacket(MISSION_ACK_ID, payload, MISSION_ACK_CRC_EXTRA);
   } else {
@@ -2180,7 +3004,7 @@ async function sendMissionAck(mainWindow: BrowserWindow, result: number): Promis
     packet = serializeV1(MISSION_ACK_ID, payload, MISSION_ACK_CRC_EXTRA_V1, { sysid: 255, compid: 190 });
   }
 
-  currentTransport.write(packet).catch(err => {
+  transport.write(packet).catch(err => {
     sendLog(mainWindow, 'error', 'Failed to send mission ACK', String(err));
   });
 }
@@ -2304,6 +3128,422 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
     stopPortWatcher();
   });
 
+  // ==================== MULTI-VEHICLE REGISTRY ====================
+  // Read-only projections of the ConnectionRegistry plus active-vehicle
+  // selection. Single-vehicle flows do not call these; they exist for the
+  // fleet/vehicle-selector UI.
+
+  ipcMain.handle(IPC_CHANNELS.COMMS_LIST_TRANSPORTS, async (): Promise<TransportInfoIpc[]> => {
+    return connectionRegistry.listTransports().map(toTransportInfoIpc);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMMS_LIST_VEHICLES, async (): Promise<VehicleInfoIpc[]> => {
+    return connectionRegistry.listVehicles().map(toVehicleInfoIpc);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMMS_SET_ACTIVE, async (_, payload: SetActiveSelectionPayload): Promise<void> => {
+    // Best-effort: a stale selection (vehicle/transport already gone) must not throw
+    // back to the renderer. The renderer's local active pointer is authoritative for
+    // the view; this just keeps the main-process command target in sync when valid.
+    try {
+      connectionRegistry.setActive(payload.transportId, payload.vehicleKey ?? null);
+    } catch (err) {
+      sendLog(mainWindow, 'warn', 'Ignored stale active-vehicle selection', err instanceof Error ? err.message : String(err));
+    }
+    // Broadcast to every window so other views (the 3D world pop-out) follow the
+    // same active vehicle. The initiating window's local pointer already matches,
+    // so applying this is idempotent there.
+    safeSend(mainWindow, IPC_CHANNELS.COMMS_ACTIVE_CHANGED, { transportId: payload.transportId, vehicleKey: payload.vehicleKey ?? null });
+  });
+
+  /** Close a background transport: notify of vehicle loss, then unregister. */
+  const removeBackgroundTransport = async (transportId: TransportId): Promise<void> => {
+    const entry = connectionRegistry.getTransport(transportId);
+    if (!entry) return;
+    for (const vehicle of entry.vehicles.values()) {
+      safeSend(mainWindow, IPC_CHANNELS.COMMS_VEHICLE_LOST, vehicle.key);
+    }
+    try {
+      if (entry.transport.isOpen) await entry.transport.close();
+    } catch {
+      // Best-effort close; we unregister regardless.
+    }
+    connectionRegistry.unregister(transportId);
+  };
+
+  ipcMain.handle(IPC_CHANNELS.COMMS_ADD_TRANSPORT, async (_, options: ConnectOptions): Promise<string> => {
+    // The registry is MAVLink-only; MSP is mutually exclusive (single, legacy).
+    if (connectionState.protocol === 'msp') {
+      throw new Error('Cannot add background transports while connected via MSP');
+    }
+    const transport = buildBackgroundTransport(options);
+    const parser = new MAVLinkParser();
+    const transportId = connectionRegistry.register(transport, parser, options);
+
+    const dataHandler = createBackgroundDiscoveryHandler(transportId, mainWindow);
+    transport.on('data', dataHandler);
+    transport.on('error', (err: Error) => {
+      connectionRegistry.recordTransportError(transportId, err.message);
+    });
+    transport.on('close', () => {
+      void removeBackgroundTransport(transportId);
+    });
+
+    await transport.open();
+    return transportId;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COMMS_REMOVE_TRANSPORT, async (_, transportId: string): Promise<void> => {
+    if (transportId === primaryTransportId) {
+      throw new Error('Cannot remove the primary transport; use disconnect');
+    }
+    await removeBackgroundTransport(transportId);
+  });
+
+  // The single active orchestration link, so fleet-log IPC can drive it (request lists,
+  // fetch logs). One link at a time (engine or manual server).
+  let activeOrchestrationLink: OrchestrationServerLink | null = null;
+  // jobId -> {virtualSysid, logId} for naming the ingested artifact.
+  const fleetLogJobs = new Map<string, { virtualSysid: number; logId: number }>();
+
+  /**
+   * A fetched fleet log arrived in full. Persist the .bin to disk, parse it, and record a
+   * flight summary into the fleet history - the same roll-up the Log List feeds. Best
+   * effort; a parse failure must not crash the link.
+   */
+  async function ingestFleetLogArtifact(jobId: string, bytes: Buffer): Promise<void> {
+    try {
+      const meta = fleetLogJobs.get(jobId);
+      fleetLogJobs.delete(jobId);
+      const { app } = await import('electron');
+      const path = await import('path');
+      const fs = await import('fs/promises');
+      const dir = path.join(app.getPath('userData'), 'fleet-logs');
+      await fs.mkdir(dir, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const label = meta ? `sys${meta.virtualSysid}-log${meta.logId}` : jobId;
+      const filePath = path.join(dir, `fleet-${label}-${stamp}.bin`);
+      await fs.writeFile(filePath, bytes);
+
+      const parser = createDataFlashParser();
+      parser.feed(new Uint8Array(bytes));
+      const log = parser.finalize();
+      const healthResults = runHealthChecks(log);
+      const summary = extractFlightSummary({
+        log: log as unknown as LogLike,
+        health: healthResults as unknown as HealthLike[],
+        path: filePath,
+        fileName: path.basename(filePath),
+        fileMtimeMs: Date.now(),
+        flightId: jobId,
+      });
+      recordFlight(summary);
+      safeSend(mainWindow, IPC_CHANNELS.FLEET_LOG_JOB_EVENT, {
+        type: 'log.ingested', id: jobId, vehicleKey: summary.vehicleKey, fileName: summary.fileName,
+      });
+    } catch (err) {
+      console.warn('[fleet-log] failed to ingest fetched log:', err);
+      safeSend(mainWindow, IPC_CHANNELS.FLEET_LOG_JOB_EVENT, {
+        type: 'log.job', id: jobId, state: 'failed', message: 'parse/ingest failed',
+      });
+    }
+  }
+
+  // Connect to an orchestration server. Registers as a background transport so
+  // its MAVLink-passthrough vehicles are demuxed and surfaced in the fleet just
+  // like any other link. Coordination intents go over the same link's control
+  // channel (OrchestrationServerLink.submitIntent); intent UX is future work.
+  // Build + open an OrchestrationServerLink and register it as a background transport so
+  // its passthrough vehicles surface in the fleet. Shared by the manual "Server" source and
+  // the auto-connect when the local orchestrator engine comes up.
+  async function connectOrchestrationLink(url: string, token?: string, onClose?: () => void): Promise<string> {
+    if (connectionState.protocol === 'msp') {
+      throw new Error('Cannot add an orchestration link while connected via MSP');
+    }
+    const link = new OrchestrationServerLink(url, token);
+    const parser = new MAVLinkParser();
+    const transportId = connectionRegistry.register(link, parser, { type: 'tcp', host: url });
+
+    const dataHandler = createBackgroundDiscoveryHandler(transportId, mainWindow);
+    link.on('data', dataHandler);
+    link.on('error', (err: Error) => connectionRegistry.recordTransportError(transportId, err.message));
+    link.on('close', () => { void removeBackgroundTransport(transportId); onClose?.(); });
+    link.onWelcome((info) => {
+      safeSend(mainWindow, IPC_CHANNELS.COMMS_ORCHESTRATION_STATUS, {
+        transportId, kind: 'welcome', serverName: info.serverName, serverVersion: info.serverVersion, capabilities: info.capabilities,
+      } satisfies OrchestrationStatusIpc);
+    });
+    link.onControl((msg) => {
+      safeSend(mainWindow, IPC_CHANNELS.COMMS_ORCHESTRATION_STATUS, {
+        transportId, kind: 'control', control: msg as OrchestrationStatusIpc['control'],
+      } satisfies OrchestrationStatusIpc);
+    });
+    link.onRoster((vehicles) => {
+      safeSend(mainWindow, IPC_CHANNELS.COMMS_ORCHESTRATION_STATUS, {
+        transportId, kind: 'roster', roster: vehicles,
+      } satisfies OrchestrationStatusIpc);
+    });
+    // Fleet log fetch: forward job events to the renderer, and on a completed artifact
+    // parse + record it into the fleet history (the same pipeline as opening a file).
+    link.onLogEvent((msg) => {
+      safeSend(mainWindow, IPC_CHANNELS.FLEET_LOG_JOB_EVENT, msg);
+    });
+    link.onLogArtifact(({ jobId, bytes }) => {
+      void ingestFleetLogArtifact(jobId, bytes);
+    });
+
+    // Expose this link so the renderer's fleet-log IPC can drive it. There is one
+    // orchestration link at a time (engine or manual server), so a single ref suffices.
+    activeOrchestrationLink = link;
+    const clearRef = () => { if (activeOrchestrationLink === link) activeOrchestrationLink = null; };
+    link.on('close', clearRef);
+
+    await link.open();
+    return transportId;
+  }
+
+  ipcMain.handle(IPC_CHANNELS.COMMS_ADD_ORCHESTRATION_LINK, async (_, url: string, token?: string): Promise<string> => {
+    return connectOrchestrationLink(url, token);
+  });
+
+  // ── Fleet log fetch over the orchestrator ───────────────────────────────────
+  // The desktop addresses fleet vehicles by the virtual sysid it sees on the
+  // passthrough channel; the orchestrator maps it to the real link + runs the job.
+  ipcMain.handle(IPC_CHANNELS.FLEET_LOG_LIST_REQUEST, async (_, virtualSysid: number): Promise<{ ok: boolean; id?: string; error?: string }> => {
+    if (!activeOrchestrationLink) return { ok: false, error: 'No orchestrator connected' };
+    const id = activeOrchestrationLink.requestLogList(virtualSysid);
+    return { ok: true, id };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FLEET_LOG_FETCH, async (_, virtualSysid: number, logId: number): Promise<{ ok: boolean; id?: string; error?: string }> => {
+    if (!activeOrchestrationLink) return { ok: false, error: 'No orchestrator connected' };
+    const id = activeOrchestrationLink.fetchLog(virtualSysid, logId);
+    fleetLogJobs.set(id, { virtualSysid, logId });
+    return { ok: true, id };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FLEET_LOG_FETCH_CANCEL, async (_, virtualSysid: number): Promise<void> => {
+    activeOrchestrationLink?.cancelLogFetch(virtualSysid);
+  });
+
+  // ── Local orchestrator engine (the invisible multi-vehicle engine) ──────────
+  // Track the auto-connected orchestration link so STOP can tear it down too.
+  let orchestratorLinkId: string | null = null;
+
+  const connectToEngine = async (wsUrl: string): Promise<void> => {
+    if (orchestratorLinkId) {
+      await removeBackgroundTransport(orchestratorLinkId).catch(() => {});
+      orchestratorLinkId = null;
+    }
+    try {
+      // Reconnect if the engine link drops while the engine is still running
+      // (engine restart, transient WS hiccup). Without this the desktop keeps a
+      // dead link and every command writes to a closed socket - "no reaction" -
+      // while telemetry quietly stops. Guarded by isRunning so an intentional
+      // STOP doesn't trigger a reconnect storm.
+      orchestratorLinkId = await connectOrchestrationLink(wsUrl, undefined, () => {
+        orchestratorLinkId = null;
+        if (orchestratorProcess.isRunning) {
+          setTimeout(() => {
+            if (orchestratorProcess.isRunning && !orchestratorLinkId) {
+              sendLog(mainWindow, 'info', '[engine] link dropped; reconnecting to engine');
+              void connectToEngine(wsUrl);
+            }
+          }, 1000);
+        }
+      });
+    } catch (err) {
+      console.error('[Orchestrator] auto-connect failed:', err);
+      // Engine is up but the connect failed (e.g. race on spawn): retry shortly.
+      if (orchestratorProcess.isRunning) {
+        setTimeout(() => { if (orchestratorProcess.isRunning && !orchestratorLinkId) void connectToEngine(wsUrl); }, 1000);
+      }
+    }
+  };
+
+  ipcMain.handle(IPC_CHANNELS.ORCHESTRATOR_START, async (_, sources?: OrchestratorSource[]): Promise<OrchestratorStatus> => {
+    const result = await orchestratorProcess.start(sources);
+    if (result.success) await connectToEngine(result.wsUrl);
+    return orchestratorProcess.getStatus();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ORCHESTRATOR_STOP, async (): Promise<OrchestratorStatus> => {
+    if (orchestratorLinkId) {
+      await removeBackgroundTransport(orchestratorLinkId).catch(() => {});
+      orchestratorLinkId = null;
+    }
+    orchestratorProcess.stop();
+    return orchestratorProcess.getStatus();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ORCHESTRATOR_STATUS, async (): Promise<OrchestratorStatus> => {
+    return orchestratorProcess.getStatus();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ORCHESTRATOR_SET_SOURCES, async (_, sources: OrchestratorSource[]): Promise<OrchestratorStatus> => {
+    const wasRunning = orchestratorProcess.isRunning;
+    const result = await orchestratorProcess.setSources(sources);
+    // A restart drops the WS; reconnect the desktop to the fresh engine.
+    if (wasRunning && result.success) await connectToEngine(result.wsUrl);
+    return orchestratorProcess.getStatus();
+  });
+
+  // Submit a group intent to an orchestration link. The server executes the
+  // coordination; status streams back via COMMS_ORCHESTRATION_STATUS.
+  ipcMain.handle(IPC_CHANNELS.COMMS_SUBMIT_INTENT, async (_, transportId: string, intent: OrchestrationIntentIpc): Promise<string | null> => {
+    const entry = connectionRegistry.getTransport(transportId);
+    if (entry && entry.transport instanceof OrchestrationServerLink) {
+      return entry.transport.submitIntent(intent);
+    }
+    return null;
+  });
+
+  // Send a command to a specific vehicle (used by group commands and survey).
+  // Routes to the vehicle's own transport + sysid via the registry.
+  ipcMain.handle(IPC_CHANNELS.MAVLINK_VEHICLE_COMMAND, async (_, vehicleKey: string, cmd: VehicleCommand): Promise<boolean> => {
+    try {
+      switch (cmd.kind) {
+        case 'arm':
+          return await sendCommandLongToVehicle(vehicleKey, 400, { param1: 1, param2: cmd.force ? 21196 : 0 });
+        case 'disarm':
+          return await sendCommandLongToVehicle(vehicleKey, 400, { param1: 0, param2: cmd.force ? 21196 : 0 });
+        case 'rtl':
+          // MAV_CMD_NAV_RETURN_TO_LAUNCH (20) - vehicle-type agnostic, no mode-number lookup needed.
+          return await sendCommandLongToVehicle(vehicleKey, 20, {});
+        case 'takeoff':
+          return await sendCommandLongToVehicle(vehicleKey, 22, { param7: cmd.altitude });
+        case 'setmode': {
+          const armedBit = lastReportedArmed ? 128 : 0;
+          return await sendCommandLongToVehicle(vehicleKey, 176, { param1: 1 | armedBit, param2: cmd.customMode });
+        }
+        case 'mission-start': {
+          // A mission only runs in AUTO - copter/rover won't start one from MISSION_START
+          // alone. Switch the vehicle to AUTO (mode number by family) first, then send
+          // MAV_CMD_MISSION_START. Needs the vehicle armed with a mission already uploaded.
+          const veh = connectionRegistry.getVehicleByKey(vehicleKey);
+          const mt = veh?.mavType ?? 0;
+          const copterOrSub = [2, 3, 4, 12, 13, 14, 15, 29].includes(mt); // multirotor/heli + sub
+          const autoMode = copterOrSub ? 3 : 10;
+          await sendCommandLongToVehicle(vehicleKey, 176, { param1: 1, param2: autoMode });
+          await new Promise((r) => setTimeout(r, 300));
+          return await sendCommandLongToVehicle(vehicleKey, 300, {});
+        }
+        default:
+          return false;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      sendLog(mainWindow, 'error', `Vehicle command failed (${cmd.kind})`, message);
+      return false;
+    }
+  });
+
+  // ==================== Camera / video ====================
+  ipcMain.handle(IPC_CHANNELS.CAMERA_START, async (_, source: CameraSourceConfig, resolvedUrl?: string) => {
+    return mediaEngine.start(source, resolvedUrl);
+  });
+  ipcMain.handle(IPC_CHANNELS.CAMERA_STOP, async (_, sourceId: string) => {
+    await mediaEngine.stop(sourceId);
+  });
+  ipcMain.handle(IPC_CHANNELS.CAMERA_SNAPSHOT, async (_, sourceId: string) => {
+    return mediaEngine.snapshot(sourceId);
+  });
+  ipcMain.handle(IPC_CHANNELS.CAMERA_RECORD_TOGGLE, async (_, sourceId: string) => {
+    return mediaEngine.toggleRecord(sourceId);
+  });
+  ipcMain.handle(IPC_CHANNELS.CAMERA_ENGINE_STATUS, async () => {
+    return mediaEngine.getStatus();
+  });
+  ipcMain.handle(IPC_CHANNELS.CAMERA_ENGINE_INSTALL, async () => {
+    return mediaEngine.downloadBinaries((line) => safeSend(mainWindow, IPC_CHANNELS.CAMERA_ENGINE_INSTALL_LOG, line));
+  });
+
+  ipcMain.handle(IPC_CHANNELS.CAMERA_GIMBAL_COMMAND, async (_, vehicleKey: string, cmd: GimbalCommand): Promise<boolean> => {
+    try {
+      switch (cmd.kind) {
+        case 'pitchyaw': {
+          const deviceId = cmd.deviceId ?? 0;
+          if (cmd.via === 'mount') {
+            // Legacy/alt mounts driven via MAV_CMD_DO_MOUNT_CONTROL (205) with
+            // absolute angle targeting: param1=pitch, param2=roll, param3=yaw,
+            // param7=mode (2 = MAV_MOUNT_MODE_MAVLINK_TARGETING). No rate mode.
+            return await sendCommandLongToVehicle(vehicleKey, 205, {
+              param1: cmd.pitchDeg, param2: 0, param3: cmd.yawDeg, param7: 2,
+            });
+          }
+          // MAV_CMD_DO_GIMBAL_MANAGER_PITCHYAW (1000). Absolute angles go in
+          // param1/2; rates go in param3/4 with the angle params NaN. param7 =
+          // gimbal device id (0 = all). param5 = manager flags (0 = default).
+          if (cmd.rate) {
+            return await sendCommandLongToVehicle(vehicleKey, 1000, {
+              param1: NaN, param2: NaN, param3: cmd.pitchDeg, param4: cmd.yawDeg, param5: 0, param7: deviceId,
+            });
+          }
+          return await sendCommandLongToVehicle(vehicleKey, 1000, {
+            param1: cmd.pitchDeg, param2: cmd.yawDeg, param3: NaN, param4: NaN, param5: 0, param7: deviceId,
+          });
+        }
+        case 'point-roi': {
+          // MAV_CMD_DO_SET_ROI_LOCATION (195) as COMMAND_INT so lat/lon keep
+          // full degE7 precision (a float COMMAND_LONG would lose ~metres).
+          const target = resolveVehicleTarget(vehicleKey);
+          if (!target) return false;
+          const payload = serializeCommandInt({
+            targetSystem: target.sysid,
+            targetComponent: 1,
+            frame: 0,        // MAV_FRAME_GLOBAL — z is AMSL metres
+            command: 195,
+            current: 0,
+            autocontinue: 0,
+            param1: cmd.deviceId ?? 0,  // gimbal device id (0 = all)
+            param2: 0, param3: 0, param4: 0,
+            x: Math.round(cmd.lat * 1e7),
+            y: Math.round(cmd.lon * 1e7),
+            z: cmd.alt,
+          });
+          const packet = await sendMavlinkPacket(COMMAND_INT_ID, payload, COMMAND_INT_CRC_EXTRA);
+          await target.transport.write(packet);
+          connectionState.packetsSent++;
+          return true;
+        }
+        case 'roi-none':
+          // MAV_CMD_DO_SET_ROI_NONE (197) — release the ROI lock.
+          return await sendCommandLongToVehicle(vehicleKey, 197, {});
+        case 'retract':
+          // MAV_CMD_DO_MOUNT_CONTROL (205), MAV_MOUNT_MODE_RETRACT (0) in param7.
+          return await sendCommandLongToVehicle(vehicleKey, 205, { param7: 0 });
+        case 'center':
+          // DO_MOUNT_CONTROL, MAV_MOUNT_MODE_NEUTRAL (1).
+          return await sendCommandLongToVehicle(vehicleKey, 205, { param7: 1 });
+        default:
+          return false;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      sendLog(mainWindow, 'error', `Gimbal command failed (${cmd.kind})`, message);
+      return false;
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.CAMERA_CAMERA_COMMAND, async (_, vehicleKey: string, cmd: CameraCommand): Promise<boolean> => {
+    try {
+      if (cmd.kind === 'zoom') {
+        // MAV_CMD_SET_CAMERA_ZOOM (531). param1 = ZOOM_TYPE (1 continuous, 2 range).
+        return await sendCommandLongToVehicle(vehicleKey, 531, {
+          param1: cmd.mode === 'range' ? 2 : 1, param2: cmd.value,
+        });
+      }
+      // MAV_CMD_SET_CAMERA_FOCUS (532), same param convention.
+      return await sendCommandLongToVehicle(vehicleKey, 532, {
+        param1: cmd.mode === 'range' ? 2 : 1, param2: cmd.value,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      sendLog(mainWindow, 'error', `Camera command failed (${cmd.kind})`, message);
+      return false;
+    }
+  });
+
   // ==================== AUTO-RECONNECT LOGIC ====================
   // Handles automatic reconnection after expected reboots (EEPROM save, CLI save, etc.)
 
@@ -2368,7 +3608,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
       if (mavlinkBatchTimer) {
         clearTimeout(mavlinkBatchTimer);
         mavlinkBatchTimer = null;
-        mavlinkTelemetryBatch = {};
+        mavlinkTelemetryBatches = {};
       }
       currentTransport = null;
       mavlinkParser = null;
@@ -2379,6 +3619,8 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
       connectionState.staleSince = undefined;
       sendLog(mainWindow, 'info', 'Connection closed');
       sendConnectionState(mainWindow);
+      // Heartbeats stopped (likely signal loss); keep trying to bring the link back.
+      if (!suppressAutoReconnect && lastConnectOptions) scheduleAutoReconnect('Heartbeat lost');
     }
   };
 
@@ -2522,6 +3764,14 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
                     connectionState.signingEnabled = true;
                     const fingerprint = Array.from(signingKey!.slice(0, 4)).map(b => b.toString(16).padStart(2, '0')).join('');
                     sendLog(mainWindow, 'info', `MAVLink signing auto-enabled (key ${fingerprint}... verified against FC sysid=${fcSysid})`);
+                    recordSigningEvent({
+                      event: 'key-auto-matched',
+                      actor: 'auto',
+                      fingerprint: matchedFingerprint ?? fingerprint,
+                      sysid: fcSysid,
+                      transport: currentTransport?.portName,
+                      detail: `Saved key verified against FC and signing auto-enabled${wasSigningEnabled ? '' : ' (was off)'}`,
+                    });
                     // Associate this key with the FC's system ID for future fast-matching
                     if (matchedFingerprint) {
                       associateKeyWithSystem(matchedFingerprint, fcSysid);
@@ -2537,6 +3787,13 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
                       `Signing key mismatch - tried ${triedFingerprints.length} key(s): [${triedList}], none matched FC sysid=${fcSysid}.`,
                       'Enter the correct passphrase, or paste the raw key (hex/base64) from Mission Planner in the Connection panel.'
                     );
+                    recordSigningEvent({
+                      event: 'key-mismatch',
+                      actor: 'system',
+                      sysid: fcSysid,
+                      transport: currentTransport?.portName,
+                      detail: `FC sends signed packets but none of ${triedFingerprints.length} saved key(s) matched`,
+                    });
                     safeSend(mainWindow, IPC_CHANNELS.MAVLINK_SIGNING_STATUS, getSigningStatus());
                   } else {
                     sendLog(mainWindow, 'warn', 'Vehicle requires MAVLink signing but no key is configured. Set a signing passphrase in the Connection panel before connecting.');
@@ -2587,6 +3844,25 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
                 resetHeartbeatWatchdog();
               }
 
+              // Multi-vehicle shadow: mirror this vehicle into the registry,
+              // keyed by (transport, sysid, compid) so a second vehicle or a
+              // tracker never clobbers the primary. Auto-promote the first
+              // discovered vehicle to active so single-vehicle behavior is
+              // unchanged. Legacy connectionState reads below are untouched.
+              if (primaryTransportId) {
+                const discovered = connectionRegistry.recordHeartbeat(
+                  primaryTransportId, packet.sysid, packet.compid, vehicleType,
+                );
+                if (discovered) {
+                  if (connectionRegistry.getActiveVehicleKey() === null) {
+                    connectionRegistry.setActive(primaryTransportId, discovered.vehicle.key);
+                  }
+                  if (discovered.isNew) {
+                    safeSend(mainWindow, IPC_CHANNELS.COMMS_VEHICLE_DISCOVERED, toVehicleInfoIpc(discovered.vehicle));
+                  }
+                }
+              }
+
               // First heartbeat from a real vehicle - connection confirmed!
               if (connectionState.isWaitingForHeartbeat) {
                 if (heartbeatTimeout) {
@@ -2596,6 +3872,9 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
 
                 connectionState.isWaitingForHeartbeat = false;
                 connectionState.isConnected = true;
+                // A heartbeat means we're back: clear any reconnect-in-progress UI state.
+                connectionState.isReconnecting = false;
+                connectionState.reconnectAttempt = undefined;
                 connectionState.protocol = 'mavlink';
                 connectionState.systemId = packet.sysid;
                 connectionState.componentId = packet.compid;
@@ -2741,6 +4020,10 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
     mavlinkDataHandler = createMavlinkDataHandler();
     currentTransport!.on('data', mavlinkDataHandler);
 
+    // Multi-vehicle shadow: re-register the primary session after reconnect,
+    // reusing the original connection's config.
+    registerPrimarySession();
+
     // Set up error/close handlers
     transportErrorHandler = (error: Error) => {
       if (!isReconnectPending()) {
@@ -2772,6 +4055,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
       }
       // Unexpected close (e.g. physical USB disconnect) - full cleanup
       // so port watcher can restart and detect reconnected devices
+      const wasConnected = connectionState.isConnected;
       cancelCalibration('Flight controller disconnected');
       cleanupMspConnection();
       cleanupTransportListeners();
@@ -2782,7 +4066,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
       if (mavlinkBatchTimer) {
         clearTimeout(mavlinkBatchTimer);
         mavlinkBatchTimer = null;
-        mavlinkTelemetryBatch = {};
+        mavlinkTelemetryBatches = {};
       }
       currentTransport = null;
       mavlinkParser = null;
@@ -2792,6 +4076,8 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
       connectionState.isWaitingForHeartbeat = false;
       sendLog(mainWindow, 'info', 'Connection closed');
       sendConnectionState(mainWindow);
+      // The link was up and dropped on its own: recover it automatically.
+      if (wasConnected && !suppressAutoReconnect && lastConnectOptions) scheduleAutoReconnect('Link dropped');
     };
     currentTransport!.on('close', transportCloseHandler);
 
@@ -2847,23 +4133,43 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
     connectionState.reconnectAttempt = pendingReconnect.attempt;
     sendConnectionState(mainWindow);
 
-    sendLog(mainWindow, 'info', `Reconnect attempt ${pendingReconnect.attempt}/${pendingReconnect.maxAttempts}`);
+    // Unexpected-drop recovery backs off exponentially (1s..15s) and never gives up; a
+    // known-reboot reconnect keeps its tight fixed cadence.
+    const retryMs = pendingReconnect.auto
+      ? Math.min(1000 * 2 ** Math.min(pendingReconnect.attempt - 1, 4), 15000)
+      : 500;
+    sendLog(mainWindow, 'info', pendingReconnect.auto
+      ? `Reconnect attempt ${pendingReconnect.attempt}`
+      : `Reconnect attempt ${pendingReconnect.attempt}/${pendingReconnect.maxAttempts}`);
 
-    // Validate we have connection info
-    if (!pendingReconnect.portPath && !pendingReconnect.host) {
+    // Validate we have connection info (UDP has neither portPath nor host).
+    if (!pendingReconnect.portPath && !pendingReconnect.host && pendingReconnect.options?.type !== 'udp') {
       cancelReconnect('No connection info available for reconnect');
       return;
     }
 
     try {
       if (pendingReconnect.portPath) {
-        // Serial reconnection - check if port is available
+        // Serial reconnection - check if the port is available, matching by USB identity so
+        // a radio that re-enumerated to a new path (ttyUSB0 -> ttyUSB1) is still found.
         const ports = await listSerialPorts();
-        const portAvailable = ports.some(p => p.path === pendingReconnect!.portPath);
+        let portAvailable = ports.some(p => p.path === pendingReconnect!.portPath);
+        if (!portAvailable && lastSerialUsbId && (lastSerialUsbId.serialNumber || lastSerialUsbId.vendorId)) {
+          const match = ports.find(p =>
+            p.vendorId === lastSerialUsbId!.vendorId
+            && p.productId === lastSerialUsbId!.productId
+            && (!lastSerialUsbId!.serialNumber || p.serialNumber === lastSerialUsbId!.serialNumber));
+          if (match) {
+            sendLog(mainWindow, 'info', `Radio re-enumerated to ${match.path}, reconnecting there`);
+            pendingReconnect.portPath = match.path;
+            if (pendingReconnect.options) pendingReconnect.options.port = match.path;
+            portAvailable = true;
+          }
+        }
 
         if (!portAvailable) {
-          sendLog(mainWindow, 'debug', 'Port not available yet, retrying in 500ms...');
-          reconnectTimer = setTimeout(() => attemptReconnect(), 500);
+          sendLog(mainWindow, 'debug', `Port not available yet, retrying in ${retryMs}ms...`);
+          reconnectTimer = setTimeout(() => attemptReconnect(), retryMs);
           return;
         }
 
@@ -2987,12 +4293,64 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
             return;
           }
         }
+      } else if (pendingReconnect.options?.type === 'udp') {
+        // UDP reconnection (rebind the socket). Reached after the heartbeat watchdog
+        // force-closes a silent UDP link, or if the socket errors.
+        const o = pendingReconnect.options;
+        const transport = o.udpMode === 'client' && o.udpRemoteHost && o.udpRemotePort
+          ? new UdpTransport({
+              localPort: o.udpClientLocalPort ?? 14550,
+              remoteHost: o.udpRemoteHost,
+              remotePort: o.udpRemotePort,
+            })
+          : new UdpTransport({ localPort: o.udpPort ?? 14550 });
+
+        await transport.open();
+        currentTransport = transport;
+
+        const name = o.udpMode === 'client'
+          ? `UDP client ${o.udpRemoteHost}:${o.udpRemotePort}`
+          : `UDP :${o.udpPort ?? 14550}`;
+
+        if (pendingReconnect.protocol === 'mavlink') {
+          const connected = await attemptMavlinkReconnect(name);
+          if (connected) {
+            pendingReconnect = null;
+            return;
+          }
+        } else {
+          const mspInfo = await tryMspDetection(currentTransport, mainWindow);
+          if (mspInfo) {
+            const vehicleType = await getMspVehicleType(mspInfo.fcVariant) || 'Unknown';
+            connectionState = {
+              isConnected: true,
+              isReconnecting: false,
+              protocol: 'msp',
+              transport: 'udp',
+              connectionType: 'udp',
+              fcVariant: mspInfo.fcVariant,
+              fcVersion: mspInfo.fcVersion,
+              boardId: mspInfo.boardId,
+              apiVersion: mspInfo.apiVersion,
+              autopilot: mspInfo.fcVariant,
+              vehicleType,
+              isLegacyBoard: isLegacyMspBoard(mspInfo.fcVariant, mspInfo.fcVersion),
+              packetsReceived: 0,
+              packetsSent: 0,
+            };
+            setupReconnectTransportHandlers(transport);
+            sendConnectionState(mainWindow);
+            sendLog(mainWindow, 'info', 'Reconnected successfully!', `${mspInfo.fcVariant} ${vehicleType}`);
+            pendingReconnect = null;
+            return;
+          }
+        }
       }
 
       // Protocol detection failed - close and retry
       currentTransport?.close();
       currentTransport = null;
-      reconnectTimer = setTimeout(() => attemptReconnect(), 500);
+      reconnectTimer = setTimeout(() => attemptReconnect(), retryMs);
 
     } catch (err) {
       // Clean up any partially opened transport
@@ -3006,7 +4364,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
         }
       }
       currentTransport = null;
-      reconnectTimer = setTimeout(() => attemptReconnect(), 500);
+      reconnectTimer = setTimeout(() => attemptReconnect(), retryMs);
     }
   };
 
@@ -3062,8 +4420,9 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
       if (mavlinkBatchTimer) {
         clearTimeout(mavlinkBatchTimer);
         mavlinkBatchTimer = null;
-        mavlinkTelemetryBatch = {};
+        mavlinkTelemetryBatches = {};
       }
+      const wasConnected = connectionState.isConnected;
       currentTransport = null;
       mavlinkParser = null;
       resetMavlinkDiagCache();
@@ -3071,6 +4430,8 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
       connectionState.isWaitingForHeartbeat = false;
       sendLog(mainWindow, 'info', 'Connection closed');
       sendConnectionState(mainWindow);
+      // The link was up and dropped on its own: recover it automatically.
+      if (wasConnected && !suppressAutoReconnect && lastConnectOptions) scheduleAutoReconnect('Link dropped');
     };
     transport.on('close', transportCloseHandler);
   };
@@ -3121,6 +4482,43 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
     reconnectTimer = setTimeout(() => attemptReconnect(), delayMs);
   };
 
+  /**
+   * Schedule recovery from an UNEXPECTED link drop (signal loss, power cycle, cable unplug).
+   * Unlike scheduleReconnect (built for a known board reboot), this re-dials the exact link
+   * the user last connected with - serial / TCP / UDP - using exponential backoff and
+   * effectively never giving up, so a vehicle that comes back is picked up automatically.
+   * No-op if there's nothing to reconnect to or a reconnect is already running.
+   */
+  const scheduleAutoReconnect = (reason: string): void => {
+    if (!lastConnectOptions || suppressAutoReconnect || isReconnectPending()) return;
+    const o = lastConnectOptions;
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+
+    const tcpPortNum = typeof o.tcpPort === 'string' ? parseInt(o.tcpPort, 10) : o.tcpPort;
+    pendingReconnect = {
+      reason,
+      options: o,
+      auto: true,
+      portPath: o.type === 'serial' ? o.port : undefined,
+      host: o.type === 'tcp' ? o.host : undefined,
+      tcpPort: tcpPortNum,
+      protocol: o.protocol === 'msp' ? 'msp' : 'mavlink',
+      baudRate: o.baudRate ?? 115200,
+      startTime: Date.now(),
+      attempt: 0,
+      maxAttempts: Number.MAX_SAFE_INTEGER,
+      timeoutMs: Number.MAX_SAFE_INTEGER,
+    };
+
+    connectionState.isReconnecting = true;
+    connectionState.reconnectReason = reason;
+    connectionState.reconnectAttempt = 0;
+    sendConnectionState(mainWindow);
+    sendLog(mainWindow, 'warn', 'Link lost - reconnecting automatically', reason);
+
+    reconnectTimer = setTimeout(() => attemptReconnect(), 1000);
+  };
+
   // Export scheduleReconnect for use by MSP handlers
   // We'll make it available via a global reference since MSP handlers are in separate file
   (globalThis as Record<string, unknown>).__ardudeck_scheduleReconnect = scheduleReconnect;
@@ -3142,6 +4540,21 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
       }
       pendingReconnect = null;
       connectionState.isReconnecting = false;
+    }
+
+    // Remember how to re-dial this exact link so an unexpected drop (signal loss, power
+    // cycle, cable unplug) recovers on its own. Capturing the serial port's USB identity
+    // lets reconnect find the device even if it re-enumerates to a different path.
+    lastConnectOptions = { ...options };
+    suppressAutoReconnect = false;
+    lastSerialUsbId = null;
+    if (options.type === 'serial' && options.port) {
+      void listSerialPorts()
+        .then((ports) => {
+          const m = ports.find((p) => p.path === options.port);
+          lastSerialUsbId = m ? { vendorId: m.vendorId, productId: m.productId, serialNumber: m.serialNumber } : null;
+        })
+        .catch(() => { lastSerialUsbId = null; });
     }
 
     // Clear any existing heartbeat timeout
@@ -3259,7 +4672,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
         if (mavlinkBatchTimer) {
           clearTimeout(mavlinkBatchTimer);
           mavlinkBatchTimer = null;
-          mavlinkTelemetryBatch = {};
+          mavlinkTelemetryBatches = {};
         }
         // Stop the GCS heartbeat sender. The route-punch path (#86, #88)
         // can start this BEFORE we receive the FC's first heartbeat, so
@@ -3269,6 +4682,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
           clearInterval(gcsHeartbeatInterval);
           gcsHeartbeatInterval = null;
         }
+        const wasConnected = connectionState.isConnected;
         currentTransport = null;
         mavlinkParser = null;
         resetMavlinkDiagCache();
@@ -3276,6 +4690,8 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
         connectionState.isWaitingForHeartbeat = false;
         sendLog(mainWindow, 'info', 'Connection closed');
         sendConnectionState(mainWindow);
+        // The link was up and dropped on its own: recover it automatically.
+        if (wasConnected && !suppressAutoReconnect && lastConnectOptions) scheduleAutoReconnect('Link dropped');
       };
       currentTransport.on('close', transportCloseHandler);
 
@@ -3414,6 +4830,11 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
       }
 
       sendLog(mainWindow, 'info', `Port opened, waiting for MAVLink heartbeat...`);
+
+      // Multi-vehicle shadow: register the primary session now that the link is
+      // confirmed MAVLink (the MSP path returned earlier). Vehicles populate as
+      // their heartbeats arrive.
+      registerPrimarySession(options);
 
       // ── UDP-client route-punch (#86, #88) ────────────────────────────────
       // UDP is connectionless: until the GCS sends *something*, the FC /
@@ -3568,6 +4989,12 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
 
   // Disconnect
   ipcMain.handle(IPC_CHANNELS.COMMS_DISCONNECT, async (): Promise<void> => {
+    // User is intentionally disconnecting: stop the transport `close` handler from
+    // mistaking this teardown for a drop and auto-reconnecting, and forget the saved link.
+    suppressAutoReconnect = true;
+    lastConnectOptions = null;
+    lastSerialUsbId = null;
+
     // Cancel any pending auto-reconnect (user is intentionally disconnecting)
     if (pendingReconnect || reconnectTimer) {
       cancelReconnect('User disconnected');
@@ -3609,7 +5036,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
       if (mavlinkBatchTimer) {
         clearTimeout(mavlinkBatchTimer);
         mavlinkBatchTimer = null;
-        mavlinkTelemetryBatch = {};
+        mavlinkTelemetryBatches = {};
       }
 
       if (currentTransport) {
@@ -3731,6 +5158,22 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
     settingsStore.set(settings);
   });
 
+  // Simulator authored obstacles, keyed by test site id.
+  ipcMain.handle(IPC_CHANNELS.SIM_OBSTACLES_GET, async (_, siteId: string): Promise<AuthoredObstacle[]> => {
+    const sites = simObstaclesStore.get('sites', {});
+    return sites[siteId] ?? [];
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SIM_OBSTACLES_SAVE, async (_, siteId: string, obstacles: AuthoredObstacle[]): Promise<void> => {
+    const sites = simObstaclesStore.get('sites', {});
+    sites[siteId] = obstacles;
+    simObstaclesStore.set('sites', sites);
+  });
+
+  // Current connection state — lets detached windows opened after connect (which
+  // missed the one-shot CONNECTION_STATE broadcast) hydrate on mount.
+  ipcMain.handle(IPC_CHANNELS.CONNECTION_GET_STATE, async (): Promise<ConnectionState> => connectionState);
+
   // Telemetry stream rate control (MAVLink only)
   ipcMain.handle(IPC_CHANNELS.TELEMETRY_SET_STREAM_RATE, async (_, speed: TelemetrySpeed): Promise<{ success: boolean }> => {
     if (connectionState.protocol !== 'mavlink' || !connectionState.isConnected) {
@@ -3763,6 +5206,12 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
       signingKeyMismatch = false;
       signingStore.set('sentToFc', false);
       sendLog(mainWindow, 'info', `Signing key set: ${newB64}... (${savedAfter} key${savedAfter > 1 ? 's' : ''} stored)`);
+      recordSigningEvent({
+        event: 'key-set',
+        actor: 'user',
+        fingerprint: signingFingerprint(key),
+        detail: savedAfter > savedBefore ? `New signing key stored (${savedAfter} total)` : 'Signing key set (already in saved list)',
+      });
       safeSend(mainWindow, IPC_CHANNELS.MAVLINK_SIGNING_STATUS, getSigningStatus());
       return { success: true };
     } catch (error) {
@@ -3785,6 +5234,13 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
     safeSend(mainWindow, IPC_CHANNELS.CONNECTION_STATE, connectionState);
     safeSend(mainWindow, IPC_CHANNELS.MAVLINK_SIGNING_STATUS, getSigningStatus());
     sendLog(mainWindow, 'info', 'MAVLink signing enabled');
+    recordSigningEvent({
+      event: 'signing-enabled',
+      actor: 'user',
+      fingerprint: signingKey ? signingFingerprint(signingKey) : undefined,
+      transport: currentTransport?.portName,
+      detail: 'Outgoing packet signing enabled',
+    });
     return { success: true };
   });
 
@@ -3795,6 +5251,13 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
     safeSend(mainWindow, IPC_CHANNELS.CONNECTION_STATE, connectionState);
     safeSend(mainWindow, IPC_CHANNELS.MAVLINK_SIGNING_STATUS, getSigningStatus());
     sendLog(mainWindow, 'info', 'MAVLink signing disabled');
+    recordSigningEvent({
+      event: 'signing-disabled',
+      actor: 'user',
+      fingerprint: signingKey ? signingFingerprint(signingKey) : undefined,
+      transport: currentTransport?.portName,
+      detail: 'Outgoing packet signing disabled',
+    });
     return { success: true };
   });
 
@@ -3860,6 +5323,14 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
       } else {
         sendLog(mainWindow, 'info', `SETUP_SIGNING sent to FC (sys=${targetSys}, comp=${targetComp})`);
       }
+      recordSigningEvent({
+        event: 'key-sent-to-fc',
+        actor: 'user',
+        fingerprint: signingFingerprint(signingKey),
+        sysid: targetSys,
+        transport: currentTransport?.portName,
+        detail: isNetwork ? 'SETUP_SIGNING delivered over network link; signing auto-enabled' : 'SETUP_SIGNING delivered over serial link; signing auto-enabled',
+      });
 
       // Verify delivery: wait up to 3 seconds for FC to respond with signed packets
       if (isNetwork && !connectionState.fcSigning) {
@@ -3930,6 +5401,9 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
       }
     }
 
+    // Capture the fingerprint before we drop the key, for the audit trail.
+    const removedFingerprint = signingKey ? signingFingerprint(signingKey) : undefined;
+
     // Clean up local state
     signingKey = null;
     signingEnabled = false;
@@ -3940,7 +5414,71 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
     safeSend(mainWindow, IPC_CHANNELS.CONNECTION_STATE, connectionState);
     safeSend(mainWindow, IPC_CHANNELS.MAVLINK_SIGNING_STATUS, getSigningStatus());
     sendLog(mainWindow, 'info', 'MAVLink signing disabled and key removed');
+    recordSigningEvent({
+      event: 'key-removed',
+      actor: 'user',
+      fingerprint: removedFingerprint,
+      transport: currentTransport?.portName,
+      detail: 'Active signing key removed locally (zero-key sent to FC if connected)',
+    });
     return { success: true };
+  });
+
+  // Return the tamper-evident signing audit log + a live chain verification, for
+  // the Compliance view.
+  ipcMain.handle(IPC_CHANNELS.MAVLINK_SIGNING_AUDIT_GET, async () => {
+    const entries = getAuditLog();
+    return { entries, chain: verifyAuditChain(entries), posture: getSecureLinkPosture() };
+  });
+
+  // Build and save a secure-link compliance evidence pack: machine-readable JSON
+  // plus a human-readable Markdown posture report a buyer can hand to a reviewer.
+  ipcMain.handle(IPC_CHANNELS.MAVLINK_SIGNING_EVIDENCE_EXPORT, async (): Promise<{ success: boolean; error?: string; path?: string }> => {
+    try {
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const dlg = await dialog.showSaveDialog(mainWindow, {
+        title: 'Export Secure Link Evidence Pack',
+        defaultPath: `ardudeck-secure-link-evidence-${stamp}.json`,
+        filters: [
+          { name: 'Evidence Pack (JSON)', extensions: ['json'] },
+          { name: 'Posture Report (Markdown)', extensions: ['md'] },
+        ],
+      });
+      if (dlg.canceled || !dlg.filePath) return { success: false, error: 'Cancelled' };
+
+      const pack = buildEvidencePack({
+        posture: getSecureLinkPosture(),
+        connection: {
+          connected: connectionState.isConnected,
+          transport: currentTransport?.portName,
+          sysid: connectionState.systemId,
+          mavlinkVersion: detectedMavlinkVersion,
+          boardUid: connectionState.boardUid ?? null,
+        },
+        app: {
+          name: app.getName(),
+          version: app.getVersion(),
+          platform: `${process.platform} ${process.arch}`,
+          electron: process.versions.electron ?? 'unknown',
+        },
+        generatedAt: Date.now(),
+      });
+
+      const fs = await import('fs/promises');
+      // The reviewer-facing report goes alongside the JSON regardless of which
+      // extension they picked, so they always get both the data and the readable
+      // summary. The chosen path drives which one opens by default.
+      const isMd = dlg.filePath.toLowerCase().endsWith('.md');
+      const jsonPath = isMd ? dlg.filePath.replace(/\.md$/i, '.json') : dlg.filePath;
+      const mdPath = isMd ? dlg.filePath : dlg.filePath.replace(/\.json$/i, '.md');
+      await fs.writeFile(jsonPath, JSON.stringify(pack, null, 2), 'utf-8');
+      await fs.writeFile(mdPath, renderPostureReport(pack), 'utf-8');
+      sendLog(mainWindow, 'info', `Secure-link evidence pack exported (${pack.auditLog.length} audit entries, chain ${pack.chain.ok ? 'verified' : 'BROKEN'})`);
+      return { success: true, path: dlg.filePath };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      return { success: false, error: msg };
+    }
   });
 
   // Parameter management handlers
@@ -4535,7 +6073,8 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
 
   // ARM / DISARM via MAV_CMD_COMPONENT_ARM_DISARM (command 400)
   ipcMain.handle(IPC_CHANNELS.MAVLINK_ARM_DISARM, async (_, arm: boolean, force?: boolean): Promise<boolean> => {
-    if (!currentTransport?.isOpen || !connectionState.isConnected) {
+    const target = activeFlightTarget();
+    if (!target) {
       return false;
     }
 
@@ -4553,7 +6092,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
       // Also send a one-shot RC_CHANNELS_OVERRIDE via MAVLink as a fallback
       if (arm) {
         const rcPayload = serializeRcChannelsOverride({
-          targetSystem: connectionState.systemId ?? 1,
+          targetSystem: target.sysid,
           targetComponent: 1,
           chan1Raw: 1500, // Roll center
           chan2Raw: 1500, // Pitch center
@@ -4568,13 +6107,13 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
           chan17Raw: 0, chan18Raw: 0,
         });
         const rcPacket = await sendMavlinkPacket(RC_CHANNELS_OVERRIDE_ID, rcPayload, RC_CHANNELS_OVERRIDE_CRC_EXTRA);
-        await currentTransport.write(rcPacket);
+        await target.transport.write(rcPacket);
         // Give ArduPilot time to process the RC input
         await new Promise(resolve => setTimeout(resolve, 500));
       }
 
       const payload = serializeCommandLong({
-        targetSystem: connectionState.systemId ?? 1,
+        targetSystem: target.sysid,
         targetComponent: 1,
         command: 400, // MAV_CMD_COMPONENT_ARM_DISARM
         confirmation: 0,
@@ -4588,10 +6127,10 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
       });
 
       const packet = await sendMavlinkPacket(COMMAND_LONG_ID, payload, COMMAND_LONG_CRC_EXTRA);
-      await currentTransport.write(packet);
+      await target.transport.write(packet);
       connectionState.packetsSent++;
 
-      sendLog(mainWindow, 'info', `Sent ${arm ? 'ARM' : 'DISARM'} command${force ? ' (FORCE)' : ''}`);
+      sendLog(mainWindow, 'info', `Sent ${arm ? 'ARM' : 'DISARM'} command${force ? ' (FORCE)' : ''} to sysid ${target.sysid}`);
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
@@ -4612,7 +6151,8 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
   // legacy SET_MODE alone was being silently dropped — user couldn't get
   // out of RTL to arm. The COMMAND_LONG path resolves it.
   ipcMain.handle(IPC_CHANNELS.MAVLINK_SET_MODE, async (_, customMode: number): Promise<boolean> => {
-    if (!currentTransport?.isOpen || !connectionState.isConnected) {
+    const target = activeFlightTarget();
+    if (!target) {
       return false;
     }
 
@@ -4622,7 +6162,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
 
       // 1. MAV_CMD_DO_SET_MODE — preferred path
       const cmdPayload = serializeCommandLong({
-        targetSystem: connectionState.systemId ?? 1,
+        targetSystem: target.sysid,
         targetComponent: 1,
         command: 176, // MAV_CMD_DO_SET_MODE
         confirmation: 0,
@@ -4635,20 +6175,20 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
         param7: 0,
       });
       const cmdPacket = await sendMavlinkPacket(COMMAND_LONG_ID, cmdPayload, COMMAND_LONG_CRC_EXTRA);
-      await currentTransport.write(cmdPacket);
+      await target.transport.write(cmdPacket);
       connectionState.packetsSent++;
 
       // 2. Legacy SET_MODE — fallback for older builds that don't honor cmd 176
       const setModePayload = serializeSetMode({
-        targetSystem: connectionState.systemId ?? 1,
+        targetSystem: target.sysid,
         baseMode,
         customMode,
       });
       const setModePacket = await sendMavlinkPacket(SET_MODE_ID, setModePayload, SET_MODE_CRC_EXTRA);
-      await currentTransport.write(setModePacket);
+      await target.transport.write(setModePacket);
       connectionState.packetsSent++;
 
-      sendLog(mainWindow, 'info', `Sent SET_MODE customMode=${customMode} (DO_SET_MODE + legacy)`);
+      sendLog(mainWindow, 'info', `Sent SET_MODE customMode=${customMode} (DO_SET_MODE + legacy) to sysid ${target.sysid}`);
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
@@ -4675,12 +6215,13 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
   // forward into the ground — separate IPC keeps the call sites unambiguous
   // about which one they want.
   ipcMain.handle(IPC_CHANNELS.MAVLINK_COMMAND_VTOL_TAKEOFF, async (_, altitude: number): Promise<boolean> => {
-    if (!currentTransport?.isOpen || !connectionState.isConnected) {
+    const target = activeFlightTarget();
+    if (!target) {
       return false;
     }
     try {
       const payload = serializeCommandInt({
-        targetSystem: connectionState.systemId ?? 1,
+        targetSystem: target.sysid,
         targetComponent: 1,
         frame: 6,         // MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
         command: 84,      // MAV_CMD_NAV_VTOL_TAKEOFF
@@ -4696,9 +6237,9 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
         z: altitude,      // home-relative metres
       });
       const packet = await sendMavlinkPacket(COMMAND_INT_ID, payload, COMMAND_INT_CRC_EXTRA);
-      await currentTransport.write(packet);
+      await target.transport.write(packet);
       connectionState.packetsSent++;
-      sendLog(mainWindow, 'info', `Sent VTOL_TAKEOFF (COMMAND_INT, rel-alt=${altitude}m)`);
+      sendLog(mainWindow, 'info', `Sent VTOL_TAKEOFF (COMMAND_INT, rel-alt=${altitude}m) to sysid ${target.sysid}`);
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
@@ -4712,7 +6253,8 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
   // initial climb pitch. 0° means "climb level" → plane won't lift off.
   // Default 15° is a safe climb pitch for fixed-wing.
   ipcMain.handle(IPC_CHANNELS.MAVLINK_COMMAND_TAKEOFF, async (_, altitude: number, pitchDeg?: number): Promise<boolean> => {
-    if (!currentTransport?.isOpen || !connectionState.isConnected) {
+    const target = activeFlightTarget();
+    if (!target) {
       return false;
     }
 
@@ -4720,7 +6262,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
 
     try {
       const payload = serializeCommandLong({
-        targetSystem: connectionState.systemId ?? 1,
+        targetSystem: target.sysid,
         targetComponent: 1,
         command: 22,
         confirmation: 0,
@@ -4734,10 +6276,10 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
       });
 
       const packet = await sendMavlinkPacket(COMMAND_LONG_ID, payload, COMMAND_LONG_CRC_EXTRA);
-      await currentTransport.write(packet);
+      await target.transport.write(packet);
       connectionState.packetsSent++;
 
-      sendLog(mainWindow, 'info', `Sent TAKEOFF command, altitude=${altitude}m pitch=${pitch}°`);
+      sendLog(mainWindow, 'info', `Sent TAKEOFF command to sysid ${target.sysid}, altitude=${altitude}m pitch=${pitch}°`);
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
@@ -4750,13 +6292,15 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
   // Uses COMMAND_INT (msg 75) instead of COMMAND_LONG so lat/lon are int32 (degrees * 1e7)
   // which preserves full precision. COMMAND_LONG float32 truncates coordinates.
   ipcMain.handle(IPC_CHANNELS.MAVLINK_GOTO, async (_, lat: number, lon: number, alt: number): Promise<boolean> => {
-    if (!currentTransport?.isOpen || !connectionState.isConnected) {
+    const target = activeFlightTarget();
+    if (!target) {
+      sendLog(mainWindow, 'warn', 'Move command: no active vehicle to command');
       return false;
     }
 
     try {
       const payload = serializeCommandInt({
-        targetSystem: connectionState.systemId ?? 1,
+        targetSystem: target.sysid,
         targetComponent: 1,
         frame: 6,           // MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
         command: 192,       // MAV_CMD_DO_REPOSITION
@@ -4772,7 +6316,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
       });
 
       const packet = await sendMavlinkPacket(COMMAND_INT_ID, payload, COMMAND_INT_CRC_EXTRA);
-      await currentTransport.write(packet);
+      await target.transport.write(packet);
       connectionState.packetsSent++;
 
       sendLog(mainWindow, 'info', `Sent DO_REPOSITION to ${lat.toFixed(7)}, ${lon.toFixed(7)}, alt=${alt.toFixed(1)}m`);
@@ -4790,14 +6334,15 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
   // Concrete numeric defaults are used instead of NaN because some ArduPilot
   // build configs reject NaN params for DO_ORBIT.
   ipcMain.handle(IPC_CHANNELS.MAVLINK_ORBIT, async (_, lat: number, lon: number, alt: number, radius: number): Promise<boolean> => {
-    if (!currentTransport?.isOpen || !connectionState.isConnected) {
-      sendLog(mainWindow, 'warn', 'ORBIT command skipped: not connected');
+    const target = activeFlightTarget();
+    if (!target) {
+      sendLog(mainWindow, 'warn', 'ORBIT command skipped: no active vehicle');
       return false;
     }
 
     try {
       const payload = serializeCommandInt({
-        targetSystem: connectionState.systemId ?? 1,
+        targetSystem: target.sysid,
         targetComponent: 1,
         frame: 6,           // MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
         command: 34,        // MAV_CMD_DO_ORBIT
@@ -4813,7 +6358,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
       });
 
       const packet = await sendMavlinkPacket(COMMAND_INT_ID, payload, COMMAND_INT_CRC_EXTRA);
-      await currentTransport.write(packet);
+      await target.transport.write(packet);
       connectionState.packetsSent++;
 
       sendLog(mainWindow, 'info', `Sent DO_ORBIT center=${lat.toFixed(7)}, ${lon.toFixed(7)} alt=${alt.toFixed(1)}m radius=${radius}m`);
@@ -4828,13 +6373,12 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
   // MAV_CMD_NAV_LAND (command 21) via COMMAND_INT - land at a specific lat/lon.
   // Sent as a guided-mode command; ArduPilot switches to LAND and descends at the target.
   ipcMain.handle(IPC_CHANNELS.MAVLINK_LAND, async (_, lat: number, lon: number): Promise<boolean> => {
-    if (!currentTransport?.isOpen || !connectionState.isConnected) {
-      return false;
-    }
+    const target = activeFlightTarget();
+    if (!target) return false;
 
     try {
       const payload = serializeCommandInt({
-        targetSystem: connectionState.systemId ?? 1,
+        targetSystem: target.sysid,
         targetComponent: 1,
         frame: 3,           // MAV_FRAME_GLOBAL_RELATIVE_ALT
         command: 21,        // MAV_CMD_NAV_LAND
@@ -4850,7 +6394,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
       });
 
       const packet = await sendMavlinkPacket(COMMAND_INT_ID, payload, COMMAND_INT_CRC_EXTRA);
-      await currentTransport.write(packet);
+      await target.transport.write(packet);
       connectionState.packetsSent++;
 
       sendLog(mainWindow, 'info', `Sent NAV_LAND at ${lat.toFixed(7)}, ${lon.toFixed(7)}`);
@@ -4869,8 +6413,9 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
     _, cmdId: number, lat: number, lon: number, alt: number,
     param1: number, param2: number, param3: number, param4: number,
   ): Promise<boolean> => {
-    if (!currentTransport?.isOpen || !connectionState.isConnected) {
-      sendLog(mainWindow, 'warn', 'USER_COMMAND skipped: not connected');
+    const target = activeFlightTarget();
+    if (!target) {
+      sendLog(mainWindow, 'warn', 'USER_COMMAND skipped: no active vehicle');
       return false;
     }
     if (cmdId < 31010 || cmdId > 31014) {
@@ -4879,7 +6424,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
     }
     try {
       const payload = serializeCommandInt({
-        targetSystem: connectionState.systemId ?? 1,
+        targetSystem: target.sysid,
         targetComponent: 1,
         frame: 6,           // MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
         command: cmdId,
@@ -4891,7 +6436,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
         z: alt,
       });
       const packet = await sendMavlinkPacket(COMMAND_INT_ID, payload, COMMAND_INT_CRC_EXTRA);
-      await currentTransport.write(packet);
+      await target.transport.write(packet);
       connectionState.packetsSent++;
       sendLog(mainWindow, 'info', `Sent USER_${cmdId - 31009} lat=${lat.toFixed(7)} lon=${lon.toFixed(7)} alt=${alt} p1=${param1} p2=${param2}`);
       return true;
@@ -5833,9 +7378,10 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
       const result = await dialog.showOpenDialog(mainWindow, {
         title: 'Import Survey Area',
         filters: [
-          { name: 'Boundary Files', extensions: ['kml', 'kmz', 'geojson', 'json'] },
+          { name: 'Boundary Files', extensions: ['kml', 'kmz', 'geojson', 'json', 'shp', 'zip'] },
           { name: 'KML / KMZ', extensions: ['kml', 'kmz'] },
           { name: 'GeoJSON', extensions: ['geojson', 'json'] },
+          { name: 'Shapefile', extensions: ['shp', 'zip'] },
           { name: 'All Files', extensions: ['*'] },
         ],
         properties: ['openFile'],
@@ -5857,6 +7403,35 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
         const kmlEntry = zip.getEntries().find((e) => e.entryName.toLowerCase().endsWith('.kml'));
         if (!kmlEntry) return { success: false, error: 'No .kml found inside the KMZ archive' };
         return { success: true, format: 'kml', content: kmlEntry.getData().toString('utf-8'), fileName };
+      }
+
+      if (ext === 'shp') {
+        // Shapefile geometry lives in the .shp; the sibling .prj (same basename)
+        // carries the CRS. Convert to GeoJSON in-process and reuse the GeoJSON path.
+        const { shapefileToGeoJson } = await import('./gis/shapefile-to-geojson.js');
+        const shpBuf = await fs.readFile(filePath);
+        const prjPath = filePath.replace(/\.shp$/i, '.prj');
+        let prj: string | undefined;
+        try { prj = await fs.readFile(prjPath, 'utf-8'); } catch { prj = undefined; }
+        const { geojson, featureCount } = shapefileToGeoJson(new Uint8Array(shpBuf), prj);
+        if (featureCount === 0) return { success: false, error: 'No polygon or line geometry found in the shapefile' };
+        return { success: true, format: 'geojson', content: JSON.stringify(geojson), fileName };
+      }
+
+      if (ext === 'zip') {
+        // A zipped shapefile bundle: pull the .shp + matching .prj out of the archive.
+        const AdmZip = (await import('adm-zip')).default;
+        const { shapefileToGeoJson } = await import('./gis/shapefile-to-geojson.js');
+        const zip = new AdmZip(filePath);
+        const entries = zip.getEntries();
+        const shpEntry = entries.find((e) => e.entryName.toLowerCase().endsWith('.shp'));
+        if (!shpEntry) return { success: false, error: 'No .shp found inside the zip archive' };
+        const base = shpEntry.entryName.replace(/\.shp$/i, '').toLowerCase();
+        const prjEntry = entries.find((e) => e.entryName.toLowerCase() === `${base}.prj`);
+        const prj = prjEntry ? prjEntry.getData().toString('utf-8') : undefined;
+        const { geojson, featureCount } = shapefileToGeoJson(new Uint8Array(shpEntry.getData()), prj);
+        if (featureCount === 0) return { success: false, error: 'No polygon or line geometry found in the shapefile' };
+        return { success: true, format: 'geojson', content: JSON.stringify(geojson), fileName };
       }
 
       const content = await fs.readFile(filePath, 'utf-8');
@@ -6046,15 +7621,22 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
 
   // Download mission from flight controller
   ipcMain.handle(IPC_CHANNELS.MISSION_DOWNLOAD, async (): Promise<{ success: boolean; error?: string }> => {
-    if (!currentTransport?.isOpen || !connectionState.isConnected) {
-      return { success: false, error: 'Not connected' };
+    // Download from the ACTIVE/selected vehicle. In single-vehicle this resolves to
+    // the primary connection (unchanged); in fleet mode it resolves the selected
+    // fleet vehicle's background transport + virtual sysid, and its responses are
+    // routed in from the background-link handler.
+    const target = resolveVehicleTarget(connectionRegistry.getActiveVehicleKey());
+    if (!target) {
+      return { success: false, error: 'Vehicle not reachable' };
     }
 
-    // Initialize download state
+    // Initialize download state (carry the target so responses + per-item requests
+    // + the closing ACK all go to the right vehicle).
     missionDownloadState = {
       expected: 0,
       received: new Map(),
       timeout: null,
+      target: { transport: target.transport, sysid: target.sysid },
     };
 
     try {
@@ -6062,7 +7644,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
       // v1: target_system(1), target_component(1) = 2 bytes
       // v2: target_system(1), target_component(1), mission_type(1) = 3 bytes
       let packet: Uint8Array;
-      const targetSystem = connectionState.systemId ?? 1;
+      const targetSystem = target.sysid;
 
       if (detectedMavlinkVersion === 2) {
         const payload = serializeMissionRequestList({
@@ -6080,7 +7662,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
         packet = serializeV1(MISSION_REQUEST_LIST_ID, payload, MISSION_REQUEST_LIST_CRC_EXTRA_V1, { sysid: 255, compid: 190 });
       }
 
-      await currentTransport.write(packet);
+      await target.transport.write(packet);
       connectionState.packetsSent++;
 
       sendLog(mainWindow, 'info', `Requesting mission from flight controller (MAVLink v${detectedMavlinkVersion})...`);
@@ -6166,8 +7748,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
       // Set timeout waiting for FC to request first item
       missionUploadState.timeout = setTimeout(() => {
         if (missionUploadState && missionUploadState.currentSeq === 0) {
-          safeSend(mainWindow, IPC_CHANNELS.MISSION_ERROR, 'Timeout: FC did not request mission items');
-          missionUploadState = null;
+          settleMissionUpload(mainWindow, false, 'Timeout: FC did not request mission items');
         }
       }, 10000);
 
@@ -6178,6 +7759,75 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
       missionUploadState = null;
       return { success: false, error: message };
     }
+  });
+
+  // Upload a mission to a specific vehicle (survey / multi-vehicle). Reuses the
+  // proven upload engine via a per-vehicle target override and resolves when the
+  // FC ACKs. Sequential: one vehicle at a time (callers await before the next).
+  ipcMain.handle(IPC_CHANNELS.MISSION_UPLOAD_TO_VEHICLE, async (_, vehicleKey: string, items: MissionItem[]): Promise<{ success: boolean; error?: string }> => {
+    if (items.length === 0) return { success: false, error: 'No mission items to upload' };
+    const target = resolveVehicleTarget(vehicleKey);
+    if (!target) return { success: false, error: 'Vehicle not reachable' };
+    // Mission protocol (REQUEST/ACK) is routed to this upload from whichever link
+    // it arrives on - primary or background - via handleMissionRequestForUpload,
+    // so the target may be on any connected link. Uploads are sequential: one at
+    // a time (the singleton missionUploadState carries the active target).
+    if (missionUploadState) {
+      return { success: false, error: 'Another mission upload is in progress' };
+    }
+
+    const total = items.length;
+    const progress = (state: MissionVehicleProgress['state'], sent: number, error?: string): void => {
+      safeSend(mainWindow, IPC_CHANNELS.MISSION_VEHICLE_PROGRESS, { vehicleKey, sent, total, state, error } satisfies MissionVehicleProgress);
+    };
+    progress('uploading', 0);
+
+    const result = await new Promise<{ success: boolean; error?: string }>((resolve) => {
+      missionUploadState = {
+        items,
+        currentSeq: 0,
+        timeout: null,
+        target: { transport: target.transport, sysid: target.sysid },
+        onComplete: (ok, error) => resolve({ success: ok, error }),
+      };
+
+      void (async () => {
+        try {
+          let packet: Uint8Array;
+          if (detectedMavlinkVersion === 2) {
+            const payload = serializeMissionCount({
+              targetSystem: target.sysid,
+              targetComponent: 1,
+              count: total,
+              missionType: MAV_MISSION_TYPE.MISSION,
+            });
+            packet = await sendMavlinkPacket(MISSION_COUNT_ID, payload, MISSION_COUNT_CRC_EXTRA);
+          } else {
+            const payload = new Uint8Array(4);
+            payload[0] = total & 0xff;
+            payload[1] = (total >> 8) & 0xff;
+            payload[2] = target.sysid & 0xff;
+            payload[3] = 1;
+            packet = serializeV1(MISSION_COUNT_ID, payload, MISSION_COUNT_CRC_EXTRA_V1, { sysid: 255, compid: 190 });
+          }
+          await target.transport.write(packet);
+          connectionState.packetsSent++;
+          if (missionUploadState) {
+            missionUploadState.timeout = setTimeout(() => {
+              if (missionUploadState && missionUploadState.currentSeq === 0) {
+                settleMissionUpload(mainWindow, false, 'Timeout: FC did not request mission items');
+              }
+            }, 10000);
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          settleMissionUpload(mainWindow, false, message);
+        }
+      })();
+    });
+
+    progress(result.success ? 'complete' : 'error', result.success ? total : 0, result.error);
+    return result;
   });
 
   // Clear mission from flight controller
@@ -6226,15 +7876,19 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
 
   // Set current waypoint
   ipcMain.handle(IPC_CHANNELS.MISSION_SET_CURRENT, async (_, seq: number): Promise<{ success: boolean; error?: string }> => {
-    if (!currentTransport?.isOpen || !connectionState.isConnected) {
-      return { success: false, error: 'Not connected' };
+    // Jump-to-waypoint on the ACTIVE/selected vehicle (single-vehicle resolves to
+    // the primary; fleet resolves the selected vehicle). One-shot: the FC reports
+    // back via MISSION_CURRENT telemetry, no ACK handshake to route.
+    const target = resolveVehicleTarget(connectionRegistry.getActiveVehicleKey());
+    if (!target) {
+      return { success: false, error: 'Vehicle not reachable' };
     }
 
     try {
       // v1 wire order: target_system(1), target_component(1), seq(2)
       // v2 wire order: seq(2), target_system(1), target_component(1)
       let packet: Uint8Array;
-      const targetSystem = connectionState.systemId ?? 1;
+      const targetSystem = target.sysid;
 
       if (detectedMavlinkVersion === 2) {
         const payload = serializeMissionSetCurrent({
@@ -6255,7 +7909,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
         packet = serializeV1(MISSION_SET_CURRENT_ID, payload, MISSION_SET_CURRENT_CRC_EXTRA, { sysid: 255, compid: 190 });
       }
 
-      await currentTransport.write(packet);
+      await target.transport.write(packet);
       connectionState.packetsSent++;
 
       sendLog(mainWindow, 'info', `Setting current waypoint to ${seq} (MAVLink v${detectedMavlinkVersion})`);
@@ -7780,6 +9434,8 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
 
   // Set main window for ArduPilot SITL process
   ardupilotSitlProcess.setMainWindow(mainWindow);
+  swarmSitlProcess.setMainWindow(mainWindow);
+  orchestratorProcess.setMainWindow(mainWindow);
   ardupilotSitlDownloader.setMainWindow(mainWindow);
 
   // Sweep stale macOS SITL caches: legacy per-track layout (pre tag-keyed
@@ -7814,6 +9470,33 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
   // Get ArduPilot SITL status
   ipcMain.handle(IPC_CHANNELS.ARDUPILOT_SITL_STATUS, async (): Promise<ArduPilotSitlStatus> => {
     return ardupilotSitlProcess.getStatus();
+  });
+
+  // ---- Swarm SITL (multiple instances → fleet) ----------------------------
+  // A swarm and the single SITL both want base port 5760, so they are mutually
+  // exclusive: starting a swarm tears down any single instance + its RC sender.
+  ipcMain.handle(IPC_CHANNELS.SWARM_SITL_START, async (_event, config: SwarmSitlConfig): Promise<{ success: boolean; error?: string; instances?: SwarmSitlStatus['instances'] }> => {
+    if (ardupilotSitlProcess.isRunning) {
+      ardupilotRcSender.stop();
+      await ardupilotSitlProcess.stopAndWait(5000);
+      // Let the OS fully release port 5760 before the swarm rebinds it.
+      await new Promise<void>((r) => setTimeout(r, 1000));
+    }
+    return swarmSitlProcess.start(config);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SWARM_SITL_STOP, async (): Promise<{ success: boolean }> => {
+    try {
+      swarmSitlProcess.stop();
+      return { success: true };
+    } catch (error) {
+      console.error('[Swarm SITL] Failed to stop:', error instanceof Error ? error.message : error);
+      return { success: false };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SWARM_SITL_STATUS, async (): Promise<SwarmSitlStatus> => {
+    return swarmSitlProcess.getStatus();
   });
 
   // Download ArduPilot SITL binary
@@ -8382,6 +10065,9 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
   // Map overlays (RainViewer radar, OpenAIP airspace/airports)
   setupOverlayHandlers();
 
+  // Traffic overlays (ADS-B + glider/OGN)
+  setupTrafficHandlers(mainWindow);
+
   // === Log Download & Diagnostics ===
 
   ipcMain.handle(IPC_CHANNELS.LOG_LIST_REQUEST, async (): Promise<LogListEntry[]> => {
@@ -8491,6 +10177,27 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
     const log = parser.finalize();
 
     const healthResults = runHealthChecks(log);
+
+    // Fleet Forensics: persist a compact per-vehicle flight summary so health
+    // trends + maintenance flags can roll up across the fleet. Best-effort - a
+    // failure here must never break opening the log.
+    try {
+      const { statSync } = await import('node:fs');
+      const { randomUUID } = await import('node:crypto');
+      let mtimeMs = Date.now();
+      try { mtimeMs = statSync(filePath).mtimeMs; } catch { /* keep now */ }
+      const summary = extractFlightSummary({
+        log: log as unknown as LogLike,
+        health: healthResults as unknown as HealthLike[],
+        path: filePath,
+        fileName: name,
+        fileMtimeMs: mtimeMs,
+        flightId: randomUUID(),
+      });
+      recordFlight(summary);
+    } catch (err) {
+      console.warn('[fleet-log] failed to record flight summary:', err);
+    }
 
     // Serialize Maps to plain objects for IPC transfer
     const formats: Record<number, unknown> = {};
@@ -8627,6 +10334,15 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
     recentLogsStore.set('logs', []);
   });
 
+  // Fleet Forensics: cross-vehicle flight-summary history (built up as logs are
+  // opened). Returns vehicles with their flights newest-first.
+  ipcMain.handle(IPC_CHANNELS.FLEET_LOG_HISTORY_GET, () => {
+    return getFleetHistory();
+  });
+  ipcMain.handle(IPC_CHANNELS.FLEET_LOG_HISTORY_CLEAR, () => {
+    clearFleetHistory();
+  });
+
   // Area Editor window
   ipcMain.handle(IPC_CHANNELS.AREA_EDITOR_OPEN, () => {
     openAreaEditorWindow();
@@ -8648,7 +10364,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
 
   // Area Editor multi-area commit: editor window sends multiple polygons (each
   // with optional holes); main delivers them to the main window in one go.
-  ipcMain.handle(IPC_CHANNELS.AREA_EDITOR_COMMIT_AREAS, (_event, payload: { areas: Array<{ polygon: Array<{ lat: number; lng: number }>; holes?: Array<Array<{ lat: number; lng: number }>>; name?: string; kind?: 'area' | 'corridor'; corridorWidth?: number; config?: Record<string, unknown> }> }) => {
+  ipcMain.handle(IPC_CHANNELS.AREA_EDITOR_COMMIT_AREAS, (_event, payload: { areas: Array<{ polygon: Array<{ lat: number; lng: number }>; holes?: Array<Array<{ lat: number; lng: number }>>; name?: string; kind?: 'area' | 'corridor'; corridorWidth?: number; corridorBranches?: Array<Array<{ lat: number; lng: number }>>; config?: Record<string, unknown> }> }) => {
     const main = getMainWindow();
     if (!main || main.isDestroyed() || main.webContents.isDestroyed()) return;
     main.webContents.send(IPC_CHANNELS.AREA_EDITOR_AREAS_RECEIVED, payload);
@@ -9180,6 +10896,21 @@ export async function cleanupOnShutdown(): Promise<void> {
     sitlProcess.stop();
   } catch (err) {
     console.warn('[Shutdown] Error stopping SITL:', err);
+  }
+
+  try {
+    // Tear down the media engine (MediaMTX hub + any ffmpeg ingest/record).
+    mediaEngine.shutdown();
+  } catch (err) {
+    console.warn('[Shutdown] Error stopping media engine:', err);
+  }
+
+  try {
+    // Stop the multi-vehicle engine so it doesn't outlive the desktop and squat its ports
+    // (a stale engine is what makes the next launch fail with "exited (code 1)").
+    orchestratorProcess.stop();
+  } catch (err) {
+    console.warn('[Shutdown] Error stopping orchestrator engine:', err);
   }
 
   try {

@@ -5,7 +5,7 @@ import { create } from 'zustand';
 // `view` param) without duplicating the union.
 export const VIEW_IDS = [
   'telemetry', 'parameters', 'mission', 'library', 'settings', 'firmware', 'cli',
-  'sitl', 'osd', 'report', 'calibration', 'lua-graph', 'modules', 'companion',
+  'sitl', 'sim', 'osd', 'report', 'calibration', 'lua-graph', 'modules', 'companion',
   'logs', 'inspector',
 ] as const;
 

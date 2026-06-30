@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { TileCacheCard } from './TileCacheCard';
+import { TrafficSettingsCard } from './TrafficSettingsCard';
 import { useSettingsStore, type VehicleProfile, type VehicleType, type DisplayUnits, type ExperienceLevel, type UiVisibility } from '../../stores/settings-store';
 import { useParameterStore } from '../../stores/parameter-store';
 import { useNavigationStore } from '../../stores/navigation-store';
@@ -1768,6 +1769,8 @@ export function SettingsView() {
 
             <OpenAipKeyInput />
           </div>
+
+          <TrafficSettingsCard />
         </div>
 
         {/* SECTION: Console */}

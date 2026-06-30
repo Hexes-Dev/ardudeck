@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useSigningStore, initSigningListener } from '../../stores/signing-store';
 import { useConnectionStore } from '../../stores/connection-store';
+import { SecureLinkCompliance } from './SecureLinkCompliance';
 
 export function SigningSection() {
   const { connectionState } = useConnectionStore();
@@ -372,6 +373,11 @@ export function SigningSection() {
       )}
 
       </>)}
+
+      {/* Secure-link compliance: tamper-evident audit log + exportable evidence
+          pack. Shown regardless of v1/v2 since the log persists across sessions
+          and connections. */}
+      <SecureLinkCompliance />
 
       {/* Messages */}
       {(error || localError) && (

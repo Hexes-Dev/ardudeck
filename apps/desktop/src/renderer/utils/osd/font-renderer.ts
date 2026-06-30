@@ -17,15 +17,66 @@ import {
 // Re-export for convenience
 export { OSD_CHAR_WIDTH, OSD_CHAR_HEIGHT };
 
-/** OSD display dimensions */
-export const OSD_COLS = 30;
-export const OSD_ROWS_PAL = 16;
-export const OSD_ROWS_NTSC = 13;
+/**
+ * Supported OSD display formats.
+ *
+ * Analog (MAX7456) is a fixed 30-column SD grid. Digital "DisplayPort / canvas
+ * mode" OSDs are still character grids but each system negotiates its own,
+ * larger canvas — and the goggles render it with their OWN font (the FC only
+ * streams element positions over MSP DisplayPort). The canvas sizes below are
+ * the de-facto grids for each ecosystem (cross-checked against INAV/Betaflight).
+ */
+export type VideoType = 'PAL' | 'NTSC' | 'HDZERO' | 'AVATAR' | 'BFHD' | 'DJIWTF';
 
-export type VideoType = 'PAL' | 'NTSC';
+export interface OsdGridSize {
+  cols: number;
+  rows: number;
+}
+
+export const OSD_GRID: Record<VideoType, OsdGridSize> = {
+  PAL: { cols: 30, rows: 16 },
+  NTSC: { cols: 30, rows: 13 },
+  HDZERO: { cols: 50, rows: 18 }, // HDZero
+  AVATAR: { cols: 53, rows: 20 }, // Walksnail Avatar
+  BFHD: { cols: 53, rows: 20 }, // Betaflight HD / DJI O3 (BF-HD compatible)
+  DJIWTF: { cols: 60, rows: 22 }, // DJI native (WTFOS) full canvas
+};
+
+/** Human labels for the format picker. */
+export const OSD_FORMAT_LABELS: Record<VideoType, string> = {
+  PAL: 'Analog PAL (30×16)',
+  NTSC: 'Analog NTSC (30×13)',
+  HDZERO: 'HDZero (50×18)',
+  AVATAR: 'Walksnail (53×20)',
+  BFHD: 'Betaflight HD / O3 (53×20)',
+  DJIWTF: 'DJI WTFOS (60×22)',
+};
+
+const HD_FORMATS = new Set<VideoType>(['HDZERO', 'AVATAR', 'BFHD', 'DJIWTF']);
+
+/** Legacy analog column count (kept for callers that assume SD). */
+export const OSD_COLS = OSD_GRID.PAL.cols;
+export const OSD_ROWS_PAL = OSD_GRID.PAL.rows;
+export const OSD_ROWS_NTSC = OSD_GRID.NTSC.rows;
+
+/** Normalize a possibly-legacy/unknown format string to a valid VideoType. */
+export function normalizeVideoType(v: string | undefined): VideoType {
+  if (v && v in OSD_GRID) return v as VideoType;
+  if (v === 'HD') return 'BFHD'; // migrate the old single "HD"
+  return 'PAL';
+}
 
 export function getOsdRows(videoType: VideoType): number {
-  return videoType === 'PAL' ? OSD_ROWS_PAL : OSD_ROWS_NTSC;
+  return (OSD_GRID[videoType] ?? OSD_GRID.PAL).rows;
+}
+
+export function getOsdCols(videoType: VideoType): number {
+  return (OSD_GRID[videoType] ?? OSD_GRID.PAL).cols;
+}
+
+/** True for digital (HD) formats — rendered by the goggles, not the FC's font. */
+export function isHdFormat(videoType: VideoType): boolean {
+  return HD_FORMATS.has(videoType);
 }
 
 /**
@@ -115,7 +166,7 @@ export class OsdScreenBuffer {
   private buffer: Uint16Array; // 16-bit to support 512 characters
 
   constructor(videoType: VideoType = 'PAL') {
-    this.width = OSD_COLS;
+    this.width = getOsdCols(videoType);
     this.height = getOsdRows(videoType);
     this.buffer = new Uint16Array(this.width * this.height);
     this.clear();
@@ -164,12 +215,14 @@ export class OsdScreenBuffer {
     return this.buffer;
   }
 
-  /** Resize buffer (changes video type) */
+  /** Resize buffer (changes video format, including HD column count) */
   resize(videoType: VideoType): void {
+    const newWidth = getOsdCols(videoType);
     const newHeight = getOsdRows(videoType);
-    if (newHeight !== this.height) {
+    if (newWidth !== this.width || newHeight !== this.height) {
+      (this as { width: number }).width = newWidth;
       (this as { height: number }).height = newHeight;
-      this.buffer = new Uint16Array(this.width * newHeight);
+      this.buffer = new Uint16Array(newWidth * newHeight);
       this.clear();
     }
   }
@@ -232,10 +285,13 @@ export class OsdRenderer {
   private scale: number;
   private cachedFont: CachedFont | null = null;
 
+  private cols: number;
+
   constructor(videoType: VideoType = 'PAL', scale: number = 2) {
     this.scale = scale;
+    this.cols = getOsdCols(videoType);
     this.canvas = document.createElement('canvas');
-    this.canvas.width = OSD_COLS * OSD_CHAR_WIDTH * scale;
+    this.canvas.width = this.cols * OSD_CHAR_WIDTH * scale;
     this.canvas.height = getOsdRows(videoType) * OSD_CHAR_HEIGHT * scale;
     this.ctx = this.canvas.getContext('2d')!;
     this.ctx.imageSmoothingEnabled = false;
@@ -248,17 +304,17 @@ export class OsdRenderer {
 
   setScale(scale: number): void {
     if (scale !== this.scale) {
+      const rows = this.canvas.height / (OSD_CHAR_HEIGHT * this.scale);
       this.scale = scale;
-      this.canvas.width = OSD_COLS * OSD_CHAR_WIDTH * scale;
-      this.canvas.height =
-        (this.canvas.height / (OSD_CHAR_HEIGHT * (this.scale / scale))) *
-        OSD_CHAR_HEIGHT *
-        scale;
+      this.canvas.width = this.cols * OSD_CHAR_WIDTH * scale;
+      this.canvas.height = rows * OSD_CHAR_HEIGHT * scale;
       this.charCanvases.clear();
     }
   }
 
   resize(videoType: VideoType): void {
+    this.cols = getOsdCols(videoType);
+    this.canvas.width = this.cols * OSD_CHAR_WIDTH * this.scale;
     this.canvas.height = getOsdRows(videoType) * OSD_CHAR_HEIGHT * this.scale;
   }
 

@@ -8,6 +8,11 @@ interface NavItem {
   label: string;
   icon: React.ReactNode;
   disabled?: boolean;
+  /**
+   * When set, clicking the item runs this instead of switching the active view.
+   * Reserved for items that open a pop-out window rather than rendering inline.
+   */
+  action?: () => void;
 }
 
 const navItems: NavItem[] = [
@@ -217,7 +222,7 @@ export function NavigationRail({ onViewChange }: NavigationRailProps) {
       {visibleNavItems.map((item) => (
         <button
           key={item.id}
-          onClick={() => !item.disabled && handleClick(item.id)}
+          onClick={() => !item.disabled && (item.action ? item.action() : handleClick(item.id))}
           disabled={item.disabled}
           className={`
             relative w-10 h-10 rounded-lg flex items-center justify-center

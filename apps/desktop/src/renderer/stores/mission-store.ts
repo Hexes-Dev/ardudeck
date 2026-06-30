@@ -305,6 +305,12 @@ interface MissionStore {
   uploadMission: () => Promise<boolean>;
   /** Upload only the given group's WPs, replacing the vehicle mission. */
   uploadGroup: (groupId: string) => Promise<boolean>;
+  /**
+   * Fleet/swarm: upload one group's WPs to a SPECIFIC vehicle (by key), via the
+   * per-vehicle mission protocol. Used by the per-group "upload to vehicle"
+   * picker. Progress is reported per-vehicle (MISSION_VEHICLE_PROGRESS).
+   */
+  uploadGroupToVehicle: (groupId: string, vehicleKey: string) => Promise<boolean>;
   /** Save only the given group's WPs to a .waypoints file (offline export). */
   saveGroupToFile: (groupId: string) => Promise<boolean>;
   clearMissionFromFC: () => Promise<boolean>;
@@ -316,6 +322,8 @@ interface MissionStore {
   // Group management
   renameGroup: (groupId: string, name: string) => void;
   setGroupColor: (groupId: string, color: string) => void;
+  /** Assign (or clear with null) the fleet vehicle this group uploads to / is coloured by. */
+  setGroupVehicle: (groupId: string, vehicleKey: string | null) => void;
   deleteGroup: (groupId: string) => void;
   toggleGroupCollapsed: (groupId: string) => void;
   /** Toggle whether a group is shown on the map. */
@@ -377,6 +385,16 @@ interface MissionStore {
   // UI state
   setSelectedSeq: (seq: number | null) => void;
   setSelectedGroupId: (id: string | null) => void;
+  /**
+   * Bumped each time the user asks to focus a waypoint on the map (the "focus"
+   * button in the WP list). The map's focus controller watches the nonce and
+   * pans/zooms to `focusedSeq`. A nonce (not just the seq) so re-focusing the
+   * already-focused WP still re-centres.
+   */
+  focusNonce: number;
+  focusedSeq: number | null;
+  /** Request the map pan/zoom to a waypoint by seq. */
+  focusWaypoint: (seq: number) => void;
 
   // IPC event handlers (from FC). Non-destructive by default: the
   // downloaded WPs land in a new `imported` group at the top of the
@@ -424,6 +442,8 @@ export const useMissionStore = create<MissionStore>((set, get) => ({
   isDirty: false,
   selectedSeq: null,
   selectedGroupId: null,
+  focusNonce: 0,
+  focusedSeq: null,
   lastSuccessMessage: null,
   hasTerrainCollisions: false,
   loadCounter: 0,
@@ -655,6 +675,34 @@ export const useMissionStore = create<MissionStore>((set, get) => ({
       return false;
     } catch (err) {
       set({ error: String(err), isLoading: false, progress: null });
+      return false;
+    }
+  },
+
+  uploadGroupToVehicle: async (groupId, vehicleKey) => {
+    const itemsToUpload = get().getUploadItemsForGroup(groupId);
+    if (itemsToUpload.length === 0) {
+      set({ error: 'No waypoints in this group to upload' });
+      return false;
+    }
+    // Snapshot this group so the "on vehicle" indicator reflects it on success.
+    set({ pendingUploadGroupIds: [groupId] });
+    try {
+      const result = await window.electronAPI?.uploadMissionToVehicle?.(vehicleKey, itemsToUpload);
+      if (result?.success) {
+        set({
+          isDirty: false,
+          lastUploadedAt: Date.now(),
+          lastUploadedGroupIds: [groupId],
+          lastUploadedItemCount: itemsToUpload.length,
+          lastSuccessMessage: `Uploaded ${itemsToUpload.length} waypoints to vehicle`,
+        });
+        return true;
+      }
+      set({ error: result?.error || 'Failed to upload mission to vehicle' });
+      return false;
+    } catch (err) {
+      set({ error: String(err) });
       return false;
     }
   },
@@ -984,6 +1032,17 @@ export const useMissionStore = create<MissionStore>((set, get) => ({
     }));
   },
 
+  setGroupVehicle: (groupId, vehicleKey) => {
+    set((s) => ({
+      groups: s.groups.map((g) =>
+        g.id === groupId
+          ? { ...g, assignedVehicleKey: vehicleKey ?? undefined, updatedAt: Date.now() }
+          : g,
+      ),
+      isDirty: true,
+    }));
+  },
+
   /**
    * Delete a group AND every waypoint it owns. Use with care; this is the
    * destructive variant. A future PR may add "detach waypoints to manual"
@@ -1155,6 +1214,17 @@ export const useMissionStore = create<MissionStore>((set, get) => ({
 
   setSelectedGroupId: (id: string | null) => {
     set({ selectedGroupId: id });
+  },
+
+  focusWaypoint: (seq: number) => {
+    // Also select it so the row + details panel reflect the focused WP.
+    const wp = get().missionItems.find((it) => it.seq === seq);
+    set((s) => ({
+      focusedSeq: seq,
+      focusNonce: s.focusNonce + 1,
+      selectedSeq: seq,
+      ...(wp?.groupId ? { selectedGroupId: wp.groupId } : {}),
+    }));
   },
 
   // IPC event handlers (from FC download). Non-destructive: the downloaded

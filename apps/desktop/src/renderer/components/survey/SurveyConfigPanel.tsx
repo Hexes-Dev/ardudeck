@@ -12,7 +12,7 @@
  *    Show footprints toggle. Power users open once and it sticks for the session.
  *  - Stats + Insert button pinned at the bottom outside the scroll area.
  */
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useSurveyStore } from '../../stores/survey-store';
 import { useMissionStore } from '../../stores/mission-store';
@@ -20,6 +20,8 @@ import { useSettingsStore } from '../../stores/settings-store';
 import { useNavigationStore } from '../../stores/navigation-store';
 import { CameraPresetSelector } from './CameraPresetSelector';
 import { SurveyStatsPanel } from './SurveyStatsPanel';
+import { FleetSurveyPanel } from './FleetSurveyPanel';
+import { useActiveVehicleStore } from '../../stores/active-vehicle-store';
 import { estimateBatteryCount, estimateDataSizeGb } from './survey-stats';
 import { surveyToMissionItems } from './mission-builder';
 import { patternToGeneratorId, getSurveyGenerator } from './generator-registry';
@@ -87,6 +89,9 @@ export function SurveyConfigPanel() {
   const polygon = useSurveyStore((s) => s.polygon);
   const config = useSurveyStore((s) => s.config);
   const result = useSurveyStore((s) => s.result);
+  // Fleet survey: offer "split across fleet" once 2+ vehicles are connected.
+  const fleetCount = useActiveVehicleStore((s) => Object.keys(s.knownVehicles).length);
+  const [showFleetSplit, setShowFleetSplit] = useState(false);
   const showFootprints = useSurveyStore((s) => s.showFootprints);
   const editingGroupId = useSurveyStore((s) => s.editingGroupId);
   const polygonEditMode = useSurveyStore((s) => s.polygonEditMode);
@@ -107,6 +112,7 @@ export function SurveyConfigPanel() {
   const setCameraOffOutside = useSurveyStore((s) => s.setCameraOffOutside);
   const setGridMode = useSurveyStore((s) => s.setGridMode);
   const setAltitudeReference = useSurveyStore((s) => s.setAltitudeReference);
+  const setTerrainFollow = useSurveyStore((s) => s.setTerrainFollow);
   const setShowFootprints = useSurveyStore((s) => s.setShowFootprints);
   const setGroundPattern = useSurveyStore((s) => s.setGroundPattern);
   const setSpiralDirection = useSurveyStore((s) => s.setSpiralDirection);
@@ -119,6 +125,10 @@ export function SurveyConfigPanel() {
   const setCorridorStrips = useSurveyStore((s) => s.setCorridorStrips);
   const setCorridorMode = useSurveyStore((s) => s.setCorridorMode);
   const setCorridorSideOffset = useSurveyStore((s) => s.setCorridorSideOffset);
+  const startBranchDraw = useSurveyStore((s) => s.startBranchDraw);
+  const completeBranch = useSurveyStore((s) => s.completeBranch);
+  const clearCorridorBranches = useSurveyStore((s) => s.clearCorridorBranches);
+  const drawMode = useSurveyStore((s) => s.drawMode);
   const setMaxTurnAngle = useSurveyStore((s) => s.setMaxTurnAngle);
   const setFlipLegs = useSurveyStore((s) => s.setFlipLegs);
   const setInvertPath = useSurveyStore((s) => s.setInvertPath);
@@ -150,6 +160,21 @@ export function SurveyConfigPanel() {
   // null = not naming; '' or text = inline camera-name entry open. (Electron has
   // no window.prompt, so naming is an inline field.)
   const [cameraNameDraft, setCameraNameDraft] = useState<string | null>(null);
+
+  // Terrain-follow status line: "sampling..." until the async DEM bake lands,
+  // then the MSL altitude band the flight will cover.
+  const terrainFollowStatus = useMemo(() => {
+    if (!config.terrainFollow) return null;
+    const alts = result?.altitudes;
+    if (!alts || alts.length === 0) return 'sampling terrain...';
+    let min = Infinity;
+    let max = -Infinity;
+    for (const a of alts) {
+      if (a < min) min = a;
+      if (a > max) max = a;
+    }
+    return `MSL ${Math.round(min)}-${Math.round(max)}m`;
+  }, [config.terrainFollow, result]);
 
   const simplifyToleranceM = useSettingsStore((s) => s.surveyPerformance.importSimplifyToleranceM);
   const updateSurveyPerformance = useSettingsStore((s) => s.updateSurveyPerformance);
@@ -348,11 +373,11 @@ export function SurveyConfigPanel() {
           <button
             onClick={handleImportArea}
             className="px-3 py-1.5 text-xs rounded-md bg-surface-raised text-content hover:text-purple-300 transition-colors"
-            title="Import a boundary from a KML, KMZ, or GeoJSON file"
+            title="Import a boundary from a KML, KMZ, GeoJSON, or Shapefile (.shp / zipped)"
           >
             Import area from file
           </button>
-          <span className="text-[10px] text-content-tertiary">KML · KMZ · GeoJSON</span>
+          <span className="text-[10px] text-content-tertiary">KML · KMZ · GeoJSON · SHP</span>
 
           {/* Simplify tolerance — applied to imported boundaries. Dense GIS
               rings (thousands of points) are reduced to this tolerance so the
@@ -412,7 +437,7 @@ export function SurveyConfigPanel() {
         <button
           onClick={handleImportArea}
           className="p-1.5 text-content-secondary hover:text-purple-400 transition-colors"
-          title="Import area from file (KML/KMZ/GeoJSON)"
+          title="Import area from file (KML/KMZ/GeoJSON/Shapefile)"
         >
           <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
@@ -446,7 +471,21 @@ export function SurveyConfigPanel() {
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
           </svg>
         </button>
+        {fleetCount >= 2 && (
+          <button
+            onClick={() => setShowFleetSplit(true)}
+            disabled={!polygon}
+            className="p-1.5 text-content-secondary hover:text-cyan-400 transition-colors disabled:opacity-40"
+            title="Split this survey across the connected fleet"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16M12 4v16" />
+            </svg>
+          </button>
+        )}
       </div>
+
+      {showFleetSplit && <FleetSurveyPanel onClose={() => setShowFleetSplit(false)} />}
 
       <div className="p-3 space-y-3 overflow-y-auto flex-1 min-h-0">
         {/* Camera Section */}
@@ -574,6 +613,22 @@ export function SurveyConfigPanel() {
                     ))}
                   </div>
                 </div>
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={!!config.terrainFollow}
+                    onChange={(e) => setTerrainFollow(e.target.checked)}
+                    className="mt-0.5 w-3.5 h-3.5 rounded border-subtle bg-surface-input accent-purple-600 cursor-pointer"
+                  />
+                  <span className="text-[11px] text-content-secondary leading-snug">
+                    <span className="text-content">Terrain follow</span> - sample ground
+                    elevation at every waypoint and hold {config.altitude}m above it (bakes
+                    absolute MSL altitudes, no onboard terrain data needed).
+                    {terrainFollowStatus && (
+                      <span className="text-purple-300"> {terrainFollowStatus}</span>
+                    )}
+                  </span>
+                </label>
               </>
             )}
             <SliderInput label="Speed" value={config.speed} onChange={setSpeed} min={1} max={30} step={0.5} unit="m/s" />
@@ -753,6 +808,37 @@ export function SurveyConfigPanel() {
                 step={5}
                 unit="m"
               />
+
+              {/* Branches: extra centerlines that fork off the corridor (forked
+                  roads, power-line spurs). Each is flown as its own strip set. */}
+              <div className="flex items-center gap-2 pt-1">
+                <span className="text-xs text-content-secondary w-14 flex-shrink-0">Branches</span>
+                {drawMode === 'branch' ? (
+                  <button
+                    onClick={() => completeBranch()}
+                    className="flex-1 px-2 py-1 text-[11px] rounded-md bg-purple-600/80 text-white hover:bg-purple-600 transition-colors"
+                  >
+                    Click the map, double-click to finish
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => startBranchDraw()}
+                    className="flex-1 px-2 py-1 text-[11px] rounded-md bg-surface-raised text-content-secondary hover:text-content transition-colors"
+                    title="Draw a branch centerline that forks off this corridor"
+                  >
+                    + Add branch
+                  </button>
+                )}
+                {(config.corridorBranches?.length ?? 0) > 0 && (
+                  <button
+                    onClick={() => clearCorridorBranches()}
+                    className="px-2 py-1 text-[11px] rounded-md bg-surface-raised text-content-secondary hover:text-content transition-colors tabular-nums"
+                    title="Remove all branches"
+                  >
+                    Clear {config.corridorBranches!.length}
+                  </button>
+                )}
+              </div>
 
               {!isManualCamera && (config.corridorMode ?? 'plane') === 'plane' && (
                 <>

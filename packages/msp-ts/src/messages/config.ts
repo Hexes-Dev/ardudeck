@@ -2371,6 +2371,78 @@ export function decodeOsdPosition(packed: number): { x: number; y: number; visib
   return { x, y, visible };
 }
 
+/** Visible flag for OSD profile 0 (Betaflight ORs this shifted left per profile). */
+export const OSD_VISIBLE_FLAG = 0x0800;
+
+/**
+ * Encode an OSD element position into the packed U16 value the firmware expects.
+ *
+ * Mirrors Betaflight's pack.position():
+ *   packed_visible | ((y & 0x1f) << 5) | ((x & 0x20) << 5) | (x & 0x1f)
+ * where packed_visible ORs OSD_VISIBLE_FLAG << profile for every profile the
+ * element should show in. We make a visible element visible in all profiles so
+ * it appears regardless of the FC's active OSD profile.
+ *
+ * @param profileCount number of OSD profiles to mark visible (default 3)
+ */
+export function encodeOsdPosition(
+  x: number,
+  y: number,
+  visible: boolean,
+  profileCount = 3,
+): number {
+  let packedVisible = 0;
+  if (visible) {
+    for (let p = 0; p < profileCount; p++) {
+      packedVisible |= OSD_VISIBLE_FLAG << p;
+    }
+  }
+  return (
+    packedVisible |
+    ((y & 0x1f) << 5) |
+    ((x & 0x20) << 5) | // HD x-extension (bit 10)
+    (x & 0x1f)
+  );
+}
+
+/**
+ * Serialize a single MSP_SET_OSD_CONFIG (85) element-position write.
+ *
+ * Betaflight applies MSP_SET_OSD_CONFIG one element at a time. The payload is
+ * [index:u8, position:u16]. (An index of 0xFF is reserved by the firmware for
+ * the global config/alarms write, which we do not touch here.)
+ */
+export function serializeOsdElementPosition(
+  index: number,
+  x: number,
+  y: number,
+  visible: boolean,
+  profileCount = 3,
+): Uint8Array {
+  const builder = new PayloadBuilder();
+  builder.writeU8(index & 0xff);
+  builder.writeU16(encodeOsdPosition(x, y, visible, profileCount));
+  return builder.build();
+}
+
+/** Bytes of pixel data per MAX7456 character (the rest of the 64-byte field is padding). */
+export const OSD_CHAR_NVM_BYTES = 54;
+
+/**
+ * Serialize one MSP_OSD_CHAR_WRITE (87) frame: [address:u8, ...54 pixel bytes].
+ * Used to upload a custom MCM font to a MAX7456 (analog) flight controller, one
+ * character at a time. `pixelBytes` is the character's 54-byte 2-bit pixel data
+ * (OsdCharacter.rawBytes); short input is zero-padded.
+ */
+export function serializeOsdCharWrite(address: number, pixelBytes: ArrayLike<number>): Uint8Array {
+  const builder = new PayloadBuilder();
+  builder.writeU8(address & 0xff);
+  for (let i = 0; i < OSD_CHAR_NVM_BYTES; i++) {
+    builder.writeU8(i < pixelBytes.length ? pixelBytes[i]! & 0xff : 0);
+  }
+  return builder.build();
+}
+
 /**
  * Deserialize MSP_OSD_CONFIG response
  *

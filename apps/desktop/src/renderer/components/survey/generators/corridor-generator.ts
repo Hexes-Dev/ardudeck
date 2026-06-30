@@ -22,9 +22,14 @@
  *    skips both.
  * 7. Sample photo positions + footprints along each strip (camera mode).
  *
- * Branched corridors (a main axis with side spurs) are expressed by drawing the
- * centerline through the spurs; a single polyline can weave into and back out of
- * a side road. True multi-branch trees are a future extension.
+ * Branched corridors (a main axis with side spurs: forked roads, power-line
+ * taps, river tributaries) are supported via `config.corridorBranches`: each
+ * branch is a further open centerline, generated with this same strip algorithm
+ * and flown in sequence after the main centerline. They share the corridor's
+ * width/overlap/camera settings. Junctions are visual only and some overlap at a
+ * fork is accepted, which matches every other corridor tool (UgCS, QGC,
+ * DroneDeploy, Pix4D) - those force the operator to manage disconnected routes
+ * by hand instead of keeping the branches in one corridor object.
  */
 import type { LatLng, SurveyConfig, SurveyResult, SurveyStats } from '../survey-types';
 import { latLngToLocal, localToLatLng, polygonCentroid, distanceLatLng } from '../geo-math';
@@ -173,11 +178,15 @@ function emptyStats(config: SurveyConfig): SurveyStats {
   };
 }
 
-export function generateCorridor(config: SurveyConfig): SurveyResult {
-  const { polygon, camera, altitude, frontOverlap, sideOverlap, speed } = config;
+/**
+ * Generate strips for a SINGLE centerline. `generateCorridor` runs this over the
+ * main centerline plus any branches and concatenates the results.
+ */
+function generateOneCorridor(config: SurveyConfig, centerline: LatLng[]): SurveyResult {
+  const { camera, altitude, frontOverlap, sideOverlap, speed } = config;
 
   // A corridor needs at least two centerline points to define a direction.
-  if (polygon.length < 2) {
+  if (centerline.length < 2) {
     return { waypoints: [], photoPositions: [], footprints: [], stats: emptyStats(config) };
   }
 
@@ -186,8 +195,8 @@ export function generateCorridor(config: SurveyConfig): SurveyResult {
   const planeTurns = mode === 'plane' && !isManual;
 
   // Centerline in local meters, optionally reversed.
-  const centerSource = config.invertPath ? [...polygon].reverse() : polygon;
-  const origin = polygonCentroid(polygon);
+  const centerSource = config.invertPath ? [...centerline].reverse() : centerline;
+  const origin = polygonCentroid(centerline);
   const centerLocal: XY[] = centerSource.map((v) => latLngToLocal(origin, v));
 
   const { width: footprintW, height: footprintH } = getEffectiveFootprint(camera, altitude);
@@ -272,6 +281,51 @@ export function generateCorridor(config: SurveyConfig): SurveyResult {
     footprintHeight: footprintH,
     lineSpacing,
     photoSpacing,
+  };
+
+  return { waypoints, photoPositions, footprints, stats };
+}
+
+/**
+ * Corridor generator entrypoint. Runs the single-centerline core over the main
+ * centerline (`config.polygon`) plus any branches (`config.corridorBranches`),
+ * flown in sequence, and merges their waypoints/photos/stats into one result.
+ * With no branches this is byte-for-byte the old single-corridor behavior.
+ */
+export function generateCorridor(config: SurveyConfig): SurveyResult {
+  const centerlines = [config.polygon, ...(config.corridorBranches ?? [])].filter(
+    (c): c is LatLng[] => Array.isArray(c) && c.length >= 2,
+  );
+  if (centerlines.length === 0) {
+    return { waypoints: [], photoPositions: [], footprints: [], stats: emptyStats(config) };
+  }
+
+  const parts = centerlines.map((c) => generateOneCorridor(config, c));
+  if (parts.length === 1) return parts[0]!;
+
+  const waypoints = parts.flatMap((p) => p.waypoints);
+  const photoPositions = parts.flatMap((p) => p.photoPositions);
+  const footprints = parts.flatMap((p) => p.footprints);
+
+  // Recompute distance over the merged path so the transits between branches
+  // (last waypoint of one branch to the first of the next) are counted.
+  let flightDistance = 0;
+  for (let i = 1; i < waypoints.length; i++) {
+    flightDistance += distanceLatLng(waypoints[i - 1]!, waypoints[i]!);
+  }
+
+  const first = parts[0]!.stats;
+  const stats: SurveyStats = {
+    gsd: first.gsd,
+    flightDistance,
+    flightTime: config.speed > 0 ? flightDistance / config.speed : 0,
+    photoCount: photoPositions.length,
+    lineCount: parts.reduce((n, p) => n + p.stats.lineCount, 0),
+    areaCovered: parts.reduce((a, p) => a + p.stats.areaCovered, 0),
+    footprintWidth: first.footprintWidth,
+    footprintHeight: first.footprintHeight,
+    lineSpacing: first.lineSpacing,
+    photoSpacing: first.photoSpacing,
   };
 
   return { waypoints, photoPositions, footprints, stats };
