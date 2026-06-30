@@ -103,3 +103,8 @@ inav-configurator
 
 # Dev-only test driver discovery file
 .ardudeck-mcp.json
+# MediaMTX auto-generated self-signed TLS cert/key (regenerated on demand; never commit a private key)
+auto.crt
+auto.key
+**/auto.crt
+**/auto.key
