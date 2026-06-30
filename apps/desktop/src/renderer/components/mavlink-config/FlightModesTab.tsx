@@ -234,6 +234,13 @@ const FlightModesTab: React.FC<FlightModesTabProps> = ({ vehicleCategory = 'copt
   const isRover = vehicleCategory === 'rover';
   const { parameters, setParameter, modifiedCount } = useParameterStore();
 
+  // ArduPilot Rover (incl. boats) uses MODE_CH/MODE1-6; Copter/Plane use FLTMODE_CH/FLTMODE1-6.
+  const paramPrefix = useMemo(() => {
+    if (vehicleCategory === 'rover') return 'MODE';
+    if (parameters.has('MODE1')) return 'MODE';
+    return 'FLTMODE';
+  }, [parameters, vehicleCategory]);
+
   // --- Live RC from telemetry store (same pattern as ReceiverTab) ---
   const rcChannels = useTelemetryStore((s) => s.rcChannels);
   const lastRcChannels = useTelemetryStore((s) => s.lastRcChannels);
@@ -288,10 +295,10 @@ const FlightModesTab: React.FC<FlightModesTabProps> = ({ vehicleCategory = 'copt
   }, []);
 
   const confirmDetect = useCallback((ch: number) => {
-    setParameter('FLTMODE_CH', ch);
+    setParameter(`${paramPrefix}_CH`, ch);
     setDetectMode(false);
     setDetectedChannel(null);
-  }, [setParameter]);
+  }, [setParameter, paramPrefix]);
 
   // Auto-detect channel movement during detect mode
   useEffect(() => {
@@ -310,17 +317,17 @@ const FlightModesTab: React.FC<FlightModesTabProps> = ({ vehicleCategory = 'copt
   const flightModes = useMemo(() => {
     const modes: number[] = [];
     for (let i = 1; i <= 6; i++) {
-      const param = parameters.get(`FLTMODE${i}`);
+      const param = parameters.get(`${paramPrefix}${i}`);
       modes.push(param?.value ?? 0);
     }
     return modes;
-  }, [parameters]);
+  }, [parameters, paramPrefix]);
 
   // Get mode channel
   const modeChannel = useMemo(() => {
-    const param = parameters.get('FLTMODE_CH');
+    const param = parameters.get(`${paramPrefix}_CH`);
     return param?.value ?? 5;
-  }, [parameters]);
+  }, [parameters, paramPrefix]);
 
   // Live RC value for mode channel
   const liveRcValue = useMemo(() => {
@@ -342,12 +349,12 @@ const FlightModesTab: React.FC<FlightModesTabProps> = ({ vehicleCategory = 'copt
 
   // Handle mode change
   const handleModeChange = (slot: number, modeNum: number) => {
-    setParameter(`FLTMODE${slot}`, modeNum);
+    setParameter(`${paramPrefix}${slot}`, modeNum);
   };
 
   // Handle channel change
   const handleChannelChange = (channel: number) => {
-    setParameter('FLTMODE_CH', channel);
+    setParameter(`${paramPrefix}_CH`, channel);
   };
 
   // Get presets for current vehicle category
@@ -359,7 +366,7 @@ const FlightModesTab: React.FC<FlightModesTabProps> = ({ vehicleCategory = 'copt
     const preset = presetData[presetKey];
     if (preset) {
       preset.modes.forEach((mode, index) => {
-        setParameter(`FLTMODE${index + 1}`, mode);
+        setParameter(`${paramPrefix}${index + 1}`, mode);
       });
     }
   };
@@ -395,7 +402,7 @@ const FlightModesTab: React.FC<FlightModesTabProps> = ({ vehicleCategory = 'copt
           <div className="flex items-center justify-between">
             <div>
               <h3 className="text-sm font-medium text-content">Mode Switch Channel</h3>
-              <p className="text-xs text-content-secondary mt-0.5">Which RC channel controls flight modes</p>
+              <p className="text-xs text-content-secondary mt-0.5">Which RC channel controls {isRover ? 'drive modes' : 'flight modes'}</p>
             </div>
             <div className="flex items-center gap-2">
               <select
