@@ -234,16 +234,10 @@ const FlightModesTab: React.FC<FlightModesTabProps> = ({ vehicleCategory = 'copt
   const isRover = vehicleCategory === 'rover';
   const { parameters, setParameter, modifiedCount } = useParameterStore();
 
-
-    // --- MAVLink Parameter String Resolution ---
+  // ArduPilot Rover (incl. boats) uses MODE_CH/MODE1-6; Copter/Plane use FLTMODE_CH/FLTMODE1-6.
   const paramPrefix = useMemo(() => {
-    // 1. Rover always uses 'MODE' natively across all versions
     if (vehicleCategory === 'rover') return 'MODE';
-
-    // 2. Feature Detection: If the vehicle has 'MODE1' in its param map, use 'MODE'
     if (parameters.has('MODE1')) return 'MODE';
-
-    // 3. Fallback: Use legacy name for older Copter/Plane firmwares
     return 'FLTMODE';
   }, [parameters, vehicleCategory]);
 
@@ -328,7 +322,6 @@ const FlightModesTab: React.FC<FlightModesTabProps> = ({ vehicleCategory = 'copt
     }
     return modes;
   }, [parameters, paramPrefix]);
-
 
   // Get mode channel
   const modeChannel = useMemo(() => {
