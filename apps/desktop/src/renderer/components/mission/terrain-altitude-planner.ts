@@ -9,11 +9,40 @@
  * Pure, no React. Tested in terrain-altitude-planner.test.ts.
  */
 
+/**
+ * Altitude reference frame for a waypoint's `altitude` value:
+ *   - 'asl'      absolute height above mean sea level
+ *   - 'relative' height above the home/launch point
+ *   - 'terrain'  height above the ground directly below
+ * Defaults to 'asl' when omitted (legacy callers).
+ */
+export type AltFrame = 'asl' | 'relative' | 'terrain';
+
 export interface PlannerWaypoint {
   seq: number;
   latitude: number;
   longitude: number;
   altitude: number;
+  /** Reference frame of `altitude`. Defaults to 'asl'. */
+  frame?: AltFrame;
+}
+
+/** Convert a frame-relative altitude to absolute (ASL) metres. */
+function toAsl(altitude: number, frame: AltFrame, ground: number, homeElev: number): number {
+  switch (frame) {
+    case 'relative': return homeElev + altitude;
+    case 'terrain': return ground + altitude;
+    default: return altitude;
+  }
+}
+
+/** Convert an absolute (ASL) altitude back into the given frame. */
+function fromAsl(asl: number, frame: AltFrame, ground: number, homeElev: number): number {
+  switch (frame) {
+    case 'relative': return asl - homeElev;
+    case 'terrain': return asl - ground;
+    default: return asl;
+  }
 }
 
 export interface TerrainLookup {
@@ -34,6 +63,11 @@ export interface PlanOptions {
   minSpacingMeters?: number;
   /** Guard against pathological recursion. Default 8. */
   maxInsertsPerSegment?: number;
+  /**
+   * Ground elevation (ASL metres) at the home/launch point. Required to keep
+   * 'relative'-frame waypoints in their own frame; defaults to 0.
+   */
+  homeElevationMeters?: number;
 }
 
 export interface IntermediateInsert {
@@ -42,6 +76,8 @@ export interface IntermediateInsert {
   latitude: number;
   longitude: number;
   altitude: number;
+  /** Reference frame of `altitude` (inherited from the segment's waypoints). */
+  frame: AltFrame;
   /** Distance along the original segment where insertion happens (meters). */
   distanceAlong: number;
 }
@@ -85,22 +121,36 @@ function interp(
 
 /**
  * Compute raised altitudes for each waypoint based on its own ground elevation.
- * Matches the existing single-point auto-adjust semantics:
- * clearance = max(safeBuffer, wp.altitude).
+ *
+ * All clearance math is done in ASL: the waypoint's current ASL altitude is
+ * derived from its frame, compared against `ground + clearance`, and any raise
+ * is converted back into the waypoint's *own* frame. This keeps a relative- or
+ * terrain-referenced waypoint in its own frame instead of forcing it to ASL.
+ *
+ * Clearance policy is unchanged from the original single-point auto-adjust:
+ * clearance = max(safeBuffer, plannedHeight), so a waypoint that already clears
+ * terrain by more than the buffer keeps its height and nothing is ever lowered.
+ * `plannedHeight` is the height the user set where that value is already a height
+ * above a ground datum (relative/terrain frames); for absolute (asl) waypoints
+ * it is the current height above terrain.
  */
 function computeRaisedAltitudes(
   waypoints: PlannerWaypoint[],
   terrain: TerrainLookup,
   safeBuffer: number,
+  homeElev: number,
 ): Map<number, number> {
   const out = new Map<number, number>();
   for (const wp of waypoints) {
     const ground = terrain.elevationAt(wp.latitude, wp.longitude);
     if (ground === null) continue;
-    const clearance = Math.max(safeBuffer, wp.altitude);
-    const minSafe = ground + clearance;
-    if (wp.altitude < minSafe) {
-      out.set(wp.seq, Math.ceil(minSafe));
+    const frame = wp.frame ?? 'asl';
+    const currentAsl = toAsl(wp.altitude, frame, ground, homeElev);
+    const plannedHeight = frame === 'asl' ? currentAsl - ground : wp.altitude;
+    const clearance = Math.max(safeBuffer, plannedHeight);
+    const targetAsl = ground + clearance;
+    if (currentAsl < targetAsl) {
+      out.set(wp.seq, Math.ceil(fromAsl(targetAsl, frame, ground, homeElev)));
     }
   }
   return out;
@@ -171,6 +221,8 @@ function planSegmentInserts(
   opts: Required<
     Pick<PlanOptions, 'safeBuffer' | 'sampleStepMeters' | 'minSpacingMeters' | 'maxInsertsPerSegment'>
   >,
+  segFrame: AltFrame,
+  homeElev: number,
 ): IntermediateInsert[] {
   const segDist = haversine(a.latitude, a.longitude, b.latitude, b.longitude);
   if (segDist < opts.minSpacingMeters * 2) return [];
@@ -197,8 +249,8 @@ function planSegmentInserts(
   const leftOpts = { ...opts, maxInsertsPerSegment: budgetLeft };
   const rightOpts = { ...opts, maxInsertsPerSegment: budgetLeft };
 
-  const leftInserts = budgetLeft > 0 ? planSegmentInserts(a, newWp, altA, newAlt, terrain, leftOpts) : [];
-  const rightInserts = budgetLeft > 0 ? planSegmentInserts(newWp, b, newAlt, altB, terrain, rightOpts) : [];
+  const leftInserts = budgetLeft > 0 ? planSegmentInserts(a, newWp, altA, newAlt, terrain, leftOpts, segFrame, homeElev) : [];
+  const rightInserts = budgetLeft > 0 ? planSegmentInserts(newWp, b, newAlt, altB, terrain, rightOpts, segFrame, homeElev) : [];
 
   // Filter out inserts that are too close to the center insert (minSpacing)
   const centerDist = worst.dist;
@@ -210,7 +262,10 @@ function planSegmentInserts(
     afterSeq: a.seq,
     latitude: insertPos.lat,
     longitude: insertPos.lon,
-    altitude: newAlt,
+    // Internal collision math runs in ASL (newAlt); emit in the segment's frame
+    // so the inserted waypoint isn't forced to absolute altitude.
+    altitude: Math.ceil(fromAsl(newAlt, segFrame, worst.terrain, homeElev)),
+    frame: segFrame,
     distanceAlong: centerDist,
   });
   for (const ins of rightInserts) {
@@ -244,19 +299,28 @@ export function planTerrainSafeAltitudes(
     minSpacingMeters: options.minSpacingMeters ?? 50,
     maxInsertsPerSegment: options.maxInsertsPerSegment ?? 8,
   };
+  const homeElev = options.homeElevationMeters ?? 0;
 
   const raised = opts.raiseEndpoints
-    ? computeRaisedAltitudes(waypoints, terrain, opts.safeBuffer)
+    ? computeRaisedAltitudes(waypoints, terrain, opts.safeBuffer, homeElev)
     : new Map<number, number>();
+
+  // Collision detection runs in ASL. Resolve each endpoint's ASL altitude from
+  // its (possibly raised) value and frame so inter-frame segments are compared
+  // on a common reference.
+  const aslAltOf = (wp: PlannerWaypoint): number => {
+    const ground = terrain.elevationAt(wp.latitude, wp.longitude) ?? 0;
+    const frame = wp.frame ?? 'asl';
+    const value = raised.get(wp.seq) ?? wp.altitude;
+    return toAsl(value, frame, ground, homeElev);
+  };
 
   const inserts: IntermediateInsert[] = [];
   if (opts.insertIntermediates && waypoints.length >= 2) {
     for (let i = 0; i < waypoints.length - 1; i++) {
       const a = waypoints[i]!;
       const b = waypoints[i + 1]!;
-      const altA = raised.get(a.seq) ?? a.altitude;
-      const altB = raised.get(b.seq) ?? b.altitude;
-      const segInserts = planSegmentInserts(a, b, altA, altB, terrain, opts);
+      const segInserts = planSegmentInserts(a, b, aslAltOf(a), aslAltOf(b), terrain, opts, a.frame ?? 'asl', homeElev);
       inserts.push(...segInserts);
     }
   }

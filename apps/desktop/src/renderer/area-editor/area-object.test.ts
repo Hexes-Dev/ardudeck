@@ -22,6 +22,8 @@ import {
   bufferObject,
   splitObjectByLine,
   clipRingToPolygon,
+  buildCommitAreas,
+  type EditorObject,
   type LocalPt,
 } from './area-object';
 
@@ -286,5 +288,71 @@ describe('clipRingToPolygon', () => {
     const out = clipRingToPolygon(hole, outer);
     expect(out.length).toBe(2);
     expect(out.every((r) => r.every((p) => p.y <= 100.001))).toBe(true);
+  });
+});
+
+describe('buildCommitAreas', () => {
+  const config = { altitude: 80 };
+
+  it('commits every visible area with the shared config, no workspace key', () => {
+    const a = makeRectangle(CENTER, 100, 100, 'A');
+    const b = makeRectangle({ lat: 42.01, lng: 19.01 }, 50, 50, 'B');
+    const out = buildCommitAreas([a, b], config);
+    expect(out).toHaveLength(2);
+    expect(out[0]!.polygon).toHaveLength(4);
+    expect(out[0]!.config).toBe(config);
+    expect(out[0]!.workspace).toBeUndefined();
+  });
+
+  it('excludes the workspace object and attaches its ring to each area', () => {
+    const a = makeRectangle(CENTER, 100, 100, 'A');
+    const b = makeRectangle({ lat: 42.01, lng: 19.01 }, 50, 50, 'B');
+    const ws: EditorObject = { ...makeRectangle(CENTER, 1000, 1000, 'WS'), role: 'workspace' };
+    const out = buildCommitAreas([a, ws, b], config);
+    expect(out).toHaveLength(2); // workspace not committed as an area
+    const wsRing = objectWorldRing(ws);
+    for (const area of out) {
+      expect(area.workspace).toEqual(wsRing);
+    }
+  });
+
+  it('attaches the workspace to corridor commits too', () => {
+    const corridor = makeFromWorldRing(
+      'corridor',
+      [CENTER, { lat: 42.001, lng: 19.001 }],
+      'C1',
+      { corridorWidthM: 40 },
+    );
+    const ws: EditorObject = { ...makeRectangle(CENTER, 1000, 1000, 'WS'), role: 'workspace' };
+    const out = buildCommitAreas([corridor, ws], config);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.kind).toBe('corridor');
+    expect(out[0]!.corridorWidth).toBe(40);
+    expect(out[0]!.workspace).toEqual(objectWorldRing(ws));
+  });
+
+  it('ignores holes on the workspace object - only the outer ring is attached', () => {
+    const a = makeRectangle(CENTER, 100, 100, 'A');
+    const ws: EditorObject = {
+      ...makeRectangle(CENTER, 1000, 1000, 'WS'),
+      role: 'workspace',
+      holes: [[{ x: -10, y: -10 }, { x: 10, y: -10 }, { x: 0, y: 10 }]],
+    };
+    const out = buildCommitAreas([a, ws], config);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.workspace).toEqual(objectWorldRing(ws));
+  });
+
+  it('skips a hidden workspace object entirely', () => {
+    const a = makeRectangle(CENTER, 100, 100, 'A');
+    const ws: EditorObject = { ...makeRectangle(CENTER, 1000, 1000, 'WS'), role: 'workspace', visible: false };
+    const out = buildCommitAreas([a, ws], config);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.workspace).toBeUndefined();
+  });
+
+  it('returns no areas when only the workspace object exists', () => {
+    const ws: EditorObject = { ...makeRectangle(CENTER, 1000, 1000, 'WS'), role: 'workspace' };
+    expect(buildCommitAreas([ws], config)).toHaveLength(0);
   });
 });

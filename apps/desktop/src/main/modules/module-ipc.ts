@@ -11,6 +11,7 @@ import {
   removeLicense,
   checkForUpdates,
   heartbeatAll,
+  updateModule,
 } from './module-manager.js';
 import { getLoadedModules, loadAllModules } from './module-registry.js';
 import { killPty, resizePty, spawnPty, writePty } from './module-pty-service.js';
@@ -56,6 +57,18 @@ export function setupModuleIpc(mainWindow: BrowserWindow): void {
     } catch (err) {
       console.error('[ModuleIPC] Update check error:', err);
       return [];
+    }
+  });
+
+  // Update one installed module to the latest published version
+  ipcMain.handle(IPC_CHANNELS.MODULE_UPDATE, async (_, slug: string) => {
+    try {
+      return await updateModule(slug, (progress) => {
+        mainWindow.webContents.send(IPC_CHANNELS.MODULE_PROGRESS, progress);
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { success: false, error: message };
     }
   });
 

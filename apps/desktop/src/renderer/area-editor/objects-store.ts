@@ -171,6 +171,8 @@ interface ObjectsActions {
   renameObject: (id: string, name: string) => void;
   setObjectColor: (id: string, color: string) => void;
   setObjectFenceType: (id: string, fenceType: 'inclusion' | 'exclusion' | null) => void;
+  /** Grant/clear the workspace role; at most one object holds it at a time. */
+  setObjectRole: (id: string, role: 'workspace' | null) => void;
   deleteObject: (id: string) => void;
   deleteSelected: () => void;
   toggleVisible: (id: string) => void;
@@ -301,7 +303,9 @@ export const useObjectsStore = create<Store>()(
       if (!orig) return;
       get().pushHistory();
       // Offset the copy ~20 m south-east so it doesn't sit exactly on the original.
-      const copy = translateObject(cloneObject(orig, `${orig.name} copy`), -0.0002, 0.0002);
+      const cloned = translateObject(cloneObject(orig, `${orig.name} copy`), -0.0002, 0.0002);
+      // The workspace role is exclusive; the copy must not become a second workspace.
+      const copy = cloned.role === 'workspace' ? { ...cloned, role: undefined } : cloned;
       set((s) => ({ objects: [...s.objects, copy], selectedId: copy.id, selectedVertex: null, selectedMeasure: false }));
     },
 
@@ -462,6 +466,17 @@ export const useObjectsStore = create<Store>()(
         objects: s.objects.map((o) =>
           o.id === id ? { ...o, fenceType: fenceType ?? undefined } : o,
         ),
+      }));
+    },
+
+    setObjectRole: (id, role) => {
+      get().pushHistory();
+      set((s) => ({
+        objects: s.objects.map((o) => {
+          if (o.id === id) return { ...o, role: role ?? undefined };
+          // Only one workspace at a time: granting the role strips it elsewhere.
+          return role === 'workspace' && o.role === 'workspace' ? { ...o, role: undefined } : o;
+        }),
       }));
     },
 

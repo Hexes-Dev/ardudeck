@@ -24,6 +24,7 @@ import { useVehicleAppearanceStore, resolveVehicleColor } from '../../stores/veh
 import { useFleetVehicles, selectActiveVehicle, deselectActiveVehicle } from '../../hooks/useFleet';
 import { useOrchestrationStore } from '../../stores/orchestration-store';
 import { FleetCoordination } from '../fleet/FleetCoordination';
+import { getVehicleClass } from '../../../shared/telemetry-types';
 import { latLngToLocal, localToLatLng } from '../survey/geo-math';
 import { loadElevationGrid, buildTerrainGeometry, sampleElevation } from '../camera/svt/svt-terrain';
 import type { SimFence } from './sim-world-scene';
@@ -94,6 +95,10 @@ export default function SimWorldView() {
   const siteLoadedRef = useRef(false);
   // Origin key the synthetic-vision terrain was last built for (null = none).
   const terrainOriginRef = useRef<string | null>(null);
+  // Live Q_ENABLE (the decisive VTOL signal). Read directly off the FC because a
+  // detached window doesn't bulk-hydrate the parameter store; feeds getVehicleClass
+  // so the 3D world picks the right per-airframe model.
+  const qEnableRef = useRef<number | undefined>(undefined);
 
   const [cameraMode, setCameraMode] = useState<SimCameraMode>('chase');
   const [showTerrain, setShowTerrain] = useState(false);
@@ -135,6 +140,20 @@ export default function SimWorldView() {
     return () => {
       useSimStateStore.getState().disconnect();
     };
+  }, []);
+
+  // Keep the live Q_ENABLE fresh (for VTOL model selection). Cheap targeted read
+  // off the FC; re-polled so it survives reconnects and param changes.
+  useEffect(() => {
+    const readQ = () => {
+      if (!useConnectionStore.getState().connectionState.isConnected) { qEnableRef.current = undefined; return; }
+      void window.electronAPI?.readParameterBatch?.(['Q_ENABLE'])
+        .then((res) => { const v = res?.values?.['Q_ENABLE']; qEnableRef.current = typeof v === 'number' ? v : undefined; })
+        .catch(() => {});
+    };
+    readQ();
+    const t = setInterval(readQ, 5000);
+    return () => clearInterval(t);
   }, []);
 
   // Pull the FC mission once connected so this (detached) window's mission store
@@ -243,6 +262,7 @@ export default function SimWorldView() {
               color: resolveVehicleColor(overrides, v.key, v.sysid),
               label: multi ? `SYS ${v.sysid}` : '',
               active: isActive && multi,
+              vehicleClass: getVehicleClass(v.mavType, { qEnable: qEnableRef.current }),
             });
             if (isActive) activePrimary = state;
             if (!firstPrimary) firstPrimary = state;
@@ -254,8 +274,9 @@ export default function SimWorldView() {
         // SITL (built-in physics) - or a real connected vehicle - shows up here,
         // not only the ArduDeck Sim engine.
         primary = telemetryToState(geoOriginRef);
+        const cls = getVehicleClass(useConnectionStore.getState().connectionState.mavType, { qEnable: qEnableRef.current });
         frames = primary
-          ? [{ id: primary.id, position: primary.position, quaternion: primary.quaternion, euler: primary.euler, armed: false }]
+          ? [{ id: primary.id, position: primary.position, quaternion: primary.quaternion, euler: primary.euler, armed: false, vehicleClass: cls }]
           : [];
       }
 

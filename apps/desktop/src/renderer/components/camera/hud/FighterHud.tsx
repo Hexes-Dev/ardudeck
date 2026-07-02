@@ -20,6 +20,7 @@ import {
   unitProfile,
   DEFAULT_POSITIONS,
 } from './hud-config';
+import { HUD_READOUTS, formatReadout } from './hud-readouts';
 
 export interface FighterHudValues {
   roll: number;
@@ -35,12 +36,17 @@ export interface FighterHudValues {
   vz?: number;
   batteryVoltage: number;
   batteryPercent: number;
+  current?: number;
   mode: string;
   armed: boolean;
   distance: number;
   homeDirection: number;
   gForce?: number;
   gpsSats?: number;
+  hdop?: number;
+  lat?: number;
+  lon?: number;
+  windSpeed?: number;
   linkHistory?: number[];
   linkLabel?: string;
   /** CCRP target (designated drop point): bearing from north + horizontal ground range, metres. */
@@ -344,6 +350,20 @@ export const FighterHud = memo(function FighterHud({ v, config, editable, onMove
             <LinkSparkline history={v.linkHistory} label={v.linkLabel} c={C} />
           </Movable>
         )}
+
+        {/* Composable telemetry readouts - any value, placed anywhere. */}
+        {HUD_READOUTS.map((r) => {
+          if (!w[r.id]) return null;
+          const out = formatReadout(r.id, v, u);
+          return (
+            <Movable key={r.id} id={r.id} width={190} height={48}>
+              <g stroke="none" fill={C}>
+                <text x={0} y={0} fontSize={18} opacity={0.6}>{out.label}</text>
+                <text x={0} y={28} fontSize={30} fontWeight="bold">{out.value}</text>
+              </g>
+            </Movable>
+          );
+        })}
       </g>
     </svg>
   );

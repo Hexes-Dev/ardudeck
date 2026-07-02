@@ -57,6 +57,24 @@ export interface SurveyConfig {
   polygon: LatLng[];
   /** Optional no-fly holes inside the polygon (e.g. imported from KML inner rings). */
   holes?: LatLng[][];
+  /**
+   * Optional allowed-flight-area polygon (may exceed the ROI, e.g. room for
+   * turn maneuvers outside the surveyed boundary). Only consumed by
+   * generators declaring `supportsWorkspace`.
+   */
+  workspace?: LatLng[];
+  /**
+   * Registry id of a module-supplied generator driving this survey. When
+   * unset (all built-in patterns), the generator is derived from `pattern`
+   * via `patternToGeneratorId`. Resolved through `resolveGeneratorId`.
+   */
+  generatorId?: string;
+  /**
+   * Values for the active generator's declared `configFields`, keyed by
+   * field id. Opaque to the host UI beyond rendering the declared controls;
+   * persists with the group config like every other field.
+   */
+  engineParams?: Record<string, unknown>;
   pattern: SurveyPattern;
   altitude: number;          // meters AGL
   speed: number;             // m/s
@@ -174,6 +192,17 @@ export interface SurveyResult {
   photoPositions: LatLng[];
   footprints: LatLng[][];
   stats: SurveyStats;
+  /**
+   * Non-fatal advisories from the generator (e.g. a remote engine reporting
+   * the mission exceeds battery endurance). Shown in the panel; the result
+   * is still usable.
+   */
+  warnings?: string[];
+  /**
+   * Generator-specific extras carried onto `SurveyGroup.generatorResult`
+   * (e.g. TOPAS decomposition cells / tracks / metrics). Opaque to the host.
+   */
+  generatorResult?: unknown;
 }
 
 export interface SurveyStats {

@@ -191,3 +191,18 @@ export const useCameraStore = create<CameraState>()(
 export function sourcesForVehicle(state: CameraState, vehicleKey: string): CameraSourceConfig[] {
   return Object.values(state.sources).filter((s) => s.vehicleKey === vehicleKey);
 }
+
+/**
+ * The configured live source to show behind the OSD preview for a target
+ * vehicle, or null when nothing is set up. Shares the exact same config the
+ * telemetry camera panel uses (same `selectedByVehicle` map).
+ */
+export function osdBackdropSource(
+  state: Pick<CameraState, 'sources' | 'selectedByVehicle'>,
+  targetKey: string | null,
+): CameraSourceConfig | null {
+  if (!targetKey) return null;
+  const id = state.selectedByVehicle[targetKey];
+  if (!id) return null;
+  return state.sources[id] ?? null;
+}

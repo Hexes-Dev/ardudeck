@@ -50,6 +50,13 @@ export interface EditorObject {
    * upload. Only 'polygon'/'rectangle'/'circle' objects can be fences.
    */
   fenceType?: 'inclusion' | 'exclusion';
+  /**
+   * Commit role: 'workspace' marks this object as the allowed-flight-area whose
+   * outer ring is attached to every committed survey area (for remote coverage
+   * engines) instead of being surveyed itself. Undefined = 'area'. At most one
+   * object holds the workspace role; only closed shapes can.
+   */
+  role?: 'area' | 'workspace';
 }
 
 // ---------------------------------------------------------------------------
@@ -297,6 +304,61 @@ export function cloneObject(obj: EditorObject, name?: string): EditorObject {
 /** Whether per-vertex editing is allowed (parametric shapes are locked). */
 export function isVertexEditable(obj: EditorObject): boolean {
   return obj.type === 'polygon' || obj.type === 'corridor';
+}
+
+// ---------------------------------------------------------------------------
+// Commit payload (Send to mission)
+// ---------------------------------------------------------------------------
+
+/** One committed shape, as sent to the mission planner (preload's CommitArea). */
+export interface CommitAreaPayload {
+  polygon: LatLng[];
+  holes?: LatLng[][];
+  kind?: 'corridor';
+  corridorWidth?: number;
+  corridorBranches?: LatLng[][];
+  config?: Record<string, unknown>;
+  /** Allowed-flight-area outer ring, from the workspace-role object (if any). */
+  workspace?: LatLng[];
+}
+
+/** Whether an object has enough visible geometry to be committed. */
+export function isCommittable(obj: EditorObject): boolean {
+  return obj.visible && objectWorldRing(obj).length >= (obj.type === 'corridor' ? 2 : 3);
+}
+
+/**
+ * Build the "Send to mission" payload. The workspace-role object is not itself
+ * a survey area: its outer ring rides along on every committed area as the
+ * allowed flight area (holes on it are ignored - only the boundary matters to
+ * coverage engines).
+ */
+export function buildCommitAreas(
+  objects: EditorObject[],
+  editorConfig: Record<string, unknown>,
+): CommitAreaPayload[] {
+  const valid = objects.filter(isCommittable);
+  const wsObj = valid.find((o) => o.role === 'workspace' && o.type !== 'corridor');
+  const workspace = wsObj ? objectWorldRing(wsObj) : undefined;
+  return valid
+    .filter((o) => o !== wsObj)
+    .map((o) =>
+      o.type === 'corridor'
+        ? {
+            polygon: objectWorldRing(o),
+            kind: 'corridor' as const,
+            corridorWidth: o.corridorWidthM ?? 60,
+            ...(o.branches && o.branches.length > 0 ? { corridorBranches: objectWorldBranches(o) } : {}),
+            config: editorConfig,
+            ...(workspace ? { workspace } : {}),
+          }
+        : {
+            polygon: objectWorldRing(o),
+            holes: objectWorldHoles(o),
+            config: editorConfig,
+            ...(workspace ? { workspace } : {}),
+          },
+    );
 }
 
 // ---------------------------------------------------------------------------

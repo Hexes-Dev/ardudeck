@@ -30,6 +30,7 @@ import { SurveyDrawTool } from '../survey/SurveyDrawTool';
 import { SurveyMapOverlay } from '../survey/SurveyMapOverlay';
 import { SurveyStartButton } from '../survey/SurveyStartButton';
 import { PersistentSurveyOverlay } from '../survey/PersistentSurveyOverlay';
+import { GuidesOverlay } from './GuidesOverlay';
 import { useSurveyStore } from '../../stores/survey-store';
 import { isSurveyGroup } from '../../../shared/mission-group-types';
 
@@ -1463,6 +1464,7 @@ function MissionMapPanel2D({ readOnly = false }: MissionMapPanelProps) {
             survey groups exist in the mission). The in-progress drawing
             overlay below is conditional on the survey panel being active. */}
         <PersistentSurveyOverlay />
+        <GuidesOverlay />
 
         {/* Survey grid overlay */}
         {surveyIsActive && (

@@ -737,7 +737,7 @@ function App() {
   // never renders App.
   useEffect(() => {
     const unsub = window.electronAPI?.onAreaReceived?.((data) => {
-      useSurveyStore.getState().addSurveyAreaFromPolygon(data.polygon);
+      void useSurveyStore.getState().addSurveyAreaFromPolygon(data.polygon);
       useNavigationStore.getState().setView('mission');
     });
     return () => { unsub?.(); };
@@ -754,6 +754,9 @@ function App() {
       // centerline rather than a filled area.
       const areas = data.areas.map((a) => {
         const base = a.config as Partial<Omit<SurveyConfig, 'polygon' | 'holes'>> | undefined;
+        // The editor's workspace polygon (allowed flight area) rides in via the
+        // config so it lands on SurveyConfig.workspace -> SurveyGroup.workspace.
+        const workspace = a.workspace && a.workspace.length >= 3 ? { workspace: a.workspace } : undefined;
         const configOverride =
           a.kind === 'corridor'
             ? {
@@ -761,11 +764,14 @@ function App() {
                 pattern: 'corridor' as const,
                 ...(a.corridorWidth ? { corridorWidth: a.corridorWidth } : {}),
                 ...(a.corridorBranches && a.corridorBranches.length > 0 ? { corridorBranches: a.corridorBranches } : {}),
+                ...(workspace ?? {}),
               }
-            : base;
+            : workspace
+              ? { ...(base ?? {}), ...workspace }
+              : base;
         return { polygon: a.polygon, holes: a.holes, name: a.name, configOverride };
       });
-      useSurveyStore.getState().addSurveyAreasFromPolygons(areas);
+      void useSurveyStore.getState().addSurveyAreasFromPolygons(areas);
       useNavigationStore.getState().setView('mission');
     });
     return () => { unsub?.(); };

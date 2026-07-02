@@ -9,12 +9,16 @@ import { useState } from 'react';
 import {
   Minus, Rows3, LocateFixed, Crosshair, RotateCw, Compass, Gauge, ArrowUpDown,
   TrendingUp, Activity, Battery, Home, Radio, LayoutGrid, Palette, Bookmark,
-  Trash2, RotateCcw, Target, Bomb, Wind, type LucideIcon,
+  Trash2, RotateCcw, Target, Bomb, Wind, Layers, SlidersHorizontal, type LucideIcon,
 } from 'lucide-react';
 import { useHudStore } from '../../stores/hud-store';
 import { HUD_WIDGETS, HUD_COLORS, type HudColor, type HudWidgetId } from '../camera/hud/hud-config';
+import { HUD_READOUTS, type HudReadoutCategory } from '../camera/hud/hud-readouts';
 
-const WIDGET_ICONS: Record<HudWidgetId, LucideIcon> = {
+const READOUT_CATEGORY_ORDER: HudReadoutCategory[] = ['Power', 'Flight', 'Speed', 'Navigation', 'Environment', 'Status'];
+
+// Instrument widgets only (readouts render their label tag, not an icon).
+const WIDGET_ICONS: Record<string, LucideIcon> = {
   horizon: Minus,
   pitchLadder: Rows3,
   fpm: LocateFixed,
@@ -52,8 +56,19 @@ export function HudPanel() {
 
   return (
     <div className="flex flex-col h-full overflow-y-auto overflow-x-hidden">
-      {/* Widgets */}
-      <Section title="Widgets" icon={LayoutGrid}>
+      {/* What this surface composes - reinforces the destination bar. */}
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-subtle bg-indigo-500/[0.06]">
+        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-indigo-500/15 text-indigo-300">
+          <Layers className="h-3.5 w-3.5" />
+        </span>
+        <div className="min-w-0">
+          <div className="text-[11px] font-medium text-content leading-tight">HUD overlay</div>
+          <div className="text-[10px] text-content-tertiary leading-tight">Drawn by ArduDeck over your video feed</div>
+        </div>
+      </div>
+
+      {/* Instruments */}
+      <Section title="Instruments" icon={LayoutGrid}>
         {HUD_WIDGETS.map((wdef) => {
           const Icon = WIDGET_ICONS[wdef.id];
           const on = config.widgets[wdef.id];
@@ -64,7 +79,7 @@ export function HudPanel() {
               className={`group flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[11px] transition-colors hover:bg-surface-raised ${on ? 'text-content' : 'text-content-secondary'}`}
             >
               <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${on ? 'bg-blue-500/15 text-blue-400' : 'bg-surface-raised text-content-tertiary'}`}>
-                <Icon className="h-3.5 w-3.5" />
+                {Icon && <Icon className="h-3.5 w-3.5" />}
               </span>
               <span className="flex-1 truncate">{wdef.label}</span>
               {wdef.movable && <span className="text-[9px] uppercase tracking-wide text-content-tertiary">drag</span>}
@@ -72,6 +87,40 @@ export function HudPanel() {
                 {on && <svg viewBox="0 0 24 24" className="h-2.5 w-2.5 text-white" fill="none" stroke="currentColor" strokeWidth="3"><path d="M20 6L9 17l-5-5" /></svg>}
               </span>
             </button>
+          );
+        })}
+      </Section>
+
+      {/* Readouts - any telemetry value, placed anywhere (the composable part) */}
+      <Section title="Readouts" icon={SlidersHorizontal}>
+        <p className="px-2 pb-1.5 text-[10px] leading-snug text-content-tertiary">
+          Drop any value onto the HUD and drag it where you want.
+        </p>
+        {READOUT_CATEGORY_ORDER.map((cat) => {
+          const items = HUD_READOUTS.filter((r) => r.category === cat);
+          if (items.length === 0) return null;
+          return (
+            <div key={cat} className="mb-1">
+              <div className="px-2 pt-1.5 pb-0.5 text-[9px] font-semibold uppercase tracking-wider text-content-tertiary">{cat}</div>
+              {items.map((r) => {
+                const on = config.widgets[r.id];
+                return (
+                  <button
+                    key={r.id}
+                    onClick={() => toggleWidget(r.id)}
+                    className={`group flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[11px] transition-colors hover:bg-surface-raised ${on ? 'text-content' : 'text-content-secondary'}`}
+                  >
+                    <span className={`flex h-5 min-w-[2.75rem] shrink-0 items-center justify-center rounded px-1.5 font-mono text-[10px] ${on ? 'bg-indigo-500/15 text-indigo-300' : 'bg-surface-raised text-content-tertiary'}`}>
+                      {r.label}
+                    </span>
+                    <span className="flex-1 truncate">{r.description}</span>
+                    <span className={`h-3.5 w-3.5 shrink-0 rounded-[4px] border transition-colors ${on ? 'border-indigo-500 bg-indigo-500' : 'border-strong bg-surface-input'} flex items-center justify-center`}>
+                      {on && <svg viewBox="0 0 24 24" className="h-2.5 w-2.5 text-white" fill="none" stroke="currentColor" strokeWidth="3"><path d="M20 6L9 17l-5-5" /></svg>}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
           );
         })}
       </Section>

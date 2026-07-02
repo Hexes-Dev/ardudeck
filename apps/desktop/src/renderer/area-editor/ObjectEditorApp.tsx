@@ -23,7 +23,7 @@ import { useAreaEditorLayersStore } from './area-editor-layers-store';
 import { WindControls } from '../components/map/overlays/WindControls';
 import { useObjectsStore, type AreaTool } from './objects-store';
 import { useSurveyStore } from '../stores/survey-store';
-import { objectWorldRing, objectWorldHoles, objectWorldBranches } from './area-object';
+import { objectWorldRing, objectWorldHoles, buildCommitAreas } from './area-object';
 import { parseGisArea } from '../../shared/gis-area-import';
 import { useSettingsStore, type ThemePreference } from '../stores/settings-store';
 import logoImage from '../assets/logo.png';
@@ -142,6 +142,8 @@ export function ObjectEditorApp(): JSX.Element {
   const selectedBranchCount = selected?.branches?.length ?? 0;
   const validObjects = objects.filter((o) => o.visible && objectWorldRing(o).length >= (o.type === 'corridor' ? 2 : 3));
   const hasValid = validObjects.length > 0;
+  // The workspace object alone is not sendable - it only rides along on areas.
+  const hasCommittable = validObjects.some((o) => o.role !== 'workspace');
 
   const cycleTheme = useCallback(() => {
     const idx = THEME_CYCLE.indexOf(theme);
@@ -156,19 +158,7 @@ export function ObjectEditorApp(): JSX.Element {
     // per-area, supplied separately below.
     const { polygon: _p, holes: _h, ...editorConfig } =
       useSurveyStore.getState().config as Record<string, unknown>;
-    const areas = useObjectsStore.getState().objects
-      .filter((o) => o.visible && objectWorldRing(o).length >= (o.type === 'corridor' ? 2 : 3))
-      .map((o) =>
-        o.type === 'corridor'
-          ? {
-              polygon: objectWorldRing(o),
-              kind: 'corridor' as const,
-              corridorWidth: o.corridorWidthM ?? 60,
-              ...(o.branches && o.branches.length > 0 ? { corridorBranches: objectWorldBranches(o) } : {}),
-              config: editorConfig,
-            }
-          : { polygon: objectWorldRing(o), holes: objectWorldHoles(o), config: editorConfig },
-      );
+    const areas = buildCommitAreas(useObjectsStore.getState().objects, editorConfig);
     if (areas.length === 0) return;
     void window.electronAPI.commitAreas(areas);
     // Show a brief "Sent" confirmation, then re-enable so the user can send
@@ -287,7 +277,7 @@ export function ObjectEditorApp(): JSX.Element {
           <ActionButton tip="Export areas as KML" disabled={!hasValid} onClick={() => void handleExport('kml')}><IExportKml /></ActionButton>
           <ActionButton tip="Export areas as KMZ" disabled={!hasValid} onClick={() => void handleExport('kmz')}><IExportKmz /></ActionButton>
           <button
-            type="button" onClick={handleSend} disabled={!hasValid || sent}
+            type="button" onClick={handleSend} disabled={!hasCommittable || sent}
             data-tip="Send these areas to the mission planner"
             className="ml-1 h-8 px-3 inline-flex items-center gap-1.5 rounded-lg text-xs font-medium bg-blue-600 text-white hover:bg-blue-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >

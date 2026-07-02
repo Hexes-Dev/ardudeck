@@ -4,8 +4,25 @@ import { useTelemetryStore } from '../stores/telemetry-store';
 import { useConnectionStore } from '../stores/connection-store';
 import { useNavigationStore } from '../stores/navigation-store';
 import { useParameterStore } from '../stores/parameter-store';
+import {
+  registerSurveyGenerator,
+  unregisterSurveyGenerator,
+  type SurveyGeneratorRegistration,
+} from '../components/survey/generator-registry';
 
 type RegisterFn = (slug: string, name: 'floatingOverlay', component: ComponentType) => void;
+
+// Which generator ids each module registered, so a module can only remove its
+// own and a future module-unload path can sweep them all.
+const surveyGeneratorsBySlug = new Map<string, Set<string>>();
+
+/** Remove every survey generator a module registered (module unload/reload). */
+export function unregisterModuleSurveyGenerators(slug: string): void {
+  const ids = surveyGeneratorsBySlug.get(slug);
+  if (!ids) return;
+  for (const id of ids) unregisterSurveyGenerator(id);
+  surveyGeneratorsBySlug.delete(slug);
+}
 
 export function createRendererHostApi(
   slug: string,
@@ -65,6 +82,28 @@ export function createRendererHostApi(
     },
 
     invoke: (channel, data) => window.electronAPI.moduleHostInvoke(slug, channel, data),
+
+    survey: {
+      registerGenerator: (reg) => {
+        if (!reg?.id || reg.id.startsWith('builtin.')) {
+          throw new Error(`[module:${slug}] invalid survey generator id: ${reg?.id}`);
+        }
+        // The SDK keeps config/result opaque so it doesn't depend on renderer
+        // types; the registry owns the real SurveyConfig/SurveyResult shapes.
+        registerSurveyGenerator(reg as unknown as SurveyGeneratorRegistration);
+        let ids = surveyGeneratorsBySlug.get(slug);
+        if (!ids) {
+          ids = new Set();
+          surveyGeneratorsBySlug.set(slug, ids);
+        }
+        ids.add(reg.id);
+      },
+      unregisterGenerator: (id) => {
+        if (!surveyGeneratorsBySlug.get(slug)?.has(id)) return;
+        unregisterSurveyGenerator(id);
+        surveyGeneratorsBySlug.get(slug)?.delete(id);
+      },
+    },
 
     log: (level, ...args) => {
       const tag = `[module:${slug}]`;

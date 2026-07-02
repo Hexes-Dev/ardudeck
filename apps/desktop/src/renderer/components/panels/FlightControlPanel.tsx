@@ -469,9 +469,30 @@ function MavlinkFlightControl({ mavTypeOverride }: { mavTypeOverride?: number })
   // Multi-signal VTOL detection: MAV_TYPE alone is unreliable on first
   // connect (FCU reports FIXED_WING until reboot picks up Q_ENABLE). Pulling
   // the live Q_ENABLE param + the running SITL frame closes both gaps.
-  const qEnable = useParameterStore((s) => s.parameters.get('Q_ENABLE')?.value);
+  const qEnableParam = useParameterStore((s) => s.parameters.get('Q_ENABLE')?.value);
   const sitlIsRunning = useArduPilotSitlStore((s) => s.isRunning);
   const sitlFrame = useArduPilotSitlStore((s) => s.model);
+  // Detached windows (e.g. the 3D Sim World, Vision pop-outs) don't bulk-hydrate
+  // the parameter store, so Q_ENABLE - the decisive VTOL signal - is absent there
+  // and a quadplane misdetects as `plane` (giving fixed-wing modes). Fall back to
+  // a targeted one-shot read of just Q_ENABLE so class detection matches the main
+  // window regardless of which window hosts this panel. No-op in the main window
+  // (Q_ENABLE is already present) and self-heals across connect/disconnect.
+  const [qEnableFallback, setQEnableFallback] = useState<number | undefined>(undefined);
+  useEffect(() => {
+    if (typeof qEnableParam === 'number') return; // store already has it
+    if (!connectionState.isConnected) { setQEnableFallback(undefined); return; }
+    let cancelled = false;
+    void window.electronAPI?.readParameterBatch?.(['Q_ENABLE'])
+      .then((res) => {
+        if (cancelled) return;
+        const v = res?.values?.['Q_ENABLE'];
+        setQEnableFallback(typeof v === 'number' ? v : undefined);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [qEnableParam, connectionState.isConnected]);
+  const qEnable = qEnableParam ?? qEnableFallback;
   // In fleet mode the active vehicle's MAV_TYPE drives the class (the legacy
   // connectionState.mavType belongs to the idle primary connection).
   const vehicleClass = getVehicleClass(mavTypeOverride ?? connectionState.mavType, {

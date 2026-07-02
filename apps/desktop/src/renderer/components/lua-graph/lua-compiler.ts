@@ -331,6 +331,32 @@ function compileNode(
     return;
   }
 
+  if (type === 'sensor-param-get') {
+    const name = String(prop('param_name'));
+    setOutput('value', `(param:get("${name.replace(/"/g, '\\"')}") or 0)`);
+    return;
+  }
+
+  if (type === 'sensor-gpio-read') {
+    // Pin can come from a wired input (e.g. Read Parameter -> CAM1_FEEDBAK_PIN)
+    // or fall back to the static property. gpio:read needs an integer pin.
+    const pinExpr = input('pin', String(prop('pin')));
+    const pinVar = nextVar(ctx, 'gpio_pin');
+    const lvlVar = nextVar(ctx, 'gpio_lvl');
+    emit(ctx, `local ${pinVar} = ${pinExpr}`);
+    emit(ctx, `local ${lvlVar} = 0`);
+    emit(ctx, `if ${pinVar} and ${pinVar} >= 0 then ${lvlVar} = gpio:read(math.floor(${pinVar})) or 0 end`);
+    ctx.varMap.set(varKey(node.id, 'level'), lvlVar);
+    ctx.varMap.set(varKey(node.id, 'is_high'), `(${lvlVar} == 1)`);
+    return;
+  }
+
+  if (type === 'sensor-current-waypoint') {
+    setOutput('index', '(mission:get_current_nav_index() or 0)');
+    setOutput('nav_id', '(mission:get_current_nav_id() or 0)');
+    return;
+  }
+
   if (type === 'sensor-wind') {
     const vecVar = nextVar(ctx, 'wind_vec');
     emit(ctx, `local ${vecVar} = ahrs:wind_estimate()`);
@@ -494,9 +520,15 @@ function compileNode(
     const trigger = input('trigger', 'true');
     const sev = String(prop('severity'));
     const msg = String(prop('message'));
+    // An optional wired value gets appended to the message (e.g. a waypoint
+    // number). Left unconnected, the message is a plain static string.
+    const hasValue = edges.some((e) => e.target === node.id && e.targetHandle === 'value');
+    const textExpr = hasValue
+      ? `"${msg.replace(/"/g, '\\"')}" .. tostring(${input('value', '""')})`
+      : `"${msg.replace(/"/g, '\\"')}"`;
     emit(ctx, `if ${trigger} then`);
     ctx.indent += 1;
-    emit(ctx, `gcs:send_text(${sev}, "${msg.replace(/"/g, '\\"')}")`);
+    emit(ctx, `gcs:send_text(${sev}, ${textExpr})`);
     ctx.indent -= 1;
     emit(ctx, 'end');
     return;
@@ -738,6 +770,31 @@ function compileNode(
     emit(ctx, `local ${trigVar} = (not ${inp} and ${prevVar})`);
     emit(ctx, `${prevVar} = ${inp}`);
     ctx.varMap.set(varKey(node.id, 'triggered'), trigVar);
+    return;
+  }
+
+  if (type === 'timing-watchdog') {
+    // Time since the last kick. Resets to 0 on a kick, accumulates the entry
+    // interval otherwise, and holds at 0 while disabled so re-enabling starts
+    // fresh (no immediate false expiry).
+    const kick = input('kick', 'false');
+    const enable = input('enable', 'true');
+    const timeoutMs = Number(prop('timeout_ms')) || 3000;
+    const timerVar = `_wd_${sanitizeVarName(node.id)}`;
+    ctx.stateVars.set(timerVar, '0');
+    const expiredVar = nextVar(ctx, 'wd_expired');
+    emit(ctx, `local ${expiredVar} = false`);
+    emit(ctx, `if ${enable} then`);
+    ctx.indent += 1;
+    emit(ctx, `if ${kick} then ${timerVar} = 0 else ${timerVar} = ${timerVar} + ${ctx.entryInterval} end`);
+    emit(ctx, `${expiredVar} = (${timerVar} >= ${timeoutMs})`);
+    ctx.indent -= 1;
+    emit(ctx, 'else');
+    ctx.indent += 1;
+    emit(ctx, `${timerVar} = 0`);
+    ctx.indent -= 1;
+    emit(ctx, 'end');
+    ctx.varMap.set(varKey(node.id, 'expired'), expiredVar);
     return;
   }
 

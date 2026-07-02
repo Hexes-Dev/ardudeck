@@ -43,15 +43,16 @@ function nextPaint(): Promise<void> {
 
 /**
  * Show an activity label, yield until the indicator has painted, then run the
- * (synchronous, blocking) work and clear the label. The paint-yield matters:
- * heavy synchronous work like a 20k-waypoint regeneration blocks the main
- * thread, so without yielding first the spinner would never render.
+ * work and clear the label. The paint-yield matters: heavy synchronous work
+ * like a 20k-waypoint regeneration blocks the main thread, so without
+ * yielding first the spinner would never render. Async work is awaited so the
+ * label stays up until it settles.
  */
-export async function runWithActivity<T>(label: string, work: () => T): Promise<T> {
+export async function runWithActivity<T>(label: string, work: () => T | Promise<T>): Promise<T> {
   const id = useActivityStore.getState().begin(label);
   try {
     await nextPaint();
-    return work();
+    return await work();
   } finally {
     useActivityStore.getState().end(id);
   }

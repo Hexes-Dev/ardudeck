@@ -331,6 +331,7 @@ export function MissionPlanningView() {
   const { lastSuccessMessage, error, clearLastSuccessMessage, missionItems, fetchMission, isLoading } = useMissionStore();
   const surveyIsActive = useSurveyStore((s) => s.isActive);
   const deactivateSurvey = useSurveyStore((s) => s.deactivateSurvey);
+  const surveyGeneratorError = useSurveyStore((s) => s.generatorError);
   const [toast, setToast] = useState<Toast | null>(null);
   const [layoutLoaded, setLayoutLoaded] = useState(false);
 
@@ -359,6 +360,16 @@ export function MissionPlanningView() {
       setToast({ message: error, type: 'error' });
     }
   }, [error]);
+
+  // Surface survey generator failures (KML import, area-editor "send", or a
+  // drawn polygon) as a toast. A failing engine - e.g. a remote generator with
+  // missing credentials - otherwise sets generatorError silently and the mission
+  // view just shows nothing, which reads as "import did nothing".
+  useEffect(() => {
+    if (surveyGeneratorError) {
+      setToast({ message: surveyGeneratorError, type: 'error' });
+    }
+  }, [surveyGeneratorError]);
 
   // Auto-dismiss the toast. Keyed on the toast itself (not the source message)
   // so clearing lastSuccessMessage can't cancel the timer before it fires -

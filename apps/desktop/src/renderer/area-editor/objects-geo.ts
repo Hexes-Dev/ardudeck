@@ -89,7 +89,14 @@ export function buildObjectsData(objects: EditorObject[], selectedId: string | n
       features.push({
         type: 'Feature',
         geometry: { type: 'Polygon', coordinates: rings },
-        properties: { id: obj.id, color, selected, ...(obj.fenceType ? { fenceType: obj.fenceType } : {}) },
+        properties: {
+          id: obj.id,
+          color,
+          selected,
+          ...(obj.fenceType ? { fenceType: obj.fenceType } : {}),
+          // Workspace-role areas render as a dashed outline with barely-there fill.
+          ...(obj.role === 'workspace' ? { workspace: true } : {}),
+        },
       });
     }
   });

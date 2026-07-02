@@ -11,6 +11,7 @@
  */
 import { estimateBatteryCount } from '../components/survey/survey-stats';
 import type { WeatherSummary } from './weather-api';
+import type { AltFrame } from '../components/mission/terrain-altitude-planner';
 
 export type CheckSeverity = 'ok' | 'warn' | 'crit' | 'info';
 
@@ -26,6 +27,8 @@ export interface BriefingPoint {
   lat: number;
   lng: number;
   altM: number;
+  /** Reference frame of `altM`. Defaults to 'relative' (height above home). */
+  frame?: AltFrame;
 }
 
 export interface BriefingSurvey {
@@ -39,6 +42,8 @@ export interface BriefingInput {
   /** Located waypoints in flight order. */
   located: BriefingPoint[];
   home: { lat: number; lng: number } | null;
+  /** Home/launch ground elevation (ASL m); used to reduce ASL altitudes to height-above-home. */
+  homeAltM?: number;
   cruiseSpeedMs: number;
   /** Usable endurance per battery in seconds (reserve already baked in). */
   enduranceSec: number;
@@ -168,15 +173,23 @@ export function computeMissionBriefing(input: BriefingInput): MissionBriefing {
     }
   }
 
-  let minAltM = located[0]!.altM;
-  let maxAltM = located[0]!.altM;
+  // Normalise every waypoint to height-above-home so the ceiling check compares
+  // like with like. ASL ('asl') altitudes get the home ground elevation removed;
+  // relative/terrain altitudes are already heights and pass through. Without a
+  // home elevation an ASL altitude can't be reduced, so it's left as-is.
+  const homeAltM = input.homeAltM ?? 0;
+  const aboveHome = (p: BriefingPoint): number =>
+    (p.frame ?? 'relative') === 'asl' ? p.altM - homeAltM : p.altM;
+
+  let minAltM = aboveHome(located[0]!);
+  let maxAltM = minAltM;
   let totalClimbM = 0;
   for (let i = 0; i < located.length; i++) {
-    const alt = located[i]!.altM;
+    const alt = aboveHome(located[i]!);
     minAltM = Math.min(minAltM, alt);
     maxAltM = Math.max(maxAltM, alt);
     if (i > 0) {
-      const delta = alt - located[i - 1]!.altM;
+      const delta = alt - aboveHome(located[i - 1]!);
       if (delta > 0) totalClimbM += delta;
     }
   }

@@ -12,6 +12,8 @@
  */
 
 import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { MonitorPlay, Cpu, Radio, type LucideIcon } from 'lucide-react';
+import { OsdVideoBackdrop } from './OsdVideoBackdrop';
 import { useOsdStore, BUNDLED_FONT_NAMES, type OsdElementId, type OsdDataSource } from '../../stores/osd-store';
 import { useTelemetryStore } from '../../stores/telemetry-store';
 import { useConnectionStore } from '../../stores/connection-store';
@@ -20,6 +22,10 @@ import { OsdElementOverlay } from './OsdElementOverlay';
 import { OsdElementBrowser } from './OsdElementBrowser';
 import { OsdContextPanel } from './OsdContextPanel';
 import { OsdSyncBar } from './OsdSyncBar';
+import { HudDestinationBar } from './HudDestinationBar';
+import { RubyOsdDestinationBar } from './RubyOsdDestinationBar';
+import { RubyOsdPanel } from './RubyOsdPanel';
+import { RubyOsdPreview } from './RubyOsdPreview';
 import { FighterHud, type FighterHudValues } from '../camera/hud/FighterHud';
 import { useLinkHistory } from '../camera/hud/useLinkHistory';
 import { useHudStore } from '../../stores/hud-store';
@@ -33,15 +39,16 @@ import { OSD_CHAR_WIDTH, OSD_CHAR_HEIGHT, getOsdCols, getOsdRows, isHdFormat, OS
 import { getElementSize } from '../../utils/osd/element-sizes';
 import type { DemoTelemetry } from '../../utils/osd/element-renderers';
 
-type OsdKind = 'text' | 'hud';
+type OsdKind = 'text' | 'hud' | 'ruby';
 
 function hudValuesFromDemo(d: DemoTelemetry): FighterHudValues {
   return {
     roll: d.roll, pitch: d.pitch, heading: d.heading, altitude: d.altitude,
     airspeed: d.airspeed, groundspeed: d.speed, vario: d.vario, throttle: d.throttle,
-    batteryVoltage: d.batteryVoltage, batteryPercent: d.batteryPercent,
+    batteryVoltage: d.batteryVoltage, batteryPercent: d.batteryPercent, current: d.batteryCurrent,
     mode: d.flightMode, armed: d.isArmed, distance: d.distance, homeDirection: d.homeDirection,
-    gForce: d.gForce, gpsSats: d.gpsSats,
+    gForce: d.gForce, gpsSats: d.gpsSats, hdop: 0.8, lat: d.latitude, lon: d.longitude,
+    windSpeed: d.windSpeed,
   };
 }
 
@@ -229,11 +236,16 @@ export function OsdView() {
           vz: position.vz,
           batteryVoltage: battery.voltage,
           batteryPercent: battery.remaining,
+          current: battery.current,
           mode: flight.mode,
           armed: flight.armed,
           distance: 0,
           homeDirection: 0,
           gpsSats: gps.satellites,
+          hdop: gps.hdop,
+          lat: position.lat || gps.lat,
+          lon: position.lon || gps.lon,
+          windSpeed: wind.speed,
           linkHistory: hudConfig.widgets.linkGraph ? liveLink : undefined,
           linkLabel: 'RC LINK',
         }
@@ -250,27 +262,30 @@ export function OsdView() {
     <div className="flex flex-col h-full">
       {/* Toolbar */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-subtle bg-surface shrink-0 gap-4">
-        <div className="flex items-center gap-3">
-          <h1 className="text-sm font-semibold text-content">OSD Designer</h1>
+        <div className="flex items-center gap-3 shrink-0">
+          <h1 className="text-sm font-semibold text-content shrink-0 whitespace-nowrap">OSD Tool</h1>
           <Segmented
             value={osdKind}
             onChange={setOsdKind}
             options={[
-              { value: 'hud', label: 'HUD' },
-              { value: 'text', label: 'Text OSD' },
+              { value: 'hud', label: 'HUD', icon: MonitorPlay, tip: 'Graphical overlay ArduDeck draws over your video. Not uploaded to the flight controller.' },
+              { value: 'text', label: 'Text OSD', icon: Cpu, tip: 'Character OSD that lives in the flight controller (analog / Betaflight) or is drawn by your digital goggles.' },
+              { value: 'ruby', label: 'RubyFPV', icon: Radio, tip: 'OSD drawn by RubyFPV on its ground unit. Authored here, delivered to the board over the ArduDeck Agent.' },
             ]}
           />
-          <Segmented
-            value={dataSource}
-            onChange={setDataSource}
-            options={[
-              { value: 'demo', label: 'Demo' },
-              { value: 'live', label: connectionState.isConnected ? 'Live' : 'Live (offline)' },
-            ]}
-          />
+          {osdKind !== 'ruby' && (
+            <Segmented
+              value={dataSource}
+              onChange={setDataSource}
+              options={[
+                { value: 'demo', label: 'Demo' },
+                { value: 'live', label: connectionState.isConnected ? 'Live' : 'Live (offline)' },
+              ]}
+            />
+          )}
         </div>
 
-        <div className="flex items-center gap-3 flex-wrap justify-end">
+        <div className="flex items-center gap-3 flex-wrap justify-end flex-1 min-w-0">
           {osdKind === 'text' && (
             <>
               <Select label="Font" value={currentFontName} disabled={isLoadingFont} onChange={loadBundledFont}
@@ -279,9 +294,11 @@ export function OsdView() {
                 options={(Object.keys(OSD_FORMAT_LABELS) as VideoType[]).map((k) => ({ value: k, label: OSD_FORMAT_LABELS[k] }))} />
             </>
           )}
-          <Select label="Zoom" value={fitMode ? 'fit' : String(scale)}
-            onChange={(v) => (v === 'fit' ? setFitMode(true) : setScale(parseInt(v)))}
-            options={[{ value: 'fit', label: 'Fit' }, ...[1, 2, 3, 4].map((s) => ({ value: String(s), label: `${s}x` }))]} />
+          {osdKind !== 'ruby' && (
+            <Select label="Zoom" value={fitMode ? 'fit' : String(scale)}
+              onChange={(v) => (v === 'fit' ? setFitMode(true) : setScale(parseInt(v)))}
+              options={[{ value: 'fit', label: 'Fit' }, ...[1, 2, 3, 4].map((s) => ({ value: String(s), label: `${s}x` }))]} />
+          )}
           {osdKind === 'text' && (
             <>
               <label className="flex items-center gap-1.5 text-[11px] text-content-secondary">
@@ -296,17 +313,21 @@ export function OsdView() {
               </label>
             </>
           )}
-          <div className="flex items-center gap-1.5">
-            <label className="text-[11px] text-content-secondary">BG</label>
-            <input type="color" value={backgroundColor.startsWith('rgba') ? '#0064c8' : backgroundColor}
-              onChange={(e) => setBackgroundColor(e.target.value)}
-              className="w-6 h-5 rounded cursor-pointer bg-transparent border border-subtle" data-tip="Preview background (analog feed sits behind the OSD)" />
-          </div>
+          {osdKind !== 'ruby' && (
+            <div className="flex items-center gap-1.5">
+              <label className="text-[11px] text-content-secondary">BG</label>
+              <input type="color" value={backgroundColor.startsWith('rgba') ? '#0064c8' : backgroundColor}
+                onChange={(e) => setBackgroundColor(e.target.value)}
+                className="w-6 h-5 rounded cursor-pointer bg-transparent border border-subtle" data-tip="Preview background (analog feed sits behind the OSD)" />
+            </div>
+          )}
         </div>
       </div>
 
-      {/* Device / sync bar */}
-      <OsdSyncBar />
+      {/* Destination bar - each mode goes somewhere different: HUD renders
+          on-screen (never uploads), Text OSD lives in the FC (Load/Upload sync
+          bar), RubyFPV is authored here and delivered to its ground board. */}
+      {osdKind === 'hud' ? <HudDestinationBar /> : osdKind === 'ruby' ? <RubyOsdDestinationBar /> : <OsdSyncBar />}
 
       {/* Body */}
       <div className="flex flex-1 overflow-hidden min-h-0">
@@ -314,6 +335,8 @@ export function OsdView() {
         <div style={{ width: leftW }} className="border-r border-subtle bg-surface flex flex-col overflow-hidden shrink-0">
           {osdKind === 'hud' ? (
             <HudPanel />
+          ) : osdKind === 'ruby' ? (
+            <RubyOsdPanel />
           ) : (
             <OsdElementBrowser selectedElement={selectedElement} onSelect={setSelectedElement} />
           )}
@@ -326,13 +349,18 @@ export function OsdView() {
             {osdKind === 'hud' ? (
               <div
                 className="relative rounded-md ring-1 ring-black/40 shadow-2xl overflow-hidden"
-                style={{ width: INSTR_W * instrScale, height: INSTR_H * instrScale, background: backgroundColor }}
+                style={{ width: INSTR_W * instrScale, height: INSTR_H * instrScale }}
               >
-                <FighterHud v={hudValues} config={hudConfig} editable onMovePosition={(id, x, y) => setHudPosition(id, { x, y })} />
+                <OsdVideoBackdrop backgroundColor={backgroundColor} className="absolute inset-0" />
+                <div className="absolute inset-0 z-10">
+                  <FighterHud v={hudValues} config={hudConfig} editable onMovePosition={(id, x, y) => setHudPosition(id, { x, y })} />
+                </div>
                 <div className="absolute -top-px right-1 -translate-y-full text-[10px] text-content-tertiary font-mono pb-1">
-                  HUD · ground-rendered overlay · drag the dashed widgets
+                  HUD · drag the dashed widgets
                 </div>
               </div>
+            ) : osdKind === 'ruby' ? (
+              <RubyOsdPreview />
             ) : fontError ? (
               <div className="px-3 py-2 rounded text-xs bg-red-500/10 border border-red-500/30 text-red-500">
                 {fontError}
@@ -347,8 +375,11 @@ export function OsdView() {
                 style={{ width: canvasWidth, height: canvasHeight }}
                 onClick={() => setSelectedElement(null)}
               >
-                <OsdCanvas scale={effectiveScale} />
-                <div className="absolute inset-0">
+                <OsdVideoBackdrop backgroundColor={backgroundColor} className="absolute inset-0 rounded-md overflow-hidden" />
+                <div className="relative z-10">
+                  <OsdCanvas scale={effectiveScale} transparent />
+                </div>
+                <div className="absolute inset-0 z-20">
                   {(Object.entries(elementPositions) as [OsdElementId, typeof elementPositions[OsdElementId]][]).map(
                     ([id, pos]) => (
                       <OsdElementOverlay
@@ -376,26 +407,32 @@ export function OsdView() {
 
           <p className="text-center pb-2 text-[10px] text-content-tertiary shrink-0">
             {osdKind === 'hud' ? (
-              'Green HUD is rendered by ArduDeck over your video feed (like RubyFPV) — it doesn’t upload to the FC'
+              'Drag the dashed widgets to reposition them'
+            ) : osdKind === 'ruby' ? (
+              'Toggle elements per screen · RubyFPV auto-arranges them and draws over your video · Export writes the .mdl OSD block'
             ) : (
               <>
                 Drag elements to position · click to select
                 {target === 'ardupilot' && ' · dimmed elements aren’t on this board'}
-                {isHdFormat(videoType) && ' · digital OSD is drawn by your goggles using their own HD font — this previews the layout'}
+                {isHdFormat(videoType) && ' · digital OSD is drawn by your goggles using their own HD font - this previews the layout'}
               </>
             )}
           </p>
         </div>
 
-        <ResizeHandle onDrag={(dx) => setRightW((w) => clampRail(w - dx))} />
-        {/* Contextual panel */}
-        <div style={{ width: rightW }} className="border-l border-subtle bg-surface flex flex-col overflow-hidden shrink-0">
-          <OsdContextPanel
-            dataSource={dataSource}
-            selectedElement={selectedElement}
-            onClearSelection={() => setSelectedElement(null)}
-          />
-        </div>
+        {/* Contextual panel - hidden in RubyFPV mode (it has its own editor rail) */}
+        {osdKind !== 'ruby' && (
+          <>
+            <ResizeHandle onDrag={(dx) => setRightW((w) => clampRail(w - dx))} />
+            <div style={{ width: rightW }} className="border-l border-subtle bg-surface flex flex-col overflow-hidden shrink-0">
+              <OsdContextPanel
+                dataSource={dataSource}
+                selectedElement={selectedElement}
+                onClearSelection={() => setSelectedElement(null)}
+              />
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -410,23 +447,28 @@ function Segmented<T extends string>({
 }: {
   value: T;
   onChange: (v: T) => void;
-  options: { value: T; label: string }[];
+  options: { value: T; label: string; icon?: LucideIcon; tip?: string }[];
 }) {
   return (
     <div className="inline-flex items-center rounded-lg border border-subtle overflow-hidden bg-surface">
-      {options.map((opt) => (
-        <button
-          key={opt.value}
-          onClick={() => onChange(opt.value)}
-          className={`px-3 py-1.5 text-xs font-medium transition-colors ${
-            value === opt.value
-              ? 'bg-blue-600/80 text-white'
-              : 'text-content-secondary hover:text-content hover:bg-surface-raised'
-          }`}
-        >
-          {opt.label}
-        </button>
-      ))}
+      {options.map((opt) => {
+        const Icon = opt.icon;
+        return (
+          <button
+            key={opt.value}
+            onClick={() => onChange(opt.value)}
+            data-tip={opt.tip}
+            className={`flex items-center gap-1.5 whitespace-nowrap px-3 py-1.5 text-xs font-medium transition-colors ${
+              value === opt.value
+                ? 'bg-blue-600/80 text-white'
+                : 'text-content-secondary hover:text-content hover:bg-surface-raised'
+            }`}
+          >
+            {Icon && <Icon className="h-3.5 w-3.5" />}
+            {opt.label}
+          </button>
+        );
+      })}
     </div>
   );
 }

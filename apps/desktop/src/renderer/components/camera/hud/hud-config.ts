@@ -5,6 +5,8 @@
  * unit-tested and shared by the designer and the live video overlay.
  */
 
+import { READOUT_IDS, type HudReadoutId } from './hud-readouts';
+
 export type HudColor = 'green' | 'amber' | 'cyan' | 'white';
 export type HudUnits = 'metric' | 'imperial';
 
@@ -33,7 +35,25 @@ export const FIXED_WIDGETS = [
 /** Widgets the user can drag around (corner readouts / graph). */
 export const MOVABLE_WIDGETS = ['status', 'battery', 'home', 'linkGraph'] as const;
 
-export type HudWidgetId = (typeof FIXED_WIDGETS)[number] | (typeof MOVABLE_WIDGETS)[number];
+/**
+ * A HUD widget is either a flight instrument (fixed/edge-anchored), a legacy
+ * movable readout cluster, or one of the freely-placeable telemetry readouts
+ * (HudReadoutId) that make the HUD composable. All share one `widgets` toggle
+ * map and one `positions` map so the panel and renderer treat them uniformly.
+ */
+export type HudWidgetId = (typeof FIXED_WIDGETS)[number] | (typeof MOVABLE_WIDGETS)[number] | HudReadoutId;
+
+/** All readouts default to off (the stock HUD is the instruments + clusters). */
+function readoutsOff(): Record<HudReadoutId, boolean> {
+  const o = {} as Record<HudReadoutId, boolean>;
+  for (const id of READOUT_IDS) o[id] = false;
+  return o;
+}
+
+/** Readouts auto-place in left-edge columns until the user drags them. */
+export const DEFAULT_READOUT_POSITIONS: Record<string, Vec2> = Object.fromEntries(
+  READOUT_IDS.map((id, i) => [id, { x: 70 + Math.floor(i / 12) * 260, y: 120 + (i % 12) * 60 }]),
+);
 
 export interface HudWidgetMeta {
   id: HudWidgetId;
@@ -89,6 +109,7 @@ export const DEFAULT_POSITIONS: Record<string, Vec2> = {
   battery: { x: 1530, y: 770 },
   home: { x: 800, y: 800 },
   linkGraph: { x: 1230, y: 250 },
+  ...DEFAULT_READOUT_POSITIONS,
 };
 
 export const DEFAULT_HUD_CONFIG: HudConfig = {
@@ -108,6 +129,7 @@ export const DEFAULT_HUD_CONFIG: HudConfig = {
     battery: true,
     home: true,
     linkGraph: false,
+    ...readoutsOff(),
   },
   color: 'green',
   lineWeight: 1,

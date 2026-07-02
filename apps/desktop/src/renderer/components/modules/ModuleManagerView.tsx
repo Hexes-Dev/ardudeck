@@ -151,10 +151,14 @@ function ActivationProgress({ progress }: { progress: ModuleProgress }) {
 function ModuleCard({
   module,
   hasUpdate,
+  isUpdating,
+  onUpdate,
   onRemove,
 }: {
   module: InstalledModule;
   hasUpdate: boolean;
+  isUpdating: boolean;
+  onUpdate: () => void;
   onRemove: () => void;
 }) {
   const [confirmRemove, setConfirmRemove] = useState(false);
@@ -176,10 +180,23 @@ function ModuleCard({
         <div className="flex items-center gap-2 mb-1">
           <h3 className="text-sm font-medium text-content truncate">{displayName}</h3>
           {hasUpdate && (
-            <span className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">
-              <ArrowUpIcon className="w-2.5 h-2.5" />
-              Update
-            </span>
+            <button
+              onClick={onUpdate}
+              disabled={isUpdating}
+              className={`flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded-full border transition-colors ${
+                isUpdating
+                  ? 'bg-blue-500/10 text-blue-400/60 border-blue-500/20 cursor-wait'
+                  : 'bg-blue-500/10 text-blue-400 border-blue-500/20 hover:bg-blue-500/20 hover:text-blue-300'
+              }`}
+              data-tip="Download and install the latest version"
+            >
+              {isUpdating ? (
+                <span className="w-2.5 h-2.5 rounded-full border border-blue-400/30 border-t-blue-400 animate-spin" />
+              ) : (
+                <ArrowUpIcon className="w-2.5 h-2.5" />
+              )}
+              {isUpdating ? 'Updating...' : 'Update'}
+            </button>
           )}
         </div>
         <p className="text-xs text-content-secondary font-mono mb-2">{module.slug}</p>
@@ -257,10 +274,13 @@ export function ModuleManagerView() {
     activating,
     progress,
     updates,
+    updating,
     loadModules,
     activateLicense,
     removeLicense,
     checkUpdates,
+    updateModule,
+    updateAll,
     setProgress,
     clearError,
   } = useModuleStore();
@@ -318,6 +338,19 @@ export function ModuleManagerView() {
 
   // Group modules by license key for display
   const updateSlugs = new Set(updates.map((u) => u.slug));
+
+  const handleUpdate = async (slug: string) => {
+    clearError();
+    const result = await updateModule(slug);
+    // Updated code only loads at startup, same as a fresh install.
+    if (result.success) setRestartRequired(true);
+  };
+
+  const handleUpdateAll = async () => {
+    clearError();
+    const succeeded = await updateAll();
+    if (succeeded > 0) setRestartRequired(true);
+  };
 
   return (
     <div className="h-full overflow-auto">
@@ -447,6 +480,8 @@ export function ModuleManagerView() {
                   key={mod.slug}
                   module={mod}
                   hasUpdate={updateSlugs.has(mod.slug)}
+                  isUpdating={updating === mod.slug || updating === 'all'}
+                  onUpdate={() => handleUpdate(mod.slug)}
                   onRemove={() => removeLicense(mod.licenseKey)}
                 />
               ))}
@@ -462,14 +497,39 @@ export function ModuleManagerView() {
               <h3 className="text-sm font-medium text-blue-400">
                 {updates.length} update{updates.length > 1 ? 's' : ''} available
               </h3>
+              <div className="flex-1" />
+              <button
+                onClick={handleUpdateAll}
+                disabled={updating !== null}
+                className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+                  updating !== null
+                    ? 'bg-blue-600/40 text-white/60 cursor-wait'
+                    : 'bg-blue-600 hover:bg-blue-500 text-white'
+                }`}
+              >
+                {updating === 'all' ? 'Updating all...' : updates.length > 1 ? 'Update all' : 'Update'}
+              </button>
             </div>
             <div className="space-y-2">
               {updates.map((u) => (
-                <div key={u.slug} className="flex items-center justify-between text-sm">
+                <div key={u.slug} className="flex items-center justify-between gap-3 text-sm">
                   <span className="text-content">{u.name}</span>
-                  <span className="text-xs text-content-secondary">
-                    {u.currentVersion} → <span className="text-blue-400">{u.latestVersion}</span>
-                  </span>
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs text-content-secondary">
+                      {u.currentVersion} → <span className="text-blue-400">{u.latestVersion}</span>
+                    </span>
+                    <button
+                      onClick={() => handleUpdate(u.slug)}
+                      disabled={updating !== null}
+                      className={`px-2 py-1 text-[11px] rounded-md border transition-colors ${
+                        updating !== null
+                          ? 'text-blue-400/50 border-blue-500/20 cursor-wait'
+                          : 'text-blue-400 border-blue-500/30 hover:bg-blue-500/10 hover:text-blue-300'
+                      }`}
+                    >
+                      {updating === u.slug ? 'Updating...' : 'Update'}
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>

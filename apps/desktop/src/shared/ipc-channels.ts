@@ -519,6 +519,7 @@ export const IPC_CHANNELS = {
   MODULE_LIST: 'module:list',
   MODULE_REMOVE: 'module:remove',
   MODULE_CHECK_UPDATES: 'module:check-updates',
+  MODULE_UPDATE: 'module:update',
   MODULE_PROGRESS: 'module:progress',
   MODULE_DEEP_LINK_INSTALL: 'module:deep-link-install',
   // ardudeck://open?view=<id> -> navigate the renderer to a built-in view

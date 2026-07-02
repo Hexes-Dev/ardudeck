@@ -70,6 +70,11 @@ interface CommitArea {
    * the planner's own config. Loosely typed: it is the renderer's SurveyConfig.
    */
   config?: Record<string, unknown>;
+  /**
+   * Allowed-flight-area outer ring from the editor's workspace-role object,
+   * attached to every committed area (consumed by remote coverage engines).
+   */
+  workspace?: Array<{ lat: number; lng: number }>;
 }
 
 /**
@@ -1913,6 +1918,9 @@ const api = {
 
   moduleCheckUpdates: (): Promise<UpdateAvailable[]> =>
     ipcRenderer.invoke(IPC_CHANNELS.MODULE_CHECK_UPDATES),
+
+  moduleUpdate: (slug: string): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke(IPC_CHANNELS.MODULE_UPDATE, slug),
 
   onModuleProgress: (callback: (progress: ModuleProgress) => void) => {
     const handler = (_: unknown, progress: ModuleProgress) => callback(progress);

@@ -142,7 +142,10 @@ export function ObjectEditorMap({ onMapReady }: ObjectEditorMapProps): JSX.Eleme
         filter: ['==', ['geometry-type'], 'Polygon'],
         paint: {
           'fill-color': ['get', 'color'],
-          'fill-opacity': ['case', ['==', ['get', 'selected'], true], 0.35, 0.18],
+          'fill-opacity': ['case',
+            ['==', ['get', 'workspace'], true], 0.05,
+            ['==', ['get', 'selected'], true], 0.35,
+            0.18],
         },
       });
       map.addLayer({
@@ -151,6 +154,11 @@ export function ObjectEditorMap({ onMapReady }: ObjectEditorMapProps): JSX.Eleme
         paint: {
           'line-color': ['get', 'color'],
           'line-width': ['case', ['==', ['get', 'selected'], true], 3, 1.75],
+          // Workspace areas get the dashed allowed-flight-area outline (matches
+          // the committed-workspace styling on the mission map).
+          'line-dasharray': ['case',
+            ['==', ['get', 'workspace'], true], ['literal', [3, 2]],
+            ['literal', [1, 0]]],
         },
       });
 

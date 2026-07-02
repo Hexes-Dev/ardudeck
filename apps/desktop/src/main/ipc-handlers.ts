@@ -274,6 +274,9 @@ const settingsStore = new Store<SettingsStoreSchema>({
 
 let currentTransport: Transport | null = null;
 let currentVehicleType = 0; // 1=plane, 2=copter, etc.
+// Watchdog for arm/disarm: warns if the vehicle never ACKs a COMMAND 400, so a
+// one-way link / wrong sysid / mode reject reads as a message instead of silence.
+let armAckWatchdog: ReturnType<typeof setTimeout> | null = null;
 // Multi-vehicle shadow: the registry id for the primary (legacy) transport.
 // The ConnectionRegistry mirrors the active connection so vehicles are tracked
 // by (transport, sysid, compid). Single-vehicle reads stay on the legacy globals.
@@ -1870,6 +1873,16 @@ function sendLog(mainWindow: BrowserWindow, level: ConsoleLogEntry['level'], mes
   safeSend(mainWindow, IPC_CHANNELS.CONSOLE_LOG, entry);
 }
 
+/**
+ * Push a synthetic STATUSTEXT into the renderer's Messages panel, exactly as if
+ * the vehicle had sent one. Used to surface GCS-side conditions (e.g. an arm
+ * command that never gets an ACK) that would otherwise be invisible.
+ */
+function emitStatusText(mainWindow: BrowserWindow, severity: number, text: string): void {
+  const severityLabel = SEVERITY_LABELS[severity] ?? 'INFO';
+  safeSend(mainWindow, IPC_CHANNELS.MAVLINK_STATUSTEXT, { severity, severityLabel, text });
+}
+
 // Helper functions to read values from MAVLink payload (little-endian)
 function readInt16(payload: Uint8Array, offset: number): number {
   const val = payload[offset]! | (payload[offset + 1]! << 8);
@@ -2454,9 +2467,12 @@ function parseTelemetry(mainWindow: BrowserWindow, packet: MAVLinkPacket): void 
       // MAV_RESULT: 0=ACCEPTED, 1=TEMPORARILY_REJECTED, 2=DENIED, 3=UNSUPPORTED, 4=FAILED, 5=IN_PROGRESS
       const MAV_RESULT_NAMES = ['ACCEPTED', 'TEMPORARILY_REJECTED', 'DENIED', 'UNSUPPORTED', 'FAILED', 'IN_PROGRESS'];
       const resultName = MAV_RESULT_NAMES[ackResult] ?? `UNKNOWN(${ackResult})`;
+      // TEMP DIAGNOSTIC (rover arm no-ack): surface every ACK we receive.
+      emitStatusText(mainWindow, 6, `[diag] ACK cmd=${ackCommand} result=${resultName} from sys=${packet.sysid}`);
 
       // Log arm/disarm command results prominently and forward to messages panel
       if (ackCommand === 400) {
+        if (armAckWatchdog) { clearTimeout(armAckWatchdog); armAckWatchdog = null; }
         const severity = ackResult === 0 ? 6 : 4; // MAV_SEVERITY_INFO=6, WARNING=4
         const severityLabel = SEVERITY_LABELS[severity] ?? 'INFO';
         const text = ackResult === 0 ? 'ARM/DISARM accepted' : `ARM/DISARM ${resultName}`;
@@ -6075,6 +6091,9 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
   ipcMain.handle(IPC_CHANNELS.MAVLINK_ARM_DISARM, async (_, arm: boolean, force?: boolean): Promise<boolean> => {
     const target = activeFlightTarget();
     if (!target) {
+      // Don't fail silently — this reads as a dead button otherwise.
+      emitStatusText(mainWindow, 4, `Cannot ${arm ? 'arm' : 'disarm'}: no active vehicle`);
+      sendLog(mainWindow, 'warn', `${arm ? 'ARM' : 'DISARM'} ignored: no active flight target`);
       return false;
     }
 
@@ -6089,8 +6108,12 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
         await new Promise(resolve => setTimeout(resolve, 500));
       }
 
-      // Also send a one-shot RC_CHANNELS_OVERRIDE via MAVLink as a fallback
+      // Also send a one-shot RC_CHANNELS_OVERRIDE via MAVLink as a fallback for
+      // arming without a transmitter. Aux channels MUST be UINT16_MAX ("ignore")
+      // or we hijack FLTMODE_CH and can slam the vehicle into a non-armable mode
+      // right as we arm (this bit rovers, whose FLTMODE_CH commonly sits in 5-8).
       if (arm) {
+        const IGNORE = 65535;
         const rcPayload = serializeRcChannelsOverride({
           targetSystem: target.sysid,
           targetComponent: 1,
@@ -6098,13 +6121,10 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
           chan2Raw: 1500, // Pitch center
           chan3Raw: 1000, // Throttle low
           chan4Raw: 1500, // Yaw center
-          chan5Raw: 1000,
-          chan6Raw: 1000,
-          chan7Raw: 1000,
-          chan8Raw: 1000,
-          chan9Raw: 0, chan10Raw: 0, chan11Raw: 0, chan12Raw: 0,
-          chan13Raw: 0, chan14Raw: 0, chan15Raw: 0, chan16Raw: 0,
-          chan17Raw: 0, chan18Raw: 0,
+          chan5Raw: IGNORE, chan6Raw: IGNORE, chan7Raw: IGNORE, chan8Raw: IGNORE,
+          chan9Raw: IGNORE, chan10Raw: IGNORE, chan11Raw: IGNORE, chan12Raw: IGNORE,
+          chan13Raw: IGNORE, chan14Raw: IGNORE, chan15Raw: IGNORE, chan16Raw: IGNORE,
+          chan17Raw: IGNORE, chan18Raw: IGNORE,
         });
         const rcPacket = await sendMavlinkPacket(RC_CHANNELS_OVERRIDE_ID, rcPayload, RC_CHANNELS_OVERRIDE_CRC_EXTRA);
         await target.transport.write(rcPacket);
@@ -6131,6 +6151,17 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
       connectionState.packetsSent++;
 
       sendLog(mainWindow, 'info', `Sent ${arm ? 'ARM' : 'DISARM'} command${force ? ' (FORCE)' : ''} to sysid ${target.sysid}`);
+      // TEMP DIAGNOSTIC (rover arm no-ack): confirm the packet + its target/version.
+      emitStatusText(mainWindow, 6, `[diag] wrote ${arm ? 'ARM' : 'DISARM'} -> sys=${target.sysid} comp=1 mavv=${detectedMavlinkVersion} force=${force ? 21196 : 0}`);
+
+      // Watchdog: the FC always ACKs COMMAND 400. If none arrives, the command
+      // isn't reaching the vehicle (wrong sysid, one-way link, mode reject) —
+      // surface that instead of leaving the operator staring at a silent button.
+      if (armAckWatchdog) clearTimeout(armAckWatchdog);
+      armAckWatchdog = setTimeout(() => {
+        armAckWatchdog = null;
+        emitStatusText(mainWindow, 4, `No response to ${arm ? 'ARM' : 'DISARM'} from sysid ${target.sysid} — check flight mode, sysid and link`);
+      }, 3000);
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';

@@ -6,18 +6,21 @@ import {
   getOsdCols,
   getOsdRows,
 } from '../../utils/osd/font-renderer';
+import { sceneCanvasGradient } from '../../utils/osd/osd-scene';
 
 interface OsdCanvasProps {
   className?: string;
   /** Display scale; overrides the store's manual zoom (used for fit-to-window). */
   scale?: number;
+  /** Skip the background fill so a video/scene layer behind the canvas shows through. */
+  transparent?: boolean;
 }
 
 /**
  * OSD Canvas - renders the OSD screen buffer using the loaded font
  * Memoized to prevent unnecessary re-renders
  */
-export const OsdCanvas = React.memo(function OsdCanvas({ className = '', scale: scaleProp }: OsdCanvasProps) {
+export const OsdCanvas = React.memo(function OsdCanvas({ className = '', scale: scaleProp, transparent = false }: OsdCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const currentFont = useOsdStore((s) => s.currentFont);
@@ -73,8 +76,13 @@ export const OsdCanvas = React.memo(function OsdCanvas({ className = '', scale: 
 
     // Fully clear canvas first (required when background is semi-transparent)
     ctx.clearRect(0, 0, canvasWidth, canvasHeight);
-    ctx.fillStyle = backgroundColor;
-    ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+    // Transparent mode leaves the canvas clear so a video/scene layer shows
+    // through; otherwise the default (unset) background is the shared FPV scene
+    // and a picked colour overrides it.
+    if (!transparent) {
+      ctx.fillStyle = backgroundColor.startsWith('rgba') ? sceneCanvasGradient(ctx, canvasHeight) : backgroundColor;
+      ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+    }
 
     // Disable smoothing for pixel-perfect rendering
     ctx.imageSmoothingEnabled = false;
@@ -125,6 +133,7 @@ export const OsdCanvas = React.memo(function OsdCanvas({ className = '', scale: 
     canvasHeight,
     showGrid,
     backgroundColor,
+    transparent,
     scale,
     cols,
     rows,

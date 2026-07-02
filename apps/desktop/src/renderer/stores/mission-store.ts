@@ -8,6 +8,8 @@ import {
   estimateMissionTime,
   MAV_CMD,
   MAV_FRAME,
+  altFrameToMavFrame,
+  type AltReferenceFrame,
 } from '../../shared/mission-types';
 import {
   createManualGroup,
@@ -351,6 +353,8 @@ interface MissionStore {
     groupId: string,
     items: MissionItem[],
     signature?: string,
+    /** Generator extras to re-cache (undefined keeps the existing ones). */
+    generatorResult?: unknown,
   ) => void;
   /**
    * Atomically replace polygon + config + items on a survey group from a
@@ -366,6 +370,8 @@ interface MissionStore {
     config: Record<string, unknown>,
     items: MissionItem[],
     signature: string,
+    /** Generator extras to re-cache (undefined keeps the existing ones). */
+    generatorResult?: unknown,
   ) => void;
 
   // Local editing
@@ -378,7 +384,7 @@ interface MissionStore {
   insertMissionItems: (items: MissionItem[]) => void;
   applyTerrainPlan: (plan: {
     raisedAltitudes: Map<number, number>;
-    inserts: Array<{ afterSeq: number; latitude: number; longitude: number; altitude: number }>;
+    inserts: Array<{ afterSeq: number; latitude: number; longitude: number; altitude: number; frame?: AltReferenceFrame }>;
   }) => void;
   clearMission: () => void;
 
@@ -950,7 +956,7 @@ export const useMissionStore = create<MissionStore>((set, get) => ({
 
     const makeNavWp = (ins: (typeof plan.inserts)[number], groupId: string): MissionItem => ({
       seq: 0,
-      frame: MAV_FRAME.GLOBAL_RELATIVE_ALT,
+      frame: altFrameToMavFrame(ins.frame),
       command: MAV_CMD.NAV_WAYPOINT,
       current: false,
       autocontinue: true,
@@ -1143,7 +1149,7 @@ export const useMissionStore = create<MissionStore>((set, get) => ({
     return ids;
   },
 
-  replaceSurveyGroupItems: (groupId, items, signature) => {
+  replaceSurveyGroupItems: (groupId, items, signature, generatorResult) => {
     const { missionItems, groups } = get();
     const group = groups.find((g) => g.id === groupId);
     if (!group || group.kind !== 'survey') return;
@@ -1162,6 +1168,8 @@ export const useMissionStore = create<MissionStore>((set, get) => ({
       ...(group as SurveyGroup),
       lastGeneratedAt: Date.now(),
       lastGeneratedSignature: signature ?? null,
+      // undefined = generator carried no extras; keep the cached ones.
+      ...(generatorResult !== undefined ? { generatorResult } : {}),
       updatedAt: Date.now(),
     };
     set({
@@ -1171,7 +1179,7 @@ export const useMissionStore = create<MissionStore>((set, get) => ({
     });
   },
 
-  syncSurveyGroupFromDraft: (groupId, polygon, config, items, signature) => {
+  syncSurveyGroupFromDraft: (groupId, polygon, config, items, signature, generatorResult) => {
     const { missionItems, groups } = get();
     const group = groups.find((g) => g.id === groupId);
     if (!group || group.kind !== 'survey') return;
@@ -1188,6 +1196,8 @@ export const useMissionStore = create<MissionStore>((set, get) => ({
       config,
       lastGeneratedAt: Date.now(),
       lastGeneratedSignature: signature,
+      // undefined = generator carried no extras; keep the cached ones.
+      ...(generatorResult !== undefined ? { generatorResult } : {}),
       updatedAt: Date.now(),
     };
     set({

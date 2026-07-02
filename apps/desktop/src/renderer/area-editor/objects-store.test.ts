@@ -254,6 +254,52 @@ describe('object list ops', () => {
   });
 });
 
+describe('workspace role', () => {
+  it('setObjectRole grants and clears the workspace role', () => {
+    const r = makeRectangle(CENTER, 10, 10, 'R');
+    const st = useObjectsStore.getState();
+    st.addObject(r);
+    st.setObjectRole(r.id, 'workspace');
+    expect(useObjectsStore.getState().objects[0]!.role).toBe('workspace');
+    st.setObjectRole(r.id, null);
+    expect(useObjectsStore.getState().objects[0]!.role).toBeUndefined();
+  });
+
+  it('granting the role to one object strips it from any other', () => {
+    const a = makeRectangle(CENTER, 10, 10, 'A');
+    const b = makeRectangle(CENTER, 20, 20, 'B');
+    const st = useObjectsStore.getState();
+    st.addObject(a);
+    st.addObject(b);
+    st.setObjectRole(a.id, 'workspace');
+    st.setObjectRole(b.id, 'workspace');
+    const s = useObjectsStore.getState();
+    expect(s.objects.find((o) => o.id === a.id)!.role).toBeUndefined();
+    expect(s.objects.find((o) => o.id === b.id)!.role).toBe('workspace');
+    expect(s.objects.filter((o) => o.role === 'workspace')).toHaveLength(1);
+  });
+
+  it('duplicating a workspace object does not copy the role', () => {
+    const r = makeRectangle(CENTER, 10, 10, 'R');
+    const st = useObjectsStore.getState();
+    st.addObject(r);
+    st.setObjectRole(r.id, 'workspace');
+    st.duplicateObject(r.id);
+    const s = useObjectsStore.getState();
+    expect(s.objects).toHaveLength(2);
+    expect(s.objects.filter((o) => o.role === 'workspace')).toHaveLength(1);
+  });
+
+  it('setObjectRole is undoable', () => {
+    const r = makeRectangle(CENTER, 10, 10, 'R');
+    const st = useObjectsStore.getState();
+    st.addObject(r);
+    st.setObjectRole(r.id, 'workspace');
+    st.undo();
+    expect(useObjectsStore.getState().objects[0]!.role).toBeUndefined();
+  });
+});
+
 describe('vertex editing', () => {
   it('moves, inserts, and deletes vertices on the selected object', () => {
     const st = useObjectsStore.getState();

@@ -14,6 +14,25 @@ export const MAV_FRAME = {
 
 export type MavFrame = typeof MAV_FRAME[keyof typeof MAV_FRAME];
 
+/** Altitude reference frame, collapsed to the three cases planners care about. */
+export type AltReferenceFrame = 'asl' | 'relative' | 'terrain';
+
+/** Map a MAV_FRAME numeric code to a collapsed altitude reference frame. */
+export function mavFrameToAltFrame(frame: number): AltReferenceFrame {
+  if (frame === MAV_FRAME.GLOBAL || frame === MAV_FRAME.GLOBAL_INT) return 'asl';
+  if (frame === MAV_FRAME.GLOBAL_TERRAIN_ALT) return 'terrain';
+  return 'relative'; // GLOBAL_RELATIVE_ALT / _INT and the ArduPilot default
+}
+
+/** Map a collapsed altitude reference frame back to a MAV_FRAME code. */
+export function altFrameToMavFrame(frame: AltReferenceFrame | undefined): MavFrame {
+  switch (frame) {
+    case 'asl': return MAV_FRAME.GLOBAL;
+    case 'terrain': return MAV_FRAME.GLOBAL_TERRAIN_ALT;
+    default: return MAV_FRAME.GLOBAL_RELATIVE_ALT;
+  }
+}
+
 // MAV_CMD constants - comprehensive set for ArduPilot mission planning
 export const MAV_CMD = {
   // Navigation commands (move the vehicle)

@@ -62,6 +62,14 @@ function getDeviceName(): string {
 export async function activateLicense(
   key: string,
   onProgress: (p: ModuleProgress) => void,
+  opts?: {
+    /**
+     * Skip the duplicate-key guard. The update path re-activates a known key
+     * on purpose (server activation is idempotent per device; the download
+     * fetches latest); only manual entry in the Add form should be rejected.
+     */
+    reactivate?: boolean;
+  },
 ): Promise<{ success: boolean; error?: string }> {
   // 1. Offline signature validation
   onProgress({ stage: 'validating', message: 'Validating license key...' });
@@ -72,9 +80,9 @@ export async function activateLicense(
     return { success: false, error: verification.error || 'Invalid license key' };
   }
 
-  // Check if already activated
+  // Check if already activated (manual double-add, not an update)
   const existingKeys = store.get('licenseKeys');
-  if (existingKeys.includes(key)) {
+  if (!opts?.reactivate && existingKeys.includes(key)) {
     onProgress({ stage: 'error', message: 'This license key is already activated' });
     return { success: false, error: 'This license key is already activated' };
   }
@@ -136,7 +144,7 @@ export async function activateLicense(
 
     try {
       // Download the latest version
-      const { filePath, hash } = await marketplace.downloadBundle(
+      const { filePath, hash, localHash, sig } = await marketplace.downloadBundle(
         slug,
         'latest',
         key,
@@ -157,11 +165,24 @@ export async function activateLicense(
         percent: Math.round(((i + 0.9) / modules.length) * 100),
       });
 
-      // Note: hash verification happens here. Full Ed25519 bundle signature
-      // verification requires the signature to be returned by the download endpoint.
-      // For now we trust the hash from the server header.
+      // Integrity: the locally-computed SHA256 must match the server's
+      // declared hash, and when the server returns an Ed25519 bundle
+      // signature it must verify against the embedded marketplace key.
+      // Absent headers only warn - servers predating them still install.
+      if (hash && localHash !== hash) {
+        await rm(filePath, { force: true });
+        throw new Error(`Bundle hash mismatch for ${slug} - download corrupted or tampered with`);
+      }
       if (!hash) {
         console.warn(`[ModuleManager] No bundle hash for ${slug}, skipping hash verification`);
+      }
+      if (sig) {
+        if (!verifyBundleSignature(filePath, sig)) {
+          await rm(filePath, { force: true });
+          throw new Error(`Bundle signature verification failed for ${slug}`);
+        }
+      } else {
+        console.warn(`[ModuleManager] No bundle signature for ${slug}, skipping signature verification`);
       }
 
       // 5. Extract bundle and parse manifest
@@ -203,7 +224,8 @@ export async function activateLicense(
   );
 
   store.set('modules', [...filteredModules, ...newModules]);
-  store.set('licenseKeys', [...currentKeys, key]);
+  // Deduped: re-activation of an already-known key is the module UPDATE path.
+  store.set('licenseKeys', Array.from(new Set([...currentKeys, key])));
 
   onProgress({ stage: 'complete', message: `Activated ${newModules.length} module(s)`, percent: 100 });
 
@@ -216,6 +238,28 @@ export async function activateLicense(
 
 export function getInstalledModules(): InstalledModule[] {
   return store.get('modules');
+}
+
+// --------------------------------------------------------------------------
+// Update
+// --------------------------------------------------------------------------
+
+/**
+ * Update an installed module to the latest published version by re-running
+ * activation for its stored license key. Activation already downloads
+ * `latest`, verifies hash + signature, extracts over the install path, and
+ * replaces the store record - so update is the same flow, keyed by slug.
+ * Note: a key covering a bundle updates every module of that bundle.
+ */
+export async function updateModule(
+  slug: string,
+  onProgress: (progress: ModuleProgress) => void,
+): Promise<{ success: boolean; error?: string }> {
+  const installed = store.get('modules').find((m) => m.slug === slug);
+  if (!installed) {
+    return { success: false, error: `Module ${slug} is not installed` };
+  }
+  return activateLicense(installed.licenseKey, onProgress, { reactivate: true });
 }
 
 // --------------------------------------------------------------------------

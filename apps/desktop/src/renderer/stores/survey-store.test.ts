@@ -175,21 +175,21 @@ describe('survey-store', () => {
       { lat: -35.380, lng: 149.170 },
     ];
 
-    it('returns empty array when given no areas', () => {
-      const ids = useSurveyStore.getState().addSurveyAreasFromPolygons([]);
+    it('returns empty array when given no areas', async () => {
+      const ids = await useSurveyStore.getState().addSurveyAreasFromPolygons([]);
       expect(ids).toEqual([]);
     });
 
-    it('skips areas with fewer than 3 points', () => {
-      const ids = useSurveyStore.getState().addSurveyAreasFromPolygons([
+    it('skips areas with fewer than 3 points', async () => {
+      const ids = await useSurveyStore.getState().addSurveyAreasFromPolygons([
         { polygon: [{ lat: -35.36, lng: 149.16 }, { lat: -35.37, lng: 149.16 }] },
       ]);
       expect(ids).toEqual([]);
       expect(useMissionStore.getState().groups).toHaveLength(0);
     });
 
-    it('adds two areas in one atomic call and returns two ids', () => {
-      const ids = useSurveyStore.getState().addSurveyAreasFromPolygons([
+    it('adds two areas in one atomic call and returns two ids', async () => {
+      const ids = await useSurveyStore.getState().addSurveyAreasFromPolygons([
         { polygon: square1 },
         { polygon: square2 },
       ]);
@@ -202,8 +202,8 @@ describe('survey-store', () => {
       expect(groups.filter(isSurveyGroup)).toHaveLength(2);
     });
 
-    it('opens the first group in the survey panel', () => {
-      const ids = useSurveyStore.getState().addSurveyAreasFromPolygons([
+    it('opens the first group in the survey panel', async () => {
+      const ids = await useSurveyStore.getState().addSurveyAreasFromPolygons([
         { polygon: square1 },
         { polygon: square2 },
       ]);
@@ -212,8 +212,8 @@ describe('survey-store', () => {
       expect(surveyState.editingGroupId).toBe(ids[0]);
     });
 
-    it('respects custom names', () => {
-      const ids = useSurveyStore.getState().addSurveyAreasFromPolygons([
+    it('respects custom names', async () => {
+      const ids = await useSurveyStore.getState().addSurveyAreasFromPolygons([
         { polygon: square1, name: 'Zone A' },
         { polygon: square2, name: 'Zone B' },
       ]);
@@ -224,8 +224,8 @@ describe('survey-store', () => {
       expect(surveyGroups.some((g) => g.name === 'Zone B')).toBe(true);
     });
 
-    it('all items belong to their respective groups', () => {
-      const ids = useSurveyStore.getState().addSurveyAreasFromPolygons([
+    it('all items belong to their respective groups', async () => {
+      const ids = await useSurveyStore.getState().addSurveyAreasFromPolygons([
         { polygon: square1 },
         { polygon: square2 },
       ]);

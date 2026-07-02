@@ -1,3 +1,4 @@
+import { GuidesButton } from './GuidesButton';
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useConnectionStore } from '../../stores/connection-store';
@@ -11,7 +12,7 @@ import { SaveMissionModal } from '../mission-library/SaveMissionModal';
 import { UploadPreviewModal } from './UploadPreviewModal';
 import { AutoAdjustAltitudeDialog } from './AutoAdjustAltitudeDialog';
 import type { PlanResult, PlannerWaypoint } from './terrain-altitude-planner';
-import { hasValidCoordinates } from '../../../shared/mission-types';
+import { hasValidCoordinates, mavFrameToAltFrame } from '../../../shared/mission-types';
 
 type ToastType = 'success' | 'error' | 'info';
 
@@ -329,6 +330,7 @@ export function MissionToolbar({ onResetLayout, showToast }: MissionToolbarProps
         latitude: wp.latitude,
         longitude: wp.longitude,
         altitude: wp.altitude,
+        frame: mavFrameToAltFrame(wp.frame),
       })),
     [missionStore.missionItems],
   );
@@ -649,17 +651,7 @@ export function MissionToolbar({ onResetLayout, showToast }: MissionToolbarProps
           </svg>
         </button>
         {activeMode === 'mission' && (
-          <button
-            data-tour="mission-import"
-            onClick={() => { void useSurveyStore.getState().importArea(); }}
-            className="p-1.5 rounded bg-surface-raised text-content hover:brightness-125 transition-colors"
-            data-tip="Import survey area from KML / KMZ / GeoJSON"
-          >
-            {/* map/area glyph - import a survey boundary from a GIS file */}
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V5.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7" />
-            </svg>
-          </button>
+          <GuidesButton showToast={showToast} />
         )}
         {activeMode === 'mission' && (
           <button
@@ -813,6 +805,7 @@ export function MissionToolbar({ onResetLayout, showToast }: MissionToolbarProps
         <AutoAdjustAltitudeDialog
           waypoints={plannerWaypoints}
           safeBuffer={safeAltitudeBuffer}
+          homeElevationMeters={missionStore.homePosition?.alt}
           onApply={handleApplyAltitudePlan}
           onClose={() => setShowAltitudeAdjust(false)}
         />

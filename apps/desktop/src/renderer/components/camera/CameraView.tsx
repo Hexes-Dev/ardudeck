@@ -10,13 +10,13 @@
  *  ever speaks getUserMedia or WHEP.
  */
 
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useRef, useCallback } from 'react';
 import type { CameraSourceConfig, OsdLayers } from '../../../shared/camera-types';
 import type { FleetVehicle } from '../../hooks/useFleet';
 import { useCameraStore } from '../../stores/camera-store';
 import { useTelemetryStore } from '../../stores/telemetry-store';
 import { CameraOverlays } from './CameraOverlays';
-import { playWhep } from './whep';
+import { useCameraStream } from './useCameraStream';
 import { projectPixelToGround, projectFrameCenter, type CameraPose } from './geolocation';
 
 interface CameraViewProps {
@@ -33,82 +33,12 @@ interface CameraViewProps {
 
 export function CameraView({ source, vehicle, isPrimary, osd, onActivate, onError }: CameraViewProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const [status, setStatus] = useState<'starting' | 'live' | 'error'>('starting');
-  const [error, setError] = useState<string | null>(null);
-  // Keep the latest onError without restarting the playback effect.
-  const onErrorRef = useRef(onError);
-  onErrorRef.current = onError;
-  const advertisedUri = useCameraStore((s) => s.videoStreams[source.vehicleKey]?.uri);
+  const { status, error } = useCameraStream(source, videoRef, onError);
   const gimbal = useCameraStore((s) => s.gimbalAttitude[source.vehicleKey]);
   const gimbalCfg = useCameraStore((s) => s.gimbalByVehicle[source.vehicleKey]);
   const attitude = useTelemetryStore((s) => s.attitude);
   const gps = useTelemetryStore((s) => s.gps);
   const position = useTelemetryStore((s) => s.position);
-
-  // ---- Playback lifecycle -------------------------------------------------
-  useEffect(() => {
-    let pc: RTCPeerConnection | null = null;
-    let uvcStream: MediaStream | null = null;
-    let cancelled = false;
-
-    const fail = (msg: string) => {
-      setStatus('error');
-      setError(msg);
-      onErrorRef.current?.(msg);
-    };
-
-    async function go() {
-      setStatus('starting');
-      setError(null);
-      const video = videoRef.current;
-      if (!video) return;
-      try {
-        if (source.kind === 'uvc') {
-          uvcStream = await navigator.mediaDevices.getUserMedia({
-            video: source.deviceId ? { deviceId: { exact: source.deviceId } } : true,
-            audio: false,
-          });
-          if (cancelled) { uvcStream.getTracks().forEach((t) => t.stop()); return; }
-          video.srcObject = uvcStream;
-          await video.play().catch(() => {});
-          setStatus('live');
-          return;
-        }
-
-        // Network source -> engine. 'mavlink' resolves to the advertised URI.
-        const resolved = source.kind === 'mavlink' ? advertisedUri : source.url;
-        const result = await window.electronAPI.cameraStart(source, resolved);
-        if (cancelled) return;
-        if (!result.ok || !result.session) {
-          fail(result.error ?? 'Stream failed');
-          return;
-        }
-        const playback = result.session.playback;
-        if (playback.kind === 'webrtc') {
-          pc = await playWhep(video, playback.whepUrl);
-          if (cancelled) { pc.close(); return; }
-          setStatus('live');
-        } else if (playback.kind === 'uvc') {
-          // Engine should never return this; handled by the uvc branch above.
-          fail('Unexpected playback descriptor');
-        }
-      } catch (e) {
-        if (cancelled) return;
-        fail(e instanceof Error ? e.message : 'Playback error');
-      }
-    }
-    void go();
-
-    return () => {
-      cancelled = true;
-      if (pc) pc.close();
-      if (uvcStream) uvcStream.getTracks().forEach((t) => t.stop());
-      if (source.kind !== 'uvc') void window.electronAPI.cameraStop(source.id);
-    };
-    // Restart only when a stream-relevant field changes — editing the label,
-    // HFOV or low-latency flag must NOT tear down a live feed.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [source.id, source.kind, source.url, source.deviceId, source.rtspTransport, advertisedUri]);
 
   // ---- Pose for geolocation ----------------------------------------------
   const buildPose = useCallback((): CameraPose | null => {

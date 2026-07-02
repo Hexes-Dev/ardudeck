@@ -2,19 +2,26 @@
  * OSD Live Panel
  *
  * Right-panel content for live mode.
- * Shows connection status, mode switches, and collapsible RC controls.
+ * Shows connection status, mode switches, live RC input, and a collapsible RC
+ * override sender.
  *
- * RC state is unified through flight-control-store so mode switch buttons
- * and RC sliders share the same channels[] and override interval.
+ * Two DISTINCT things, kept separate so they aren't confused:
+ *  - Live RC input   -> telemetry-store.rcChannels (the real sticks from the FC,
+ *                       read-only). This is what moves when you touch the TX.
+ *  - RC override out -> flight-control-store.channels (values ArduDeck SENDS to
+ *                       the FC when "Send override" is enabled).
  */
 
 import { useState, useCallback } from 'react';
 import { useConnectionStore } from '../../stores/connection-store';
 import { useFlightControlStore } from '../../stores/flight-control-store';
+import { useTelemetryStore } from '../../stores/telemetry-store';
 import { OsdModeSwitchPanel } from './OsdModeSwitchPanel';
+import { buildLiveRcRows, rssiPercent } from '../../utils/osd/osd-live-rc';
 
 export function OsdLivePanel() {
   const connectionState = useConnectionStore((s) => s.connectionState);
+  const rcChannels = useTelemetryStore((s) => s.rcChannels);
   const channels = useFlightControlStore((s) => s.channels);
   const setChannel = useFlightControlStore((s) => s.setChannel);
   const isOverrideActive = useFlightControlStore((s) => s.isOverrideActive);
@@ -22,6 +29,9 @@ export function OsdLivePanel() {
   const stopOverride = useFlightControlStore((s) => s.stopOverride);
 
   const [rcExpanded, setRcExpanded] = useState(false);
+
+  const liveRows = buildLiveRcRows(rcChannels);
+  const rssi = rssiPercent(rcChannels.rssi);
 
   const handleRcToggle = useCallback((enabled: boolean) => {
     if (enabled) {
@@ -65,7 +75,32 @@ export function OsdLivePanel() {
           </div>
         )}
 
-        {/* Raw RC controls (collapsed by default) */}
+        {/* Live RC input — read-only, straight from the FC (the real sticks). */}
+        {connectionState.isConnected && (
+          <div className="border-b border-subtle px-3 py-2">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[10px] font-medium text-content-secondary uppercase tracking-wider">
+                Live RC Input
+              </span>
+              <span className="text-[9px] font-mono text-content-secondary">
+                RSSI {rssi === null ? '--' : `${rssi}%`}
+              </span>
+            </div>
+            {liveRows.length === 0 ? (
+              <p className="text-[10px] text-content-tertiary">
+                Waiting for live RC from the FC…
+              </p>
+            ) : (
+              <div className="space-y-1.5">
+                {liveRows.map((row, i) => (
+                  <RcBar key={i} label={row.label} value={row.value} isThrottle={row.isThrottle} readOnly />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* RC override sender (collapsed by default) — values ArduDeck sends TO the FC. */}
         {connectionState.isConnected && (
           <div className="border-b border-subtle">
             <button
@@ -82,8 +117,9 @@ export function OsdLivePanel() {
                 <path d="M9 18l6-6-6-6" />
               </svg>
               <span className="text-[10px] font-medium text-content-secondary uppercase tracking-wider">
-                Raw RC Channels
+                Send RC Override
               </span>
+              {isOverrideActive && <span className="ml-auto text-[9px] text-amber-400">sending</span>}
             </button>
 
             {rcExpanded && (
@@ -96,7 +132,7 @@ export function OsdLivePanel() {
                       onChange={(e) => handleRcToggle(e.target.checked)}
                       className="rounded-sm bg-surface-raised border w-3 h-3"
                     />
-                    Send RC
+                    Send override
                   </label>
                   <button
                     onClick={handleReset}
@@ -130,13 +166,15 @@ function RcBar({
   value,
   onChange,
   isThrottle = false,
+  readOnly = false,
 }: {
   label: string;
   value: number;
-  onChange: (v: number) => void;
+  onChange?: (v: number) => void;
   isThrottle?: boolean;
+  readOnly?: boolean;
 }) {
-  const percentage = ((value - 1000) / 1000) * 100;
+  const percentage = Math.max(0, Math.min(100, ((value - 1000) / 1000) * 100));
   const barColor = isThrottle
     ? `rgba(34, 197, 94, ${0.3 + (percentage / 100) * 0.7})`
     : value > 1500
@@ -161,14 +199,16 @@ function RcBar({
             backgroundColor: barColor,
           }}
         />
-        <input
-          type="range"
-          min={1000}
-          max={2000}
-          value={value}
-          onChange={(e) => onChange(parseInt(e.target.value))}
-          className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-        />
+        {!readOnly && (
+          <input
+            type="range"
+            min={1000}
+            max={2000}
+            value={value}
+            onChange={(e) => onChange?.(parseInt(e.target.value))}
+            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+          />
+        )}
       </div>
       <span className="text-[9px] text-content-secondary w-8 text-right font-mono">{value}</span>
     </div>

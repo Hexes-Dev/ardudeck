@@ -4,6 +4,7 @@
  */
 
 import { createWriteStream } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { app } from 'electron';
@@ -15,8 +16,11 @@ import type {
   CheckUpdatesResponse,
 } from '../../shared/module-types.js';
 
-const DEFAULT_BASE_URL = 'https://ardudeck-marketplace.herokuapp.com';
-const DEV_BASE_URL = 'http://localhost:3012';
+const DEFAULT_BASE_URL = 'https://ardudeckapi-production.up.railway.app';
+// 127.0.0.1, not localhost: the local API binds IPv4-only (0.0.0.0) and
+// Node's fetch resolves localhost to ::1 first on macOS without falling
+// back, which surfaces as "could not reach the marketplace".
+const DEV_BASE_URL = 'http://127.0.0.1:3012';
 
 function getBaseUrl(): string {
   if (process.env['MARKETPLACE_URL']) return process.env['MARKETPLACE_URL'];
@@ -102,14 +106,16 @@ export async function checkUpdates(
 
 /**
  * Download a module bundle ZIP to disk.
- * Returns the local file path and the SHA256 hash from the server.
+ * Returns the local file path, the server-declared SHA256 (x-bundle-hash),
+ * the SHA256 computed locally over the received bytes, and the Ed25519
+ * bundle signature (x-bundle-sig, empty on servers that predate it).
  */
 export async function downloadBundle(
   slug: string,
   version: string,
   licenseKey: string,
   onProgress?: (downloaded: number, total: number) => void,
-): Promise<{ filePath: string; hash: string }> {
+): Promise<{ filePath: string; hash: string; localHash: string; sig: string }> {
   const url = `${getBaseUrl()}/client/download/${encodeURIComponent(slug)}/${encodeURIComponent(version)}`;
   let res: Response;
   try {
@@ -126,6 +132,7 @@ export async function downloadBundle(
   }
 
   const hash = res.headers.get('x-bundle-hash') || '';
+  const sig = res.headers.get('x-bundle-sig') || '';
   const totalSize = parseInt(res.headers.get('content-length') || '0', 10);
 
   // Save to userData/modules/{slug}/
@@ -137,8 +144,10 @@ export async function downloadBundle(
     throw new Error('Empty response body');
   }
 
-  // Stream download with progress
+  // Stream download with progress, hashing the bytes as they arrive so the
+  // integrity check costs no extra file read.
   const writeStream = createWriteStream(filePath);
+  const digest = createHash('sha256');
   let downloaded = 0;
 
   const reader = res.body.getReader();
@@ -151,11 +160,12 @@ export async function downloadBundle(
       }
       downloaded += value.byteLength;
       onProgress?.(downloaded, totalSize);
+      digest.update(value);
       this.push(Buffer.from(value));
     },
   });
 
   await pipeline(nodeStream, writeStream);
 
-  return { filePath, hash };
+  return { filePath, hash, localHash: digest.digest('hex'), sig };
 }

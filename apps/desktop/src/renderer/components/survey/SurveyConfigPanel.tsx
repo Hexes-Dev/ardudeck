@@ -12,7 +12,7 @@
  *    Show footprints toggle. Power users open once and it sticks for the session.
  *  - Stats + Insert button pinned at the bottom outside the scroll area.
  */
-import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
+import { useState, useCallback, useEffect, useRef, useMemo, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { useSurveyStore } from '../../stores/survey-store';
 import { useMissionStore } from '../../stores/mission-store';
@@ -24,7 +24,14 @@ import { FleetSurveyPanel } from './FleetSurveyPanel';
 import { useActiveVehicleStore } from '../../stores/active-vehicle-store';
 import { estimateBatteryCount, estimateDataSizeGb } from './survey-stats';
 import { surveyToMissionItems } from './mission-builder';
-import { patternToGeneratorId, getSurveyGenerator } from './generator-registry';
+import {
+  getSurveyGenerator,
+  listSurveyGenerators,
+  resolveGeneratorId,
+  subscribeSurveyGenerators,
+  getSurveyGeneratorsVersion,
+  type GeneratorConfigField,
+} from './generator-registry';
 import { createSurveyGroup, createManualGroup, nextGroupColor, GROUP_COLOR_PALETTE } from '../../../shared/mission-group-types';
 import { splitIntoSorties } from './survey-sortie-split';
 import { computeSurveyGroupSignature } from './survey-group-signature';
@@ -89,6 +96,8 @@ export function SurveyConfigPanel() {
   const polygon = useSurveyStore((s) => s.polygon);
   const config = useSurveyStore((s) => s.config);
   const result = useSurveyStore((s) => s.result);
+  const generating = useSurveyStore((s) => s.generating);
+  const generatorError = useSurveyStore((s) => s.generatorError);
   // Fleet survey: offer "split across fleet" once 2+ vehicles are connected.
   const fleetCount = useActiveVehicleStore((s) => Object.keys(s.knownVehicles).length);
   const [showFleetSplit, setShowFleetSplit] = useState(false);
@@ -101,6 +110,8 @@ export function SurveyConfigPanel() {
   const setEditingGroupId = useSurveyStore((s) => s.setEditingGroupId);
 
   const setPattern = useSurveyStore((s) => s.setPattern);
+  const setGeneratorId = useSurveyStore((s) => s.setGeneratorId);
+  const setEngineParam = useSurveyStore((s) => s.setEngineParam);
   const setAltitude = useSurveyStore((s) => s.setAltitude);
   const setSpeed = useSurveyStore((s) => s.setSpeed);
   const setFrontOverlap = useSurveyStore((s) => s.setFrontOverlap);
@@ -156,6 +167,19 @@ export function SurveyConfigPanel() {
   const [customCamera, setCustomCamera] = useState<CameraPreset>(config.camera);
   const [insertSuccess, setInsertSuccess] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+
+  // Module-supplied generators (e.g. TOPAS) register after their module loads,
+  // which is async - subscribe so they appear without a panel remount.
+  const generatorsVersion = useSyncExternalStore(subscribeSurveyGenerators, getSurveyGeneratorsVersion);
+  const moduleGenerators = useMemo(
+    () => listSurveyGenerators().filter((g) => !g.id.startsWith('builtin.')),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- version is the registry's change counter
+    [generatorsVersion],
+  );
+  const activeGenerator = getSurveyGenerator(resolveGeneratorId(config));
+  const engineFields: GeneratorConfigField[] = config.generatorId
+    ? (activeGenerator?.configFields ?? [])
+    : [];
   const [importError, setImportError] = useState<string | null>(null);
   // null = not naming; '' or text = inline camera-name entry open. (Electron has
   // no window.prompt, so naming is an inline field.)
@@ -307,16 +331,18 @@ export function SurveyConfigPanel() {
     // result so the survey is editable + regeneratable later (PR 5 + 8).
     // The `generatorResult` carries any generator-specific extras (e.g. TOPAS
     // decomposition); built-in generators leave it null.
-    const generatorId = patternToGeneratorId(config.pattern);
+    const generatorId = resolveGeneratorId(fullConfig);
     const reg = getSurveyGenerator(generatorId);
     const survey = createSurveyGroup({
       name: `Survey ${existingGroups.filter((g) => g.kind === 'survey').length + 1}`,
       generatorId,
       generatorVersion: reg?.version ?? '1.0.0',
       polygon: polygon.map((p) => ({ lat: p.lat, lng: p.lng })),
+      workspace: fullConfig.workspace,
       config: fullConfig as unknown as Record<string, unknown>,
       color: nextGroupColor(existingGroups),
     });
+    survey.generatorResult = result.generatorResult ?? null;
     // Stamp the signature now so the group starts off in a non-stale
     // state. Subsequent polygon / config edits flip it to stale.
     survey.lastGeneratedSignature = computeSurveyGroupSignature(survey);
@@ -662,7 +688,7 @@ export function SurveyConfigPanel() {
                     key={opt.id}
                     onClick={() => setPattern(opt.id)}
                     className={`px-2 py-1.5 text-xs rounded-lg transition-colors ${
-                      config.pattern === opt.id
+                      config.pattern === opt.id && !config.generatorId
                         ? 'bg-purple-600/80 text-white'
                         : 'bg-surface-raised text-content-secondary hover:text-content hover:bg-surface-raised'
                     }`}
@@ -674,6 +700,40 @@ export function SurveyConfigPanel() {
               </div>
             );
           })()}
+
+          {/* Module-supplied engines (registered via host.survey, e.g. TOPAS).
+              Mutually exclusive with the built-in patterns above. */}
+          {moduleGenerators.length > 0 && (
+            <div className="mt-1 grid grid-cols-1 gap-1">
+              {moduleGenerators.map((gen) => (
+                <button
+                  key={gen.id}
+                  onClick={() => setGeneratorId(config.generatorId === gen.id ? null : gen.id)}
+                  className={`px-2 py-1.5 text-xs rounded-lg text-left transition-colors ${
+                    config.generatorId === gen.id
+                      ? 'bg-teal-600/80 text-white'
+                      : 'bg-surface-raised text-content-secondary hover:text-content'
+                  }`}
+                  title={gen.description}
+                >
+                  <span className="flex items-center gap-1.5">
+                    {gen.displayName}
+                    {gen.capabilities.isRemote && (
+                      <span
+                        className={`px-1 py-px text-[9px] font-semibold uppercase tracking-wide rounded border ${
+                          config.generatorId === gen.id
+                            ? 'bg-white/15 text-white border-white/40'
+                            : 'bg-teal-500/20 text-teal-300 border-teal-500/30'
+                        }`}
+                      >
+                        Remote
+                      </span>
+                    )}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
 
           {/* Spiral direction sub-control — only when spiral pattern is active. */}
           {config.pattern === 'spiral' && (
@@ -742,6 +802,23 @@ export function SurveyConfigPanel() {
             </div>
           )}
         </Section>
+
+        {/* Engine parameters - declared by the active module generator via
+            its configFields schema. Only shown while that engine is selected. */}
+        {engineFields.length > 0 && (
+          <Section title="Engine parameters">
+            <div className="space-y-2">
+              {engineFields.map((field) => (
+                <EngineParamControl
+                  key={field.id}
+                  field={field}
+                  value={config.engineParams?.[field.id]}
+                  onChange={(v) => setEngineParam(field.id, v)}
+                />
+              ))}
+            </div>
+          </Section>
+        )}
 
         {/* Corridor settings — only when the corridor pattern is active. The
             drawn polygon is treated as a centerline, not an area. */}
@@ -1024,6 +1101,26 @@ export function SurveyConfigPanel() {
           )}
         </div>
 
+        {/* Async (remote) engine status: busy indicator, failures, advisories. */}
+        {generating && (
+          <div className="pt-3 flex items-center gap-2 text-[11px] text-content-secondary">
+            <span className="w-3 h-3 rounded-full border-2 border-teal-400/30 border-t-teal-400 animate-spin" />
+            Computing coverage plan{activeGenerator ? ` (${activeGenerator.displayName})` : ''}...
+          </div>
+        )}
+        {generatorError && !generating && (
+          <div className="mt-3 px-2.5 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-[11px] text-red-300 leading-snug">
+            {generatorError}
+          </div>
+        )}
+        {!generating && result?.warnings && result.warnings.length > 0 && (
+          <div className="mt-3 px-2.5 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-300 leading-snug space-y-1">
+            {result.warnings.map((w, i) => (
+              <div key={i}>{w}</div>
+            ))}
+          </div>
+        )}
+
         {/* Stats — show whenever we have a generated result. */}
         {result && result.waypoints.length > 0 && (
           <div className="pt-3 border-t border-subtle">
@@ -1089,15 +1186,20 @@ export function SurveyConfigPanel() {
             <div className="space-y-1.5">
               <button
                 onClick={handleInsertSurvey}
+                disabled={generating}
                 className={`w-full py-2 rounded-lg text-sm font-medium transition-colors ${
                   insertSuccess
                     ? 'bg-emerald-600 text-white'
-                    : 'bg-purple-600 hover:bg-purple-500 text-white'
+                    : generating
+                      ? 'bg-purple-600/40 text-white/60 cursor-wait'
+                      : 'bg-purple-600 hover:bg-purple-500 text-white'
                 }`}
               >
                 {insertSuccess
                   ? `Inserted ${result.waypoints.length} waypoints`
-                  : `Insert Survey (${result.waypoints.length} WPs)`}
+                  : generating
+                    ? 'Computing...'
+                    : `Insert Survey (${result.waypoints.length} WPs)`}
               </button>
               {!isManualCamera && estimateBatteryCount(result.stats.flightTime, config.enduranceMinutes ?? 20) > 1 && (
                 <button
@@ -1117,6 +1219,81 @@ export function SurveyConfigPanel() {
 }
 
 // --- Sub-components ---
+
+/**
+ * Render one declarative engine parameter (module generator configFields).
+ * Number fields reuse the SliderInput look; booleans and selects match the
+ * panel's existing control styling.
+ */
+function EngineParamControl({
+  field,
+  value,
+  onChange,
+}: {
+  field: GeneratorConfigField;
+  value: unknown;
+  onChange: (v: unknown) => void;
+}) {
+  if (field.type === 'number') {
+    const current = typeof value === 'number' ? value : field.default;
+    return (
+      <div>
+        <SliderInput
+          label={field.label}
+          value={current}
+          onChange={onChange}
+          min={field.min ?? 0}
+          max={field.max ?? Math.max(field.default * 10, 1)}
+          step={field.step ?? 1}
+          unit={field.unit ?? ''}
+        />
+        {field.description && (
+          <p className="text-[10px] text-content-tertiary leading-snug mt-0.5">{field.description}</p>
+        )}
+      </div>
+    );
+  }
+  if (field.type === 'boolean') {
+    const current = typeof value === 'boolean' ? value : field.default;
+    return (
+      <label className="flex items-start gap-2 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={current}
+          onChange={(e) => onChange(e.target.checked)}
+          className="mt-0.5 w-3.5 h-3.5 rounded border-subtle bg-surface-input accent-teal-600 cursor-pointer"
+        />
+        <span className="text-[11px] text-content-secondary leading-snug">
+          <span className="text-content">{field.label}</span>
+          {field.description ? ` - ${field.description}` : ''}
+        </span>
+      </label>
+    );
+  }
+  const current = typeof value === 'string' ? value : field.default;
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-xs text-content-secondary w-20 flex-shrink-0" title={field.description}>
+        {field.label}
+      </span>
+      <div className="flex gap-1 flex-1">
+        {field.options.map((opt) => (
+          <button
+            key={opt.value}
+            onClick={() => onChange(opt.value)}
+            className={`flex-1 px-2 py-1 text-[11px] rounded-md transition-colors ${
+              current === opt.value
+                ? 'bg-teal-600/80 text-white'
+                : 'bg-surface-raised text-content-secondary hover:text-content'
+            }`}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (

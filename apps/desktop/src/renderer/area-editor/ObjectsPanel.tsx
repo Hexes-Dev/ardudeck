@@ -25,7 +25,7 @@ export function ObjectsPanel(): JSX.Element {
   const objects = useObjectsStore((s) => s.objects);
   const selectedId = useObjectsStore((s) => s.selectedId);
   const {
-    selectObject, renameObject, deleteObject, toggleVisible, reorderObject, convertSelectedToPolygon, setObjectColor, setObjectFenceType, removeBranch, loadWorldRings,
+    selectObject, renameObject, deleteObject, toggleVisible, reorderObject, convertSelectedToPolygon, setObjectColor, setObjectFenceType, setObjectRole, removeBranch, loadWorldRings,
   } = useObjectsStore.getState();
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
@@ -166,6 +166,15 @@ export function ObjectsPanel(): JSX.Element {
                           {o.fenceType === 'inclusion' ? 'INC' : 'EXC'}
                         </span>
                       )}
+                      {o.role === 'workspace' && (
+                        <span
+                          className="text-[9px] font-bold px-1 rounded leading-tight"
+                          style={{ background: '#38bdf8', color: '#0a0a0a' }}
+                          data-tip="Workspace - allowed flight area attached to every sent survey"
+                        >
+                          WS
+                        </span>
+                      )}
                     </div>
                     <div className="text-[10px] text-content-tertiary">
                       {TYPE_LABEL[o.type]}
@@ -249,6 +258,23 @@ export function ObjectsPanel(): JSX.Element {
                     );
                   })}
                 </div>
+              </div>
+            )}
+
+            {canFence && (
+              <div className="px-3 pb-2 space-y-1.5">
+                <div className="text-[10px] font-medium text-content-tertiary uppercase tracking-wide">Workspace</div>
+                <button
+                  type="button"
+                  onClick={() => setObjectRole(sel!.id, sel!.role === 'workspace' ? null : 'workspace')}
+                  className={'w-full h-7 rounded-md text-[11px] font-medium transition-colors ' +
+                    (sel!.role === 'workspace'
+                      ? 'bg-sky-600 text-white'
+                      : 'bg-surface-raised text-content-secondary hover:text-content')}
+                  data-tip="Allowed flight area attached to every sent survey; only one object can be the workspace"
+                >
+                  {sel!.role === 'workspace' ? 'Workspace (click to clear)' : 'Mark as workspace'}
+                </button>
               </div>
             )}
 

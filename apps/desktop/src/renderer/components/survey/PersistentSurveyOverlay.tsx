@@ -17,6 +17,7 @@ import { Polygon, Polyline } from 'react-leaflet';
 import { useMissionStore } from '../../stores/mission-store';
 import { useSurveyStore } from '../../stores/survey-store';
 import { isSurveyGroup, type SurveyGroup } from '../../../shared/mission-group-types';
+import { extractGeneratorOverlays } from './generator-overlays';
 
 export function PersistentSurveyOverlay() {
   const groups = useMissionStore((s) => s.groups);
@@ -178,6 +179,35 @@ export function PersistentSurveyOverlay() {
         />,
       );
     }
+
+    // Generator-contributed decorations (e.g. TOPAS decomposition cells).
+    // Non-interactive so they never steal clicks from the group polygon.
+    extractGeneratorOverlays(g.generatorResult).forEach((ov, oi) => {
+      const points = ov.points.map((p) => [p.lat, p.lng] as [number, number]);
+      const pathOptions = {
+        color: ov.color ?? g.color,
+        weight: 1,
+        opacity: 0.55,
+        ...(ov.dashed ? { dashArray: '4, 4' } : {}),
+      };
+      layers.push(
+        ov.type === 'polygon' ? (
+          <Polygon
+            key={`gen-ov-${g.id}-${oi}`}
+            positions={points}
+            interactive={false}
+            pathOptions={{ ...pathOptions, fillColor: ov.color ?? g.color, fillOpacity: 0.04 }}
+          />
+        ) : (
+          <Polyline
+            key={`gen-ov-${g.id}-${oi}`}
+            positions={points}
+            interactive={false}
+            pathOptions={pathOptions}
+          />
+        ),
+      );
+    });
   }
 
   if (layers.length === 0) return null;

@@ -20,6 +20,32 @@
  */
 
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { type ModelKey, FALLBACK_MODEL, CLASS_MODEL, modelKeyForClass } from './sim-models';
+
+/** Per-airframe 3D models (Tripo-generated, textured). Each model's spinnable
+    rotors are grouped under `prop_*` pivot nodes so they spin in place; the spin
+    axis differs by airframe (copters spin their rotors about local Y, a plane's
+    tractor prop about the fuselage Z). Loaded once, cloned per vehicle. */
+interface ModelDef {
+  url: string;
+  /** Yaw (rad) so the model's nose faces -Z (forward) at yaw 0. */
+  yaw: number;
+  /** Local axis the `prop_*` nodes spin about. */
+  spinAxis: 'x' | 'y' | 'z';
+}
+const MODEL_DEFS: Record<ModelKey, ModelDef> = {
+  quad: { url: new URL('../../assets/models/quadrotor-split.glb', import.meta.url).href, yaw: 0, spinAxis: 'y' },
+  plane: { url: new URL('../../assets/models/plane.glb', import.meta.url).href, yaw: Math.PI, spinAxis: 'z' },
+  hexa: { url: new URL('../../assets/models/hexacopter.glb', import.meta.url).href, yaw: 0, spinAxis: 'y' },
+  // Rover: single fused mesh (no spinnable parts); long axis is +X, so yaw +90°
+  // points it forward (-Z). Tweak to -π/2 if it drives tail-first.
+  rover: { url: new URL('../../assets/models/rover.glb', import.meta.url).href, yaw: Math.PI / 2, spinAxis: 'y' },
+};
+/** Models actually loaded up front: the fallback plus every mapped model. */
+const ACTIVE_MODELS: ModelKey[] = Array.from(new Set<ModelKey>([FALLBACK_MODEL, ...(Object.values(CLASS_MODEL) as ModelKey[])]));
+/** Target largest-horizontal span in metres (exaggerated so it reads at distance). */
+const MODEL_TARGET_SPAN = 3.0;
 
 export type SimCameraMode = 'chase' | 'orbit' | 'topdown' | 'fpv';
 
@@ -38,6 +64,9 @@ export interface SimVehicleFrame {
   label?: string;
   /** The active/selected vehicle — camera follows it and a ground ring marks it. */
   active?: boolean;
+  /** ArduPilot vehicle class ('copter' | 'plane' | 'vtol' | 'rover' | 'sub'),
+      picks the 3D model (quad fallback). Undefined → quad. */
+  vehicleClass?: string;
 }
 
 /** A mission waypoint expressed in local NED metres from home. */
@@ -100,6 +129,11 @@ const COLOR_DISARMED = 0x38bdf8; // sky blue
 const TRAIL_MAX_POINTS = 800;
 /** Visual scale of the quad in metres (exaggerated so it reads at distance). */
 const QUAD_SCALE = 2.2;
+/** Use the loaded GLB models (with spinning props); false falls back to the
+    procedural quad for every vehicle. */
+const USE_VEHICLE_MODEL = true;
+/** Prop spin rate (rad/frame) when armed; alternate sign gives counter-rotation. */
+const PROP_SPIN = 1.1;
 
 function nedToThree(pos: [number, number, number], out: THREE.Vector3): THREE.Vector3 {
   return out.set(pos[1], -pos[2], -pos[0]);
@@ -112,9 +146,16 @@ function nedGroundToThree(north: number, east: number, out: THREE.Vector3): THRE
 
 interface VehicleObjects {
   group: THREE.Group;
+  /** Sub-group holding the frame visual (model or primitives); child of `group`. */
+  frame: THREE.Group;
+  usesModel: boolean;
+  /** Model this vehicle's frame is currently showing (which template to swap in). */
+  modelKey: ModelKey;
+  /** Local axis the model's prop nodes spin about ('y' for the procedural quad). */
+  spinAxis: 'x' | 'y' | 'z';
   bodyMat: THREE.MeshStandardMaterial;
   ledMat: THREE.MeshStandardMaterial;
-  props: THREE.Mesh[];
+  props: THREE.Object3D[];
   shadow: THREE.Mesh;
   trail: THREE.Line;
   trailGeom: THREE.BufferGeometry;
@@ -305,32 +346,71 @@ export function createSimWorldScene(canvas: HTMLCanvasElement): SimWorldScene {
   const propMat = new THREE.MeshStandardMaterial({ color: 0x0f1115, roughness: 0.4, transparent: true, opacity: 0.55 });
   const sharedMats = [darkMat, propMat];
 
-  const vehicles = new Map<string, VehicleObjects>();
+  // ─── Loaded vehicle model (replaces the procedural frame once it's ready) ─────
+  // Small per-vehicle extras layered onto the model: an armed/disarmed state
+  // beacon and a faint identity-coloured underglow disc (the model's own colours
+  // are fixed, so these carry state + fleet identity).
+  const stateLedGeom = new THREE.SphereGeometry(QUAD_SCALE * 0.09, 12, 10);
+  const glowGeom = new THREE.CircleGeometry(QUAD_SCALE * 0.7, 28);
+  const modelSharedGeoms = [stateLedGeom, glowGeom];
+  /** A loaded model: centred horizontally + rested on the ground (bottom at y=0),
+      scaled to the target span. `topY` is the scaled height (for the state beacon). */
+  interface Template { group: THREE.Group; spinAxis: 'x' | 'y' | 'z'; topY: number }
+  const templates = new Map<ModelKey, Template>();
+  /** Vehicles still on the procedural fallback, waiting for their model to load. */
+  const pendingModels: VehicleObjects[] = [];
 
-  function createVehicle(id: string, armed: boolean, colorHex: string, label: string): VehicleObjects {
-    const group = new THREE.Group();
-    group.rotation.order = 'YXZ';
+  /** Fill a frame with a clone of a model template, collect its spinnable prop
+      nodes, and add the state beacon (at the model's top) + identity underglow. */
+  function buildModelFrame(
+    frame: THREE.Group,
+    bodyMat: THREE.MeshStandardMaterial,
+    ledMat: THREE.MeshStandardMaterial,
+    props: THREE.Object3D[],
+    template: Template,
+  ): void {
+    const model = template.group.clone(true);
+    frame.add(model);
+    // Prop discs are separate `prop_*` nodes with hub-centred pivots; collect the
+    // outermost match per prop so render() can spin each in place (skip nested
+    // matches to avoid double-spin).
+    model.traverse((o) => {
+      if (!/^prop_/i.test(o.name)) return;
+      for (let p = o.parent; p && p !== model; p = p.parent) {
+        if (/^prop_/i.test(p.name)) return;
+      }
+      props.push(o);
+    });
+    // State beacon just above the model's top (scales with the model, not fixed).
+    const led = new THREE.Mesh(stateLedGeom, ledMat);
+    led.position.set(0, template.topY + QUAD_SCALE * 0.12, 0);
+    frame.add(led);
+    // Identity underglow at the base (model rests on the ground plane).
+    const glow = new THREE.Mesh(glowGeom, bodyMat);
+    glow.rotation.x = -Math.PI / 2;
+    glow.position.y = 0.05;
+    frame.add(glow);
+  }
 
-    const accent = armed ? COLOR_ARMED : COLOR_DISARMED;
-    const identity = new THREE.Color(colorHex);
-    // Body wears the identity colour (darkened a touch so the bright state LED
-    // still pops against it); the LED/nose/front props keep the armed accent.
-    const bodyMat = new THREE.MeshStandardMaterial({ color: identity.clone().multiplyScalar(0.7), roughness: 0.5, metalness: 0.35 });
-    const ledMat = new THREE.MeshStandardMaterial({ color: accent, emissive: accent, emissiveIntensity: 0.9 });
-
+  /** Fallback frame built from primitives — shown until the model loads, or if it fails. */
+  function buildProceduralFrame(
+    frame: THREE.Group,
+    bodyMat: THREE.MeshStandardMaterial,
+    ledMat: THREE.MeshStandardMaterial,
+    props: THREE.Object3D[],
+  ): void {
     // Central body + canopy + nose (nose points -Z = forward/north at yaw 0).
     const body = new THREE.Mesh(bodyGeom, bodyMat);
-    group.add(body);
+    frame.add(body);
     const canopy = new THREE.Mesh(canopyGeom, darkMat);
     canopy.position.y = QUAD_SCALE * 0.09;
-    group.add(canopy);
+    frame.add(canopy);
     const nose = new THREE.Mesh(noseGeom, ledMat);
     nose.rotation.x = Math.PI / 2; // point -Z
     nose.position.set(0, 0, -QUAD_SCALE * 0.42);
-    group.add(nose);
+    frame.add(nose);
 
     // Two crossing arms (X config); motors + props at the four ends.
-    const props: THREE.Mesh[] = [];
     const corners: Array<[number, number, boolean]> = [
       [1, -1, true], // front-right (forward = -z)
       [-1, -1, true], // front-left
@@ -340,24 +420,112 @@ export function createSimWorldScene(canvas: HTMLCanvasElement): SimWorldScene {
     for (const ang of [Math.PI / 4, -Math.PI / 4]) {
       const arm = new THREE.Mesh(armGeom, darkMat);
       arm.rotation.y = ang;
-      group.add(arm);
+      frame.add(arm);
     }
     const r = QUAD_SCALE * 0.49;
     for (const [sx, sz, front] of corners) {
       const motor = new THREE.Mesh(motorGeom, darkMat);
       motor.position.set(sx * r, QUAD_SCALE * 0.06, sz * r);
-      group.add(motor);
+      frame.add(motor);
       const prop = new THREE.Mesh(propGeom, front ? ledMat : propMat);
       prop.position.set(sx * r, QUAD_SCALE * 0.16, sz * r);
       props.push(prop);
-      group.add(prop);
+      frame.add(prop);
     }
 
     // Landing legs.
     for (const [sx, sz] of [[1, 1], [1, -1], [-1, 1], [-1, -1]] as Array<[number, number]>) {
       const leg = new THREE.Mesh(legGeom, darkMat);
       leg.position.set(sx * QUAD_SCALE * 0.2, -QUAD_SCALE * 0.2, sz * QUAD_SCALE * 0.2);
-      group.add(leg);
+      frame.add(leg);
+    }
+  }
+
+  /** Swap a vehicle from its current frame onto model `key` (must be loaded). */
+  function installModel(v: VehicleObjects, key: ModelKey): boolean {
+    const tpl = templates.get(key);
+    if (!tpl) return false;
+    for (let i = v.frame.children.length - 1; i >= 0; i--) v.frame.remove(v.frame.children[i]!);
+    v.props.length = 0;
+    buildModelFrame(v.frame, v.bodyMat, v.ledMat, v.props, tpl);
+    v.usesModel = true;
+    v.spinAxis = tpl.spinAxis;
+    v.modelKey = key;
+    return true;
+  }
+
+  if (USE_VEHICLE_MODEL) {
+    const loader = new GLTFLoader();
+    for (const key of ACTIVE_MODELS) {
+      const def = MODEL_DEFS[key];
+      loader.load(
+        def.url,
+        (gltf) => {
+          const model = gltf.scene;
+          model.rotation.y = def.yaw;
+          model.updateMatrixWorld(true);
+          // Centre at the origin and scale to the target span (children keep their
+          // local transforms, so prop hubs stay put and spin in place).
+          const box = new THREE.Box3().setFromObject(model);
+          const size = box.getSize(new THREE.Vector3());
+          const center = box.getCenter(new THREE.Vector3());
+          const s = MODEL_TARGET_SPAN / Math.max(size.x, size.z, 1e-3);
+          model.scale.setScalar(s);
+          // Centre horizontally, but rest the model ON the ground (bottom at y=0)
+          // rather than centring it vertically - else tall models (rover mast,
+          // hexa gimbal) sink half-underground when landed and read as a pole.
+          model.position.set(-center.x * s, -box.min.y * s, -center.z * s);
+          templates.set(key, { group: model, spinAxis: def.spinAxis, topY: size.y * s });
+          // Swap this model into any vehicles that spawned before it loaded.
+          for (let i = pendingModels.length - 1; i >= 0; i--) {
+            const v = pendingModels[i]!;
+            if (v.modelKey !== key) continue;
+            installModel(v, key);
+            pendingModels.splice(i, 1);
+          }
+        },
+        undefined,
+        (err) => console.error(`[sim-world] model '${key}' failed to load; using fallback`, err),
+      );
+    }
+  }
+
+  const vehicles = new Map<string, VehicleObjects>();
+
+  function createVehicle(id: string, armed: boolean, colorHex: string, label: string, vehicleClass?: string): VehicleObjects {
+    const group = new THREE.Group();
+    group.rotation.order = 'YXZ';
+
+    const accent = armed ? COLOR_ARMED : COLOR_DISARMED;
+    const identity = new THREE.Color(colorHex);
+    // Identity colour drives the body / underglow disc; the LED beacon keeps the
+    // armed/disarmed accent so state still reads at a glance against the model.
+    const bodyMat = new THREE.MeshStandardMaterial({
+      color: identity.clone().multiplyScalar(0.7),
+      emissive: identity.clone().multiplyScalar(0.45),
+      emissiveIntensity: 0.7,
+      roughness: 0.5,
+      metalness: 0.35,
+    });
+    const ledMat = new THREE.MeshStandardMaterial({ color: accent, emissive: accent, emissiveIntensity: 0.9 });
+
+    // The frame visual lives under `group` (which carries position + attitude):
+    // the loaded model once ready, otherwise the primitive fallback + a swap request.
+    const frame = new THREE.Group();
+    group.add(frame);
+    const props: THREE.Object3D[] = [];
+    // Pick the model for this airframe class (quad fallback). Build it now if the
+    // template is loaded, else show the procedural quad and queue a swap-in.
+    const modelKey = modelKeyForClass(vehicleClass);
+    const tpl = USE_VEHICLE_MODEL ? templates.get(modelKey) : undefined;
+    let usesModel = false;
+    let spinAxis: 'x' | 'y' | 'z' = 'y';
+    if (tpl) {
+      buildModelFrame(frame, bodyMat, ledMat, props, tpl);
+      usesModel = true;
+      spinAxis = tpl.spinAxis;
+    } else {
+      buildProceduralFrame(frame, bodyMat, ledMat, props);
     }
 
     scene.add(group);
@@ -410,8 +578,8 @@ export function createSimWorldScene(canvas: HTMLCanvasElement): SimWorldScene {
     selRing.visible = false;
     scene.add(selRing);
 
-    return {
-      group, bodyMat, ledMat, props, shadow,
+    const v: VehicleObjects = {
+      group, frame, usesModel, modelKey, spinAxis, bodyMat, ledMat, props, shadow,
       trail, trailGeom, trailPositions, trailCount: 0, trailMat,
       dropLine, dropGeom,
       labelSprite, labelTexture, labelCanvas, labelText: label, colorHex,
@@ -421,9 +589,14 @@ export function createSimWorldScene(canvas: HTMLCanvasElement): SimWorldScene {
       lastPos: new THREE.Vector3(),
       armed,
     };
+    // If its model wasn't ready, keep the procedural frame and queue a swap-in.
+    if (USE_VEHICLE_MODEL && !usesModel) pendingModels.push(v);
+    return v;
   }
 
   function disposeVehicle(v: VehicleObjects): void {
+    const pi = pendingModels.indexOf(v);
+    if (pi >= 0) pendingModels.splice(pi, 1); // don't swap a model into a disposed vehicle
     scene.remove(v.group, v.trail, v.dropLine, v.shadow, v.labelSprite, v.selRing);
     for (const d of v.disposables) d.dispose();
   }
@@ -434,6 +607,7 @@ export function createSimWorldScene(canvas: HTMLCanvasElement): SimWorldScene {
     v.colorHex = colorHex;
     const identity = new THREE.Color(colorHex);
     v.bodyMat.color.copy(identity).multiplyScalar(0.7);
+    v.bodyMat.emissive.copy(identity).multiplyScalar(0.45);
     v.trailMat.color.copy(identity);
     (v.selRing.material as THREE.MeshBasicMaterial).color.copy(identity);
     drawLabel(v.labelCanvas, v.labelTexture, v.labelText, colorHex);
@@ -593,7 +767,7 @@ export function createSimWorldScene(canvas: HTMLCanvasElement): SimWorldScene {
         const colorHex = f.color ?? '#38bdf8';
         let v = vehicles.get(f.id);
         if (!v) {
-          v = createVehicle(f.id, !!f.armed, colorHex, f.label ?? f.id);
+          v = createVehicle(f.id, !!f.armed, colorHex, f.label ?? f.id, f.vehicleClass);
           vehicles.set(f.id, v);
         } else {
           retintVehicle(v, colorHex);
@@ -601,6 +775,10 @@ export function createSimWorldScene(canvas: HTMLCanvasElement): SimWorldScene {
             v.labelText = f.label;
             drawLabel(v.labelCanvas, v.labelTexture, f.label, v.colorHex);
           }
+          // Class can arrive/refine after first sighting (mavType + Q_ENABLE settle
+          // a beat after connect); upgrade the model in place when it changes.
+          const wantKey = modelKeyForClass(f.vehicleClass);
+          if (v.modelKey !== wantKey && templates.has(wantKey)) installModel(v, wantKey);
         }
         if (f.active) activeId = f.id;
 
@@ -662,11 +840,11 @@ export function createSimWorldScene(canvas: HTMLCanvasElement): SimWorldScene {
     },
 
     render() {
-      // Spin props on armed vehicles for a sense of life.
+      // Spin props on armed vehicles for a sense of life (counter-rotate alternates).
       for (const v of vehicles.values()) {
         if (!v.armed) continue;
         for (let i = 0; i < v.props.length; i++) {
-          v.props[i]!.rotation.y += i % 2 === 0 ? 0.9 : -0.9;
+          v.props[i]!.rotation[v.spinAxis] += i % 2 === 0 ? PROP_SPIN : -PROP_SPIN;
         }
       }
       updateCamera();
@@ -716,6 +894,17 @@ export function createSimWorldScene(canvas: HTMLCanvasElement): SimWorldScene {
       clearOverlay();
       for (const g of sharedGeoms) g.dispose();
       for (const m of sharedMats) m.dispose();
+      for (const g of modelSharedGeoms) g.dispose();
+      // Release each loaded template's shared geometry/materials (cloned per vehicle).
+      for (const { group } of templates.values()) {
+        group.traverse((o) => {
+          const mesh = o as THREE.Mesh;
+          if (!mesh.isMesh) return;
+          mesh.geometry.dispose();
+          const mat = mesh.material;
+          (Array.isArray(mat) ? mat : [mat]).forEach((m) => m.dispose());
+        });
+      }
       for (const m of overlayMats) (m as THREE.Material | THREE.BufferGeometry).dispose();
       skyGeom.dispose();
       skyMat.dispose();
