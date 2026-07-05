@@ -71,6 +71,23 @@ export interface ArduPilotSitlStore {
   /** Setter (single call to preserve atomicity of the pair). */
   setCustomFrame: (path: string | undefined, motors: number | undefined) => void;
 
+  // ArduDeck in-app simulator (Phase 5 turnkey UX). When enabled, SITL launches
+  // against our own 6DOF physics (sim-engine) instead of its built-in FDM. The
+  // fidelity flags below shape that physics; they're forwarded at SITL-start
+  // time only (the start path already relays config to the engine).
+  /** Use ArduDeck's in-app simulator as SITL's external FDM. */
+  useArduDeckSim: boolean;
+  /** Wind intensity 0..1 (0 = calm). */
+  simWindIntensity: number;
+  /** Inject realistic IMU/GPS sensor noise. */
+  simSensorNoise: boolean;
+  /** Model battery voltage sag under load. */
+  simBatterySag: boolean;
+  setUseArduDeckSim: (on: boolean) => void;
+  setSimWindIntensity: (v: number) => void;
+  setSimSensorNoise: (on: boolean) => void;
+  setSimBatterySag: (on: boolean) => void;
+
   // RC State
   isRcSending: boolean;
   rcState: VirtualRCState;
@@ -259,6 +276,16 @@ export const useArduPilotSitlStore = create<ArduPilotSitlStore>()(
       setCustomFrame: (path, motors) => set({ customFramePath: path, customFrameMotors: motors }),
       simAddress: '127.0.0.1',
 
+      // ArduDeck in-app simulator + fidelity (Phase 5)
+      useArduDeckSim: false,
+      simWindIntensity: 0,
+      simSensorNoise: false,
+      simBatterySag: false,
+      setUseArduDeckSim: (on) => set({ useArduDeckSim: on }),
+      setSimWindIntensity: (v) => set({ simWindIntensity: Math.max(0, Math.min(1, v)) }),
+      setSimSensorNoise: (on) => set({ simSensorNoise: on }),
+      setSimBatterySag: (on) => set({ simBatterySag: on }),
+
       isRcSending: false,
       rcState: DEFAULT_RC_STATE,
 
@@ -355,6 +382,9 @@ export const useArduPilotSitlStore = create<ArduPilotSitlStore>()(
             simBattCapAh: simBattCapAh > 0 ? simBattCapAh : undefined,
             customFramePath,
             customFrameMotors,
+            // Custom sim engine is shelved — SITL always uses built-in physics.
+            // Never request the engine, even if a stale persisted flag is true.
+            useArduDeckSim: undefined,
           };
 
           const result = await window.electronAPI.ardupilotSitlStart(config);
@@ -787,6 +817,11 @@ export const useArduPilotSitlStore = create<ArduPilotSitlStore>()(
         // pair so the next launch knows which one to stage.
         customFramePath: state.customFramePath,
         customFrameMotors: state.customFrameMotors,
+        // ArduDeck in-app sim selection + fidelity preferences.
+        useArduDeckSim: state.useArduDeckSim,
+        simWindIntensity: state.simWindIntensity,
+        simSensorNoise: state.simSensorNoise,
+        simBatterySag: state.simBatterySag,
         // Remember auto-upgrades so a frame that crashes on stable goes
         // straight to dev on subsequent runs without the user seeing it.
         autoUpgradedFrames: state.autoUpgradedFrames,

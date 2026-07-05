@@ -8,6 +8,11 @@ interface NavItem {
   label: string;
   icon: React.ReactNode;
   disabled?: boolean;
+  /**
+   * When set, clicking the item runs this instead of switching the active view.
+   * Reserved for items that open a pop-out window rather than rendering inline.
+   */
+  action?: () => void;
 }
 
 const navItems: NavItem[] = [
@@ -78,7 +83,7 @@ const navItems: NavItem[] = [
   },
   {
     id: 'osd',
-    label: 'OSD Simulator',
+    label: 'OSD Tool',
     icon: (
       <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
@@ -217,7 +222,7 @@ export function NavigationRail({ onViewChange }: NavigationRailProps) {
       {visibleNavItems.map((item) => (
         <button
           key={item.id}
-          onClick={() => !item.disabled && handleClick(item.id)}
+          onClick={() => !item.disabled && (item.action ? item.action() : handleClick(item.id))}
           disabled={item.disabled}
           className={`
             relative w-10 h-10 rounded-lg flex items-center justify-center

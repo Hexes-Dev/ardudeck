@@ -75,3 +75,40 @@ describe('generateCorridor', () => {
     expect(inverted.waypoints.length).toBe(base.waypoints.length);
   });
 });
+
+describe('generateCorridor with branches', () => {
+  // A spur forking north from the midpoint of STRAIGHT.
+  const BRANCH: LatLng[] = [
+    { lat: 0, lng: 0.0025 },
+    { lat: 0.003, lng: 0.0025 },
+  ];
+
+  it('a branch adds waypoints beyond the main centerline', () => {
+    const main = generateCorridor(config(STRAIGHT, { corridorStrips: 2 }));
+    const branched = generateCorridor(config(STRAIGHT, { corridorStrips: 2, corridorBranches: [BRANCH] }));
+    expect(branched.waypoints.length).toBeGreaterThan(main.waypoints.length);
+    expect(allFinite(branched.waypoints)).toBe(true);
+  });
+
+  it('sums line count and photo count across main + branches', () => {
+    const main = generateCorridor(config(STRAIGHT, { corridorStrips: 2 }));
+    const branched = generateCorridor(config(STRAIGHT, { corridorStrips: 2, corridorBranches: [BRANCH] }));
+    // Two centerlines, 2 strips each.
+    expect(branched.stats.lineCount).toBe(main.stats.lineCount * 2);
+    expect(branched.stats.photoCount).toBeGreaterThanOrEqual(main.stats.photoCount);
+    expect(branched.stats.areaCovered).toBeGreaterThan(main.stats.areaCovered);
+  });
+
+  it('ignores degenerate branches (fewer than 2 points)', () => {
+    const main = generateCorridor(config(STRAIGHT, { corridorStrips: 2 }));
+    const withJunk = generateCorridor(config(STRAIGHT, { corridorStrips: 2, corridorBranches: [[{ lat: 1, lng: 1 }]] }));
+    expect(withJunk.waypoints.length).toBe(main.waypoints.length);
+  });
+
+  it('empty branches array is identical to no branches', () => {
+    const a = generateCorridor(config(STRAIGHT, { corridorStrips: 3 }));
+    const b = generateCorridor(config(STRAIGHT, { corridorStrips: 3, corridorBranches: [] }));
+    expect(b.waypoints.length).toBe(a.waypoints.length);
+    expect(b.stats.lineCount).toBe(a.stats.lineCount);
+  });
+});

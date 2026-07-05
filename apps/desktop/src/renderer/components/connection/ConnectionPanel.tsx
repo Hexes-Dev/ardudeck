@@ -10,6 +10,7 @@ import { DriverAssistant } from './DriverAssistant';
 import { RecentConnectionsButton } from './RecentConnectionsButton';
 import type { SavedConnection } from '../../stores/settings-store';
 import { MessagesPanel } from '../panels/MessagesPanel';
+import { MultiVehiclePanel } from './MultiVehiclePanel';
 
 const BAUD_RATES = [1500000, 921600, 460800, 230400, 115200, 57600, 38400, 19200, 9600];
 
@@ -17,6 +18,7 @@ export function ConnectionPanel() {
   const { connectionState, isConnecting, error, connect, disconnect, setError } = useConnectionStore();
   const { connectionMemory, updateConnectionMemory, removeRecentConnection } = useSettingsStore();
   const settingsInitialized = useSettingsStore((s) => s._isInitialized);
+  const [connectionTab, setConnectionTab] = useState<'single' | 'multi'>('single');
   const [ports, setPorts] = useState<SerialPortInfo[]>([]);
   const [isRefreshingPorts, setIsRefreshingPorts] = useState(false);
   const [selectedPort, setSelectedPort] = useState('');
@@ -389,7 +391,27 @@ export function ConnectionPanel() {
         </h2>
       </div>
 
+      {/* Single vs multi-vehicle tabs */}
+      <div className="flex items-center gap-1 px-3 pt-3 border-b border-subtle">
+        {(['single', 'multi'] as const).map((tab) => (
+          <button
+            key={tab}
+            onClick={() => setConnectionTab(tab)}
+            className={`px-3 py-2 text-xs font-medium rounded-t-lg border-b-2 transition-colors ${
+              connectionTab === tab
+                ? 'border-cyan-400 text-content'
+                : 'border-transparent text-content-secondary hover:text-content'
+            }`}
+          >
+            {tab === 'single' ? 'Single vehicle' : 'Multi-vehicle'}
+          </button>
+        ))}
+      </div>
+
       <div className="flex-1 overflow-y-auto p-5 space-y-5">
+        {connectionTab === 'multi' && <MultiVehiclePanel />}
+
+        {connectionTab === 'single' && <>
         {/* SITL Quick Start - only show when not connected */}
         {!connectionState.isConnected && !connectionState.isWaitingForHeartbeat && (
           <div className="space-y-0">
@@ -1005,6 +1027,7 @@ export function ConnectionPanel() {
             )}
           </div>
         )}
+        </>}
       </div>
     </div>
   );

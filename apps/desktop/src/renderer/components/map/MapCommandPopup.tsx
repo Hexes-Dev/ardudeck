@@ -7,6 +7,7 @@ import type { MapCommand } from './map-command-types';
 import { useScriptHealth } from '../script-installer/useScriptHealth';
 import { useSettingsStore } from '../../stores/settings-store';
 import { useConnectionStore } from '../../stores/connection-store';
+import { useActiveVehicleStore } from '../../stores/active-vehicle-store';
 import { mavTypeToTacticalClass, type TacticalVehicleClass } from './tactical-icon-pool';
 import { ScriptInstallModal } from '../script-installer/ScriptInstallModal';
 import {
@@ -141,9 +142,13 @@ export const MapCommandPopup: React.FC<MapCommandPopupProps> = ({
   const verticalSpeedUnit = useSettingsStore(s => s.unitPreferences.verticalSpeed);
   const scriptHealthy = scriptHealth.status === 'present';
 
-  // Vehicle-class gating. When mavType is unknown (early connect / no link),
-  // default to copter behavior so power users on flaky links don't lose access.
-  const mavType = useConnectionStore(s => s.connectionState.mavType);
+  // Vehicle-class gating. Prefer the ACTIVE/selected fleet vehicle's type so
+  // commanding a fixed-wing fleet marker offers plane commands, not the idle
+  // primary link's copter default. When unknown (early connect / no link),
+  // default to copter so power users on flaky links don't lose access.
+  const activeMavType = useActiveVehicleStore(s => (s.activeVehicleKey ? s.knownVehicles[s.activeVehicleKey]?.mavType : undefined));
+  const connMavType = useConnectionStore(s => s.connectionState.mavType);
+  const mavType = activeMavType ?? connMavType;
   const vehicleClass = useMemo<TacticalVehicleClass>(
     () => mavType === undefined ? 'copter' : mavTypeToTacticalClass(mavType),
     [mavType],

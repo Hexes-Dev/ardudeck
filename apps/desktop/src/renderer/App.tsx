@@ -23,7 +23,13 @@ import { LogsView } from './components/logs/LogsView';
 import { MavlinkInspectorView } from './components/inspector/MavlinkInspectorView';
 import { setupWorkspaceSync } from './stores/workspace-store';
 import { startInspector } from './stores/inspector-store';
+import { startSafetyMonitor, refreshContext as refreshSafetyMonitorContext } from './safety-monitor/source';
 import { useConnectionStore } from './stores/connection-store';
+import { useActiveVehicleSync } from './hooks/useActiveVehicleSync';
+import { useActiveVehicleIdentity } from './hooks/useFleet';
+import { useActiveVehicleStore } from './stores/active-vehicle-store';
+import { useFleetTelemetryStore } from './stores/fleet-telemetry-store';
+import { shouldMirrorToSharedStore } from './lib/telemetry-routing';
 import { useCalibrationStore } from './stores/calibration-store';
 import { useTelemetryStore } from './stores/telemetry-store';
 import { useNavigationStore, isViewId, type ViewId } from './stores/navigation-store';
@@ -49,6 +55,7 @@ import { SitlAutoApplyWatcher } from './components/settings/vehicle-profile/Sitl
 import { ProfileApplyOverlay } from './components/settings/vehicle-profile/ProfileApplyOverlay';
 import { ParameterCompareModalRoot } from './components/parameters/ParameterCompareModalRoot';
 import { GlobalTooltip } from './components/GlobalTooltip';
+import { FleetMinimap } from './components/fleet/FleetMinimap';
 import { ActivityIndicator } from './components/ui/ActivityIndicator';
 import type { ElectronAPI } from '../main/preload';
 import logoImage from './assets/logo.png';
@@ -57,7 +64,7 @@ import logoImage from './assets/logo.png';
 // vehicle - the welcome screen only shows while disconnected. Add a card by
 // appending here; the grid renders them generically. Static class strings keep
 // them Tailwind-purge-safe (no dynamically built class names).
-type WelcomeCardColor = 'orange' | 'teal' | 'purple' | 'blue' | 'amber' | 'indigo';
+type WelcomeCardColor = 'orange' | 'teal' | 'purple' | 'blue' | 'amber' | 'indigo' | 'emerald';
 
 const WELCOME_CARD_STYLES: Record<WelcomeCardColor, { border: string; ring: string; iconBg: string; iconText: string }> = {
   orange: { border: 'hover:border-orange-500/40', ring: 'focus:ring-orange-500/40', iconBg: 'bg-orange-500/10', iconText: 'text-orange-400' },
@@ -66,6 +73,7 @@ const WELCOME_CARD_STYLES: Record<WelcomeCardColor, { border: string; ring: stri
   blue: { border: 'hover:border-blue-500/40', ring: 'focus:ring-blue-500/40', iconBg: 'bg-blue-500/10', iconText: 'text-blue-400' },
   amber: { border: 'hover:border-amber-500/40', ring: 'focus:ring-amber-500/40', iconBg: 'bg-amber-500/10', iconText: 'text-amber-400' },
   indigo: { border: 'hover:border-indigo-500/40', ring: 'focus:ring-indigo-500/40', iconBg: 'bg-indigo-500/10', iconText: 'text-indigo-400' },
+  emerald: { border: 'hover:border-emerald-500/40', ring: 'focus:ring-emerald-500/40', iconBg: 'bg-emerald-500/10', iconText: 'text-emerald-400' },
 };
 
 interface WelcomeCard {
@@ -84,6 +92,7 @@ const WELCOME_CARDS: WelcomeCard[] = [
   { title: 'Area Editor', desc: 'Draw mission areas on a live map', color: 'teal', badge: 'New', run: () => { window.electronAPI?.openAreaEditor?.().catch(() => undefined); }, iconPath: 'M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z' },
   { title: 'Firmware Flash', desc: 'Flash firmware over USB or DFU', color: 'amber', view: 'firmware', iconPath: 'M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z' },
   { title: 'SITL Simulator', desc: 'Test firmware without hardware', color: 'purple', view: 'sitl', iconPath: 'M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z' },
+  { title: '3D Sim World', desc: 'Fly SITL in a persistent 3D world', color: 'emerald', badge: 'New', run: () => { window.electronAPI?.openDetachedWindow?.({ componentId: 'sim-world', title: '3D Sim World', initialBounds: { width: 1280, height: 800 } }); }, iconPath: 'M21 12a9 9 0 11-18 0 9 9 0 0118 0zM3.6 9h16.8M3.6 15h16.8M12 3a15 15 0 010 18M12 3a15 15 0 000 18' },
   { title: 'Flight Log Analysis', desc: 'AI-powered flight log review', color: 'blue', view: 'logs', iconPath: 'M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z' },
   { title: 'Mission Library', desc: 'Browse & manage saved plans', color: 'indigo', view: 'library', iconPath: 'M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253' },
 ];
@@ -178,6 +187,8 @@ function VehicleMismatchDialog({
 
 function CollapsedSidebar({ onExpand }: { onExpand: () => void }) {
   const { connectionState } = useConnectionStore();
+  // Status chrome follows the active fleet vehicle, not the idle primary link.
+  const identity = useActiveVehicleIdentity();
 
   const handleDisconnect = async () => {
     await window.electronAPI?.disconnect();
@@ -196,22 +207,23 @@ function CollapsedSidebar({ onExpand }: { onExpand: () => void }) {
         </svg>
       </button>
 
-      {/* Connection status indicator */}
+      {/* Connection status indicator (fleet-aware: lit when a fleet is live too) */}
       <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
-        connectionState.isConnected
+        identity.connected
           ? 'bg-emerald-500/20 border border-emerald-500/30'
           : 'bg-surface-raised border border-subtle'
       }`}>
         <div className={`w-2.5 h-2.5 rounded-full ${
-          connectionState.isConnected ? 'bg-emerald-400' : 'bg-gray-500'
+          identity.connected ? 'bg-emerald-400' : 'bg-gray-500'
         }`} />
       </div>
 
-      {/* System ID */}
-      {connectionState.isConnected && connectionState.systemId && (
+      {/* Active vehicle identity (SYS id of the selected fleet vehicle, or the
+          fleet size when nothing is selected) */}
+      {identity.connected && identity.label && (
         <div className="text-center">
-          <div className="text-[10px] text-content-secondary uppercase">SYS</div>
-          <div className="text-sm font-mono text-content">{connectionState.systemId}</div>
+          <div className="text-[10px] text-content-secondary uppercase">{identity.sysid !== null ? 'SYS' : ''}</div>
+          <div className="text-sm font-mono text-content">{identity.sysid !== null ? identity.sysid : identity.label}</div>
         </div>
       )}
 
@@ -234,7 +246,20 @@ function CollapsedSidebar({ onExpand }: { onExpand: () => void }) {
 }
 
 function App() {
+  // Mirror the main-process connection registry into the active-vehicle store
+  // (vehicle discovery/loss, active selection). Single-vehicle behavior is
+  // unchanged - the store auto-promotes the first discovered vehicle.
+  useActiveVehicleSync();
+
   const { connectionState, setConnectionState } = useConnectionStore();
+  // A multi-vehicle/swarm fleet connects over background transports that never
+  // set the primary `isConnected` flag. Treat "the fleet exists" as connected for
+  // view-routing + status, so the dashboard stays up. We key off the known-vehicle
+  // COUNT (not the active selection) so DESELECTING a vehicle keeps you on the
+  // telemetry page with nothing selected, instead of bouncing to the Welcome screen.
+  const activeVehicleKey = useActiveVehicleStore((s) => s.activeVehicleKey);
+  const fleetVehicleCount = useActiveVehicleStore((s) => Object.keys(s.knownVehicles).length);
+  const isConnected = connectionState.isConnected || activeVehicleKey !== null || fleetVehicleCount > 0;
   const { updateAttitude, updatePosition, updateGps, updateBattery, updateVfrHud, updateFlight, updateBatch, reset } = useTelemetryStore();
   const addStatusMessage = useMessagesStore((s) => s.addMessage);
   const clearMessages = useMessagesStore((s) => s.clear);
@@ -402,6 +427,7 @@ function App() {
   // are idempotent — safe across hot-reloads.
   useEffect(() => {
     startInspector();
+    startSafetyMonitor();
     const cleanup = setupWorkspaceSync();
     return cleanup;
   }, []);
@@ -451,6 +477,9 @@ function App() {
         }
         // Auto-download mission from flight controller
         fetchMission();
+        // Refresh the safety monitor's parameter context (IMAX / AHRS_TRIM /
+        // GCS_PID_MASK) so the integrator gauges and PID signals are scaled.
+        void refreshSafetyMonitorContext();
       }, 500);
       return () => clearTimeout(timer);
     }
@@ -521,9 +550,30 @@ function App() {
   }, [setConnectionState, reset, resetParameters, resetMission, resetFence, resetRally, resetLegacyConfig, resetCli, stopOverride, resetFlightControl, resetCalibration, clearMessages]);
 
   // Batched telemetry handler (preferred - single IPC message, single store update)
+  const firstSeenVehicleKeyRef = useRef<string | null>(null);
   useEffect(() => {
     const unsubscribe = window.electronAPI?.onTelemetryBatch((batch) => {
-      updateBatch(batch);
+      const vehicleKey = batch.__vehicleKey ?? '__primary__';
+      // Always accumulate per-vehicle telemetry for the fleet strip / map.
+      const fleet = useFleetTelemetryStore.getState();
+      fleet.applyBatch(vehicleKey, batch);
+      // The flat legacy store (which the map/HUD follow) must reflect exactly ONE
+      // vehicle. Lock it onto the active vehicle, or — before one is selected —
+      // a single fallback vehicle. Without this lock a fleet with no active
+      // vehicle let every vehicle overwrite the store, so the map auto-follow
+      // flew to each one in turn (endless looping over the fleet). The fallback
+      // self-heals: if the locked vehicle drops (or on reconnect) the next batch
+      // adopts a live vehicle, so the shared view never freezes on a stale key.
+      if (vehicleKey !== '__primary__') {
+        const fs = firstSeenVehicleKeyRef.current;
+        if (fs === null || !(fs in fleet.byVehicle)) {
+          firstSeenVehicleKeyRef.current = vehicleKey;
+        }
+      }
+      const activeKey = useActiveVehicleStore.getState().activeVehicleKey;
+      if (shouldMirrorToSharedStore(vehicleKey, activeKey, firstSeenVehicleKeyRef.current)) {
+        updateBatch(batch);
+      }
     });
     return () => { unsubscribe?.(); };
   }, [updateBatch]);
@@ -687,7 +737,7 @@ function App() {
   // never renders App.
   useEffect(() => {
     const unsub = window.electronAPI?.onAreaReceived?.((data) => {
-      useSurveyStore.getState().addSurveyAreaFromPolygon(data.polygon);
+      void useSurveyStore.getState().addSurveyAreaFromPolygon(data.polygon);
       useNavigationStore.getState().setView('mission');
     });
     return () => { unsub?.(); };
@@ -704,13 +754,24 @@ function App() {
       // centerline rather than a filled area.
       const areas = data.areas.map((a) => {
         const base = a.config as Partial<Omit<SurveyConfig, 'polygon' | 'holes'>> | undefined;
+        // The editor's workspace polygon (allowed flight area) rides in via the
+        // config so it lands on SurveyConfig.workspace -> SurveyGroup.workspace.
+        const workspace = a.workspace && a.workspace.length >= 3 ? { workspace: a.workspace } : undefined;
         const configOverride =
           a.kind === 'corridor'
-            ? { ...(base ?? {}), pattern: 'corridor' as const, ...(a.corridorWidth ? { corridorWidth: a.corridorWidth } : {}) }
-            : base;
+            ? {
+                ...(base ?? {}),
+                pattern: 'corridor' as const,
+                ...(a.corridorWidth ? { corridorWidth: a.corridorWidth } : {}),
+                ...(a.corridorBranches && a.corridorBranches.length > 0 ? { corridorBranches: a.corridorBranches } : {}),
+                ...(workspace ?? {}),
+              }
+            : workspace
+              ? { ...(base ?? {}), ...workspace }
+              : base;
         return { polygon: a.polygon, holes: a.holes, name: a.name, configOverride };
       });
-      useSurveyStore.getState().addSurveyAreasFromPolygons(areas);
+      void useSurveyStore.getState().addSurveyAreasFromPolygons(areas);
       useNavigationStore.getState().setView('mission');
     });
     return () => { unsub?.(); };
@@ -718,7 +779,7 @@ function App() {
 
   // Render the appropriate view based on navigation
   const renderMainContent = () => {
-    if (!connectionState.isConnected) {
+    if (!isConnected) {
       // Show view-specific content when disconnected
       if (currentView === 'parameters') {
         return <ParametersView />;
@@ -859,6 +920,7 @@ function App() {
     <AppTourProvider>
     <AppShell>
       <GlobalTooltip />
+      <FleetMinimap />
       <ActivityIndicator />
       <SitlAutoApplyWatcher />
       <ProfileApplyOverlay />

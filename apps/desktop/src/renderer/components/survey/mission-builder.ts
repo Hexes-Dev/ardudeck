@@ -90,11 +90,16 @@ export function surveyToMissionItems(
   // go forward; lines 1,3,5 go reverse.
   const frame = isManual
     ? MAV_FRAME.GLOBAL_RELATIVE_ALT  // rover ignores altitude anyway
-    : config.altitudeReference === 'terrain'
-      ? MAV_FRAME.GLOBAL_TERRAIN_ALT
-      : config.altitudeReference === 'asl'
-        ? MAV_FRAME.GLOBAL
-        : MAV_FRAME.GLOBAL_RELATIVE_ALT;
+    // Continuous terrain-follow bakes absolute (MSL) ground+AGL altitudes into
+    // result.altitudes, so those waypoints must emit in the GLOBAL (ASL) frame
+    // regardless of the altitudeReference toggle.
+    : config.terrainFollow && result.altitudes
+      ? MAV_FRAME.GLOBAL
+      : config.altitudeReference === 'terrain'
+        ? MAV_FRAME.GLOBAL_TERRAIN_ALT
+        : config.altitudeReference === 'asl'
+          ? MAV_FRAME.GLOBAL
+          : MAV_FRAME.GLOBAL_RELATIVE_ALT;
 
   for (let i = 0; i < result.waypoints.length; i++) {
     const wp = result.waypoints[i]!;

@@ -12,7 +12,7 @@ import { Plane, Clock, Ruler, Wind, Camera, RefreshCw } from 'lucide-react';
 import { useMissionStore } from '../../stores/mission-store';
 import { useSurveyStore } from '../../stores/survey-store';
 import { useSettingsStore } from '../../stores/settings-store';
-import { commandHasLocation, hasValidCoordinates } from '../../../shared/mission-types';
+import { commandHasLocation, hasValidCoordinates, mavFrameToAltFrame } from '../../../shared/mission-types';
 import { estimateDataSizeGb } from '../survey/survey-stats';
 import {
   computeMissionBriefing,
@@ -179,7 +179,7 @@ export function FlightInfoPanel() {
     () =>
       missionItems
         .filter((it) => commandHasLocation(it.command) && hasValidCoordinates(it.latitude, it.longitude))
-        .map((it) => ({ lat: it.latitude, lng: it.longitude, altM: it.altitude })),
+        .map((it) => ({ lat: it.latitude, lng: it.longitude, altM: it.altitude, frame: mavFrameToAltFrame(it.frame) })),
     [missionItems],
   );
 
@@ -222,8 +222,19 @@ export function FlightInfoPanel() {
   );
 
   const briefing = useMemo(
-    () => computeMissionBriefing({ located, home, cruiseSpeedMs, enduranceSec, survey, weather, distanceUnit, altitudeUnit, windSpeedUnit }),
-    [located, home, cruiseSpeedMs, enduranceSec, survey, weather, distanceUnit, altitudeUnit, windSpeedUnit],
+    () => computeMissionBriefing({
+      located,
+      home,
+      homeAltM: homePosition?.alt,
+      cruiseSpeedMs,
+      enduranceSec,
+      survey,
+      weather,
+      distanceUnit,
+      altitudeUnit,
+      windSpeedUnit,
+    }),
+    [located, home, homePosition?.alt, cruiseSpeedMs, enduranceSec, survey, weather, distanceUnit, altitudeUnit, windSpeedUnit],
   );
 
   if (!isAerial) {

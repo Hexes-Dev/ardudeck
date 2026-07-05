@@ -21,12 +21,14 @@ export const AREA_EDITOR_BASE_LAYERS: { key: LayerKey; label: string }[] = [
   { key: 'dark', label: 'Dark' },
 ];
 
-export type AreaEditorOverlayId = 'aviation' | 'zones' | 'wind';
+export type AreaEditorOverlayId = 'aviation' | 'zones' | 'wind' | 'traffic' | 'gliders';
 
 export const AREA_EDITOR_OVERLAYS: { id: AreaEditorOverlayId; label: string; hint: string }[] = [
   { id: 'aviation', label: 'Aviation', hint: 'OpenAIP airfields, navaids and airspace (needs an OpenAIP key)' },
   { id: 'zones', label: 'Zones', hint: 'DIPUL German UAS geo-zones (Germany only)' },
   { id: 'wind', label: 'Wind', hint: 'Animated forecast wind (Open-Meteo)' },
+  { id: 'traffic', label: 'Traffic', hint: 'Live ADS-B aircraft' },
+  { id: 'gliders', label: 'Gliders', hint: 'Live OGN/FLARM gliders' },
 ];
 
 interface LayersState {
@@ -39,7 +41,7 @@ interface LayersState {
 export const useAreaEditorLayersStore = create<LayersState>()(
   subscribeWithSelector((set) => ({
     baseLayer: 'googleSat',
-    overlays: { aviation: false, zones: false, wind: false },
+    overlays: { aviation: false, zones: false, wind: false, traffic: false, gliders: false },
     setBaseLayer: (key) => set({ baseLayer: key }),
     toggleOverlay: (id) =>
       set((s) => ({ overlays: { ...s.overlays, [id]: !s.overlays[id] } })),

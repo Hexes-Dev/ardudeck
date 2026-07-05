@@ -16,6 +16,7 @@ import { corridorSwath } from '../components/survey/geo-edit';
 import {
   objectWorldRing,
   objectWorldHoles,
+  objectWorldBranches,
   objectLocalBBox,
   localToWorld,
   type EditorObject,
@@ -49,13 +50,21 @@ export function buildObjectsData(objects: EditorObject[], selectedId: string | n
 
   objects.forEach((obj, i) => {
     if (!obj.visible) return;
-    const color = obj.color ?? colorForIndex(i);
+    // Geofences render green (inclusion) / red (exclusion), overriding the palette.
+    const color =
+      obj.fenceType === 'inclusion' ? '#22c55e'
+        : obj.fenceType === 'exclusion' ? '#ef4444'
+          : (obj.color ?? colorForIndex(i));
     const selected = obj.id === selectedId;
     const ring = objectWorldRing(obj);
 
     if (obj.type === 'corridor') {
-      if (ring.length >= 2) {
-        const swath = corridorSwath(ring, obj.corridorWidthM ?? 60);
+      const width = obj.corridorWidthM ?? 60;
+      // The main centerline plus any branches, each rendered as a swath + line.
+      const centerlines = [ring, ...objectWorldBranches(obj)];
+      for (const cl of centerlines) {
+        if (cl.length < 2) continue;
+        const swath = corridorSwath(cl, width);
         if (swath.length >= 3) {
           features.push({
             type: 'Feature',
@@ -65,7 +74,7 @@ export function buildObjectsData(objects: EditorObject[], selectedId: string | n
         }
         features.push({
           type: 'Feature',
-          geometry: { type: 'LineString', coordinates: ring.map(toCoord) },
+          geometry: { type: 'LineString', coordinates: cl.map(toCoord) },
           properties: { id: obj.id, color, selected, corridor: true },
         });
       }
@@ -80,7 +89,14 @@ export function buildObjectsData(objects: EditorObject[], selectedId: string | n
       features.push({
         type: 'Feature',
         geometry: { type: 'Polygon', coordinates: rings },
-        properties: { id: obj.id, color, selected },
+        properties: {
+          id: obj.id,
+          color,
+          selected,
+          ...(obj.fenceType ? { fenceType: obj.fenceType } : {}),
+          // Workspace-role areas render as a dashed outline with barely-there fill.
+          ...(obj.role === 'workspace' ? { workspace: true } : {}),
+        },
       });
     }
   });
@@ -172,15 +188,37 @@ export function buildTransformHandles(obj: EditorObject): GeoJSON.FeatureCollect
 // ---------------------------------------------------------------------------
 
 export function buildVertexHandles(obj: EditorObject, selectedVertex: number | null): GeoJSON.FeatureCollection {
-  const ring = objectWorldRing(obj);
-  return {
-    type: 'FeatureCollection',
-    features: ring.map((p, i) => ({
+  const features: GeoJSON.Feature[] = [];
+  // Main centerline / ring vertices (branch -1, hole -1).
+  objectWorldRing(obj).forEach((p, i) => {
+    features.push({
       type: 'Feature',
       geometry: { type: 'Point', coordinates: toCoord(p) },
-      properties: { role: 'vertex', vertex: i, selected: i === selectedVertex },
-    })),
-  };
+      properties: { role: 'vertex', vertex: i, branch: -1, hole: -1, selected: i === selectedVertex },
+    });
+  });
+  // Hole vertices, tagged with their hole index so edits route to the right ring.
+  objectWorldHoles(obj).forEach((hole, hi) => {
+    hole.forEach((p, i) => {
+      features.push({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: toCoord(p) },
+        properties: { role: 'vertex', vertex: i, branch: -1, hole: hi, selected: false },
+      });
+    });
+  });
+  // Corridor branch vertices, tagged with their branch index so edits route to
+  // the right centerline.
+  objectWorldBranches(obj).forEach((br, bi) => {
+    br.forEach((p, i) => {
+      features.push({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: toCoord(p) },
+        properties: { role: 'vertex', vertex: i, branch: bi, hole: -1, selected: false },
+      });
+    });
+  });
+  return { type: 'FeatureCollection', features };
 }
 
 // ---------------------------------------------------------------------------

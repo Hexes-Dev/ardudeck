@@ -57,6 +57,24 @@ export interface SurveyConfig {
   polygon: LatLng[];
   /** Optional no-fly holes inside the polygon (e.g. imported from KML inner rings). */
   holes?: LatLng[][];
+  /**
+   * Optional allowed-flight-area polygon (may exceed the ROI, e.g. room for
+   * turn maneuvers outside the surveyed boundary). Only consumed by
+   * generators declaring `supportsWorkspace`.
+   */
+  workspace?: LatLng[];
+  /**
+   * Registry id of a module-supplied generator driving this survey. When
+   * unset (all built-in patterns), the generator is derived from `pattern`
+   * via `patternToGeneratorId`. Resolved through `resolveGeneratorId`.
+   */
+  generatorId?: string;
+  /**
+   * Values for the active generator's declared `configFields`, keyed by
+   * field id. Opaque to the host UI beyond rendering the declared controls;
+   * persists with the group config like every other field.
+   */
+  engineParams?: Record<string, unknown>;
   pattern: SurveyPattern;
   altitude: number;          // meters AGL
   speed: number;             // m/s
@@ -88,6 +106,18 @@ export interface SurveyConfig {
    */
   gridMode?: CorridorMode;
   altitudeReference: AltitudeReference;
+  /**
+   * Continuous DEM terrain-follow. When true, the planner samples ground
+   * elevation (Open-Meteo DEM) at every generated waypoint and bakes an
+   * absolute (MSL) altitude of `ground + altitude` into each one, so the
+   * vehicle holds a constant height above ground for the whole flight without
+   * relying on an onboard terrain database. Waypoints emit in the GLOBAL (ASL)
+   * frame. This is distinct from `altitudeReference: 'terrain'`, which delegates
+   * following to the flight controller's own terrain data via
+   * GLOBAL_TERRAIN_ALT. Baking is the more portable option for vehicles with no
+   * terrain tiles loaded.
+   */
+  terrainFollow?: boolean;
   /** Ground-vehicle path pattern. Only consumed in manual / mower mode. */
   groundPattern?: GroundPattern;
   /** Spiral direction (only used when pattern === 'spiral'). */
@@ -129,6 +159,16 @@ export interface SurveyConfig {
   /** Lateral shift of the whole strip bundle off the centerline, in meters (e.g. to bias coverage to one side of a road). */
   corridorSideOffset?: number;
   /**
+   * Corridor only. Additional centerlines that branch off the main one (roads
+   * that fork, power-line spurs, river tributaries). The main centerline is
+   * `polygon`; each entry here is a further open centerline that shares the
+   * corridor's width/overlap/camera settings. Every centerline is generated with
+   * the same strip algorithm and flown in sequence (main, then each branch).
+   * Junctions are visual only; overlap at a fork is accepted, as in every other
+   * corridor tool (which instead force you to manage separate routes by hand).
+   */
+  corridorBranches?: LatLng[][];
+  /**
    * Plane only. Centerline bends sharper than this (degrees of heading change)
    * get racetrack turn waypoints so the aircraft overshoots and re-enters the
    * next leg aligned instead of cutting the corner.
@@ -152,6 +192,17 @@ export interface SurveyResult {
   photoPositions: LatLng[];
   footprints: LatLng[][];
   stats: SurveyStats;
+  /**
+   * Non-fatal advisories from the generator (e.g. a remote engine reporting
+   * the mission exceeds battery endurance). Shown in the panel; the result
+   * is still usable.
+   */
+  warnings?: string[];
+  /**
+   * Generator-specific extras carried onto `SurveyGroup.generatorResult`
+   * (e.g. TOPAS decomposition cells / tracks / metrics). Opaque to the host.
+   */
+  generatorResult?: unknown;
 }
 
 export interface SurveyStats {
@@ -187,6 +238,7 @@ export const DEFAULT_SURVEY_CONFIG: Omit<SurveyConfig, 'polygon'> = {
   cameraOffOutside: false,
   gridMode: 'copter',
   altitudeReference: 'relative',
+  terrainFollow: false,
   groundPattern: 'boustrophedon',
   spiralDirection: 'inward',
   perimeterPasses: 2,

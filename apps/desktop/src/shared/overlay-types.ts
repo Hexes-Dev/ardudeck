@@ -1,4 +1,4 @@
-export type OverlayId = 'radar' | 'openaip' | 'airspace' | 'dipul' | 'wind';
+export type OverlayId = 'radar' | 'openaip' | 'airspace' | 'dipul' | 'wind' | 'traffic' | 'gliders' | 'remoteid' | 'camera';
 
 /** A single geocoder hit for the "Go to location" search. */
 export interface GeocodeResult {

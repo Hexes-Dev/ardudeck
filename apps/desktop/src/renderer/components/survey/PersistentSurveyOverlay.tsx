@@ -17,6 +17,7 @@ import { Polygon, Polyline } from 'react-leaflet';
 import { useMissionStore } from '../../stores/mission-store';
 import { useSurveyStore } from '../../stores/survey-store';
 import { isSurveyGroup, type SurveyGroup } from '../../../shared/mission-group-types';
+import { extractGeneratorOverlays } from './generator-overlays';
 
 export function PersistentSurveyOverlay() {
   const groups = useMissionStore((s) => s.groups);
@@ -72,6 +73,36 @@ export function PersistentSurveyOverlay() {
           }}
         />,
       );
+      // Branch centerlines forked off the corridor — same dashed casing as the main one.
+      const branches = (g.config as { corridorBranches?: Array<Array<{ lat: number; lng: number }>> }).corridorBranches ?? [];
+      branches.forEach((br, bi) => {
+        if (br.length < 2) return;
+        const brPos = br.map((p) => [p.lat, p.lng] as [number, number]);
+        layers.push(
+          <Polyline
+            key={`corr-br-case-${g.id}-${bi}`}
+            positions={brPos}
+            pane={isSelected ? 'markerPane' : undefined}
+            interactive={false}
+            pathOptions={{ color: '#ffffff', weight: isSelected ? 7 : 5, opacity: 0.85 }}
+          />,
+        );
+        layers.push(
+          <Polyline
+            key={`corr-br-${g.id}-${bi}`}
+            positions={brPos}
+            pane={isSelected ? 'markerPane' : undefined}
+            pathOptions={{ color: g.color, weight: isSelected ? 4 : 3, dashArray: '10, 6' }}
+            eventHandlers={{
+              click: (e) => {
+                e.originalEvent.stopPropagation();
+                setSelectedGroupId(g.id);
+                loadFromGroup({ id: g.id, polygon: g.polygon, config: g.config });
+              },
+            }}
+          />,
+        );
+      });
       continue;
     }
 
@@ -148,6 +179,35 @@ export function PersistentSurveyOverlay() {
         />,
       );
     }
+
+    // Generator-contributed decorations (e.g. TOPAS decomposition cells).
+    // Non-interactive so they never steal clicks from the group polygon.
+    extractGeneratorOverlays(g.generatorResult).forEach((ov, oi) => {
+      const points = ov.points.map((p) => [p.lat, p.lng] as [number, number]);
+      const pathOptions = {
+        color: ov.color ?? g.color,
+        weight: 1,
+        opacity: 0.55,
+        ...(ov.dashed ? { dashArray: '4, 4' } : {}),
+      };
+      layers.push(
+        ov.type === 'polygon' ? (
+          <Polygon
+            key={`gen-ov-${g.id}-${oi}`}
+            positions={points}
+            interactive={false}
+            pathOptions={{ ...pathOptions, fillColor: ov.color ?? g.color, fillOpacity: 0.04 }}
+          />
+        ) : (
+          <Polyline
+            key={`gen-ov-${g.id}-${oi}`}
+            positions={points}
+            interactive={false}
+            pathOptions={pathOptions}
+          />
+        ),
+      );
+    });
   }
 
   if (layers.length === 0) return null;

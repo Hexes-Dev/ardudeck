@@ -204,6 +204,102 @@ describe('planTerrainSafeAltitudes - edge cases', () => {
   });
 });
 
+describe('planTerrainSafeAltitudes - altitude reference frames (issue #106)', () => {
+  it('keeps a relative-frame waypoint in its own frame when raising (no ASL explosion)', () => {
+    // Site is high: home at 1080m ASL, terrain under the waypoint at 1100m.
+    // A 10m relative-to-home waypoint sits at 1090m ASL - only -10m over terrain.
+    const wps: PlannerWaypoint[] = [
+      { seq: 0, latitude: 0, longitude: 0, altitude: 10, frame: 'relative' },
+    ];
+    const result = planTerrainSafeAltitudes(wps, terrain(() => 1100), {
+      safeBuffer: 30,
+      raiseEndpoints: true,
+      insertIntermediates: false,
+      homeElevationMeters: 1080,
+    });
+    // Needs ASL >= 1100 + 30 = 1130 -> relative >= 1130 - 1080 = 50.
+    // It must stay a small relative number, NOT jump to ~1130.
+    expect(result.raisedAltitudes.get(0)).toBe(50);
+  });
+
+  it('does not raise a relative-frame waypoint that already clears terrain', () => {
+    const wps: PlannerWaypoint[] = [
+      { seq: 0, latitude: 0, longitude: 0, altitude: 60, frame: 'relative' },
+    ];
+    const result = planTerrainSafeAltitudes(wps, terrain(() => 1080), {
+      safeBuffer: 30,
+      raiseEndpoints: true,
+      insertIntermediates: false,
+      homeElevationMeters: 1080,
+    });
+    // 60m relative over flat 1080m ground = 60m AGL, already clears -> untouched.
+    expect(result.raisedAltitudes.has(0)).toBe(false);
+  });
+
+  it('raises a terrain-frame waypoint to the buffer, independent of ground elevation', () => {
+    const wps: PlannerWaypoint[] = [
+      { seq: 0, latitude: 0, longitude: 0, altitude: 10, frame: 'terrain' },
+    ];
+    const result = planTerrainSafeAltitudes(wps, terrain(() => 500), {
+      safeBuffer: 30,
+      raiseEndpoints: true,
+      insertIntermediates: false,
+    });
+    // terrain-frame altitude IS height-above-ground -> raise 10 to the 30 buffer.
+    expect(result.raisedAltitudes.get(0)).toBe(30);
+  });
+
+  it('treats asl-frame waypoints as absolute (legacy behavior preserved)', () => {
+    const wps: PlannerWaypoint[] = [
+      { seq: 0, latitude: 0, longitude: 0, altitude: 20, frame: 'asl' },
+    ];
+    const result = planTerrainSafeAltitudes(wps, terrain(() => 100), {
+      safeBuffer: 30,
+      raiseEndpoints: true,
+      insertIntermediates: false,
+    });
+    expect(result.raisedAltitudes.get(0)).toBe(130);
+  });
+
+  it('preserves the user-set height as terrain clearance for a relative waypoint over a hill', () => {
+    // User asked for 100m relative-to-home. Home is 1000m ASL, an 80m hill
+    // (1080m) sits under the waypoint. Auto-adjust must keep the drone 100m over
+    // the terrain (its set height), i.e. 180m relative - not drop it to the buffer.
+    const wps: PlannerWaypoint[] = [
+      { seq: 0, latitude: 0, longitude: 0, altitude: 100, frame: 'relative' },
+    ];
+    const result = planTerrainSafeAltitudes(wps, terrain(() => 1080), {
+      safeBuffer: 30,
+      raiseEndpoints: true,
+      insertIntermediates: false,
+      homeElevationMeters: 1000,
+    });
+    expect(result.raisedAltitudes.get(0)).toBe(180);
+  });
+
+  it('inserts intermediate waypoints in the segment frame, not ASL (relative)', () => {
+    // Home 1000m ASL. Two relative-100m waypoints 1km apart over 1000m ground,
+    // with a 1200m ridge at the midpoint that the straight path clips.
+    const ridge = terrain((lat) => (Math.abs(lat - 0.0045) < 0.002 ? 1200 : 1000));
+    const wps: PlannerWaypoint[] = [
+      { seq: 0, latitude: 0, longitude: 0, altitude: 100, frame: 'relative' },
+      { seq: 1, latitude: 0.009, longitude: 0, altitude: 100, frame: 'relative' },
+    ];
+    const result = planTerrainSafeAltitudes(wps, ridge, {
+      safeBuffer: 30,
+      raiseEndpoints: true,
+      insertIntermediates: true,
+      homeElevationMeters: 1000,
+    });
+    expect(result.inserts.length).toBeGreaterThan(0);
+    const ins = result.inserts[0]!;
+    expect(ins.frame).toBe('relative');
+    // ASL would be ~1230; relative-to-1000m-home must be ~230, never four digits.
+    expect(ins.altitude).toBeGreaterThanOrEqual(230);
+    expect(ins.altitude).toBeLessThan(400);
+  });
+});
+
 describe('haversine', () => {
   it('returns 0 for identical points', () => {
     expect(haversine(0, 0, 0, 0)).toBe(0);

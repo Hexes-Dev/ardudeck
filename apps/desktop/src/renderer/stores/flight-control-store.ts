@@ -12,6 +12,21 @@
 
 import { create } from 'zustand';
 import { useConnectionStore } from './connection-store';
+import { rcOverrideCall } from '../utils/rc-override-dispatch';
+
+/**
+ * Transmit one RC-override frame over the correct protocol. MAVLink links use
+ * RC_CHANNELS_OVERRIDE (RC1..RC4); MSP links use MSP_SET_RAW_RC. Fire-and-forget.
+ */
+function sendRcOverrideFrame(channels: number[]): void {
+  const protocol = useConnectionStore.getState().connectionState.protocol;
+  const call = rcOverrideCall(protocol, channels);
+  if (call.kind === 'mavlink') {
+    void window.electronAPI.rcOverrideSet(call.roll, call.pitch, call.throttle, call.yaw).catch(() => {});
+  } else {
+    void window.electronAPI.mspSetRawRc(call.channels).catch(() => {});
+  }
+}
 
 // =============================================================================
 // Types
@@ -313,25 +328,12 @@ export const useFlightControlStore = create<FlightControlStore>((set, get) => ({
 
     console.log('[FlightControl] Starting RC override with channels:', channels.slice(0, 8).join(','));
 
-    // Send RC values immediately
-    window.electronAPI.mspSetRawRc(channels).catch(() => {});
-
-    // Track interval calls for debugging
-    let intervalCallCount = 0;
-    let errorCount = 0;
+    // Send RC values immediately over the connected protocol.
+    sendRcOverrideFrame(channels);
 
     // Start interval to keep sending - fire and forget, no await!
     const interval = setInterval(() => {
-      intervalCallCount++;
-      const currentChannels = get().channels;
-
-      // Log every 300th call (every 30 seconds at 100ms interval) - reduced logging frequency
-      if (intervalCallCount % 300 === 0) {
-        console.log(`[FlightControl] RC interval #${intervalCallCount}, ch: ${currentChannels.slice(0, 8).join(',')}`);
-      }
-
-      // Fire and forget - don't await, don't block
-      window.electronAPI.mspSetRawRc(currentChannels).catch(() => {});
+      sendRcOverrideFrame(get().channels);
     }, RC_OVERRIDE_INTERVAL_MS);
 
     set({
@@ -350,6 +352,11 @@ export const useFlightControlStore = create<FlightControlStore>((set, get) => ({
       isOverrideActive: false,
       overrideInterval: null,
     });
+    // MAVLink holds the last override until it times out — send an explicit
+    // release (UINT16_MAX on all channels) so the vehicle resumes real RC.
+    if (useConnectionStore.getState().connectionState.protocol === 'mavlink') {
+      void window.electronAPI.rcOverrideRelease().catch(() => {});
+    }
     console.log('[FlightControl] Stopped RC override');
   },
 

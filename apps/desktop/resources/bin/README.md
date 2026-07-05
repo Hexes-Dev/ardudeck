@@ -46,6 +46,24 @@ cp $(which avrdude) linux/
 cp /etc/avrdude.conf linux/
 ```
 
+## Camera / Video (media engine)
+
+The detachable Camera panel uses two binaries to turn any RTSP/RTP/SRT/RubyFPV
+feed into low-latency WebRTC the renderer can play. Drop them into the same
+per-platform folders; the app falls back to system PATH if absent and degrades
+gracefully (RTSP/WebRTC still work without ffmpeg; nothing works without mediamtx).
+
+### `mediamtx` (the hub — ingests RTSP/SRT, republishes as WebRTC/WHEP)
+
+- `win32/mediamtx.exe`, `darwin/mediamtx`, `linux/mediamtx`
+- Download: https://github.com/bluenviron/mediamtx/releases
+
+### `ffmpeg` (normalizer — bridges raw H.264/UDP, plus snapshot + record)
+
+- `win32/ffmpeg.exe`, `darwin/ffmpeg`, `linux/ffmpeg`
+- Use an **LGPL** build to stay license-clean. macOS: `brew install ffmpeg mediamtx`
+  then copy each into `darwin/`.
+
 ## Notes
 
 - Make sure binaries have execute permissions on macOS/Linux

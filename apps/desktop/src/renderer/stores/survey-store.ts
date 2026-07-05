@@ -7,8 +7,9 @@ import type { CameraPreset } from '../components/survey/survey-types';
 // built-in generator against the registry. Survey-store then dispatches
 // via `getSurveyGenerator(id)` instead of a hardcoded switch.
 import '../components/survey/generators';
-import { getSurveyGenerator, patternToGeneratorId } from '../components/survey/generator-registry';
+import { getSurveyGenerator, patternToGeneratorId, resolveGeneratorId } from '../components/survey/generator-registry';
 import { surveyToMissionItems } from '../components/survey/mission-builder';
+import { computeTerrainFollowAltitudes } from '../components/survey/survey-terrain-follow';
 import { calculateAltitudeForGSD } from '../components/survey/survey-stats';
 import { simplifyPolygon } from '../components/survey/geo-math';
 import { runWithActivity } from './activity-store';
@@ -19,7 +20,7 @@ import { useMissionStore } from './mission-store';
 import { MAV_CMD } from '../../shared/mission-types';
 import { isSurveyGroup, createSurveyGroup, GROUP_COLOR_PALETTE, type SurveyGroup } from '../../shared/mission-group-types';
 
-type DrawMode = 'none' | 'polygon';
+type DrawMode = 'none' | 'polygon' | 'branch';
 
 // A recompute is "heavy" (worth a progress indicator + a yielded frame so it
 // paints) when the polygon is dense or the last result was large. Cheap edits
@@ -44,6 +45,10 @@ interface SurveyStore {
   result: SurveyResult | null;
   showFootprints: boolean;
   isActive: boolean;
+  /** True while an async (remote) generator is computing. */
+  generating: boolean;
+  /** Last generator failure, user-facing. Cleared on the next successful run. */
+  generatorError: string | null;
 
   /**
    * When non-null, the survey panel is editing a previously-inserted
@@ -63,7 +68,19 @@ interface SurveyStore {
   addVertex: (lat: number, lng: number) => void;
   completePolygon: () => void;
   cancelDrawing: () => void;
+  /** Begin drawing a branch centerline on the current corridor (map clicks). */
+  startBranchDraw: () => void;
+  /** Finish the in-progress branch and add it to the corridor's config. */
+  completeBranch: () => void;
+  /** Remove all branches from the current corridor config. */
+  clearCorridorBranches: () => void;
 
+  /**
+   * Load a boundary (e.g. a map guide) into the survey draft and open the
+   * panel, without committing anything. Generation runs with the current
+   * config/engine; the user reviews and Inserts as usual.
+   */
+  loadDraftFromPolygon: (polygon: LatLng[], holes?: LatLng[][]) => void;
   /**
    * Link the survey panel to a previously-committed SurveyGroup so further
    * edits write through to it.
@@ -82,6 +99,14 @@ interface SurveyStore {
 
   // Config actions
   setPattern: (pattern: SurveyPattern) => void;
+  /**
+   * Select a module-supplied generator (registry id), or null to return to
+   * the built-in pattern generators. Seeds engineParams with the generator's
+   * declared field defaults for any key not already set.
+   */
+  setGeneratorId: (id: string | null) => void;
+  /** Set one engine parameter (declared via the generator's configFields). */
+  setEngineParam: (id: string, value: unknown) => void;
   setAltitude: (altitude: number) => void;
   setSpeed: (speed: number) => void;
   setFrontOverlap: (overlap: number) => void;
@@ -93,6 +118,8 @@ interface SurveyStore {
   setCameraOffOutside: (v: boolean) => void;
   setGridMode: (mode: 'plane' | 'copter') => void;
   setAltitudeReference: (ref: AltitudeReference) => void;
+  /** Toggle continuous DEM terrain-follow (bakes ground+AGL per waypoint). */
+  setTerrainFollow: (on: boolean) => void;
   setShowFootprints: (show: boolean) => void;
   setGroundPattern: (pattern: GroundPattern) => void;
   setSpiralDirection: (direction: 'inward' | 'outward') => void;
@@ -115,6 +142,10 @@ interface SurveyStore {
   // Polygon editing
   updateVertex: (index: number, lat: number, lng: number) => void;
   removeVertex: (index: number) => void;
+  /** Move a vertex of a corridor branch centerline (live edit). */
+  updateBranchVertex: (branchIndex: number, vertexIndex: number, lat: number, lng: number) => void;
+  /** Delete a vertex of a corridor branch (drops the branch if it would fall below 2 points). */
+  removeBranchVertex: (branchIndex: number, vertexIndex: number) => void;
 
   /**
    * Explicit polygon-edit mode. While active, vertex edits mutate only the
@@ -145,7 +176,7 @@ interface SurveyStore {
    * just entering edit mode doesn't overwrite committed altitudes (e.g. terrain
    * auto-adjust) before the user has changed anything.
    */
-  generateSurvey: (opts?: { sync?: boolean }) => void;
+  generateSurvey: (opts?: { sync?: boolean }) => Promise<void>;
   /**
    * Import a survey boundary from a GIS file (KML/KMZ/GeoJSON) via the main
    * process, load the first area's outer ring into the draft, and generate.
@@ -175,7 +206,7 @@ interface SurveyStore {
   addSurveyAreaFromPolygon: (
     polygon: LatLng[],
     opts?: { holes?: LatLng[][]; name?: string },
-  ) => string | null;
+  ) => Promise<string | null>;
 
   /**
    * Turn multiple polygons (each with optional holes) into persistent SurveyGroups
@@ -192,28 +223,29 @@ interface SurveyStore {
       /** Per-area config overrides (e.g. corridor pattern + width) merged over the current config. */
       configOverride?: Partial<Omit<SurveyConfig, 'polygon' | 'holes'>>;
     }>,
-  ) => string[];
+  ) => Promise<string[]>;
 }
 
-function runGenerator(config: SurveyConfig): SurveyResult | null {
+/**
+ * Dispatch config through the registered generator. Async generators (remote
+ * engines like TOPAS) are awaited; their errors propagate to the caller,
+ * which owns the `generating` / `generatorError` store state.
+ */
+async function runGenerator(config: SurveyConfig): Promise<SurveyResult | null> {
   // Corridors are an open centerline (>= 2 points); every other pattern is a
   // closed area (>= 3 points).
   const minPoints = config.pattern === 'corridor' ? 2 : 3;
   if (config.polygon.length < minPoints) return null;
 
-  const id = patternToGeneratorId(config.pattern);
+  const id = resolveGeneratorId(config);
   const reg = getSurveyGenerator(id) ?? getSurveyGenerator('builtin.grid');
   if (!reg) return null;
-  const result = reg.generate(config);
-  // Built-in generators are synchronous. PR 4 generalizes survey-store to
-  // handle async generators (Promise<SurveyResult>) once survey groups
-  // become first-class and remote generators like TOPAS land.
-  if (result instanceof Promise) {
-    // Defensive: a generator unexpectedly returned a Promise here. PR 3
-    // sticks to sync; ignore for now and let PR 4 thread async cleanly.
-    return null;
-  }
-  return result;
+  return await reg.generate(config);
+}
+
+/** Whether the config's resolved generator is async (shows a busy state). */
+function generatorIsAsync(config: Pick<SurveyConfig, 'pattern' | 'generatorId'>): boolean {
+  return getSurveyGenerator(resolveGeneratorId(config))?.capabilities.isAsync ?? false;
 }
 
 /**
@@ -225,23 +257,23 @@ function runGenerator(config: SurveyConfig): SurveyResult | null {
  * entry) call this so the polygon simplification, generator dispatch, group
  * construction, and signature logic live in exactly one place.
  */
-function buildSurveyGroupEntry(
+async function buildSurveyGroupEntry(
   rawPolygon: LatLng[],
   rawHoles: LatLng[][],
   config: Omit<SurveyConfig, 'polygon'>,
   name: string,
   colorIndex: number,
   simplifyToleranceM: number,
-): { group: SurveyGroup; items: ReturnType<typeof surveyToMissionItems> } | null {
+): Promise<{ group: SurveyGroup; items: ReturnType<typeof surveyToMissionItems> } | null> {
   const polygon = simplifyPolygon(rawPolygon, simplifyToleranceM);
   const holes = rawHoles.map((ring) => simplifyPolygon(ring, simplifyToleranceM));
   // Holes flow through config so the generator can carve them out, and onto
   // the group so the map draws them as cutouts.
   const fullConfig: SurveyConfig = { ...config, polygon, holes };
-  const result = runGenerator(fullConfig);
+  const result = await runGenerator(fullConfig);
   if (!result || result.waypoints.length === 0) return null;
   const items = surveyToMissionItems(result, fullConfig);
-  const generatorId = patternToGeneratorId(config.pattern);
+  const generatorId = resolveGeneratorId(fullConfig);
   const reg = getSurveyGenerator(generatorId);
   const group = createSurveyGroup({
     name,
@@ -249,13 +281,57 @@ function buildSurveyGroupEntry(
     generatorVersion: reg?.version ?? '1.0.0',
     polygon,
     holes: holes.length > 0 ? holes : undefined,
+    workspace: fullConfig.workspace,
     config: fullConfig as unknown as Record<string, unknown>,
     color: GROUP_COLOR_PALETTE[colorIndex % GROUP_COLOR_PALETTE.length]!,
   });
+  group.generatorResult = result.generatorResult ?? null;
   group.lastGeneratedSignature = computeSurveyGroupSignature(group);
   group.lastGeneratedAt = Date.now();
   return { group, items };
 }
+
+/**
+ * Push a freshly-generated result through to the live-linked SurveyGroup so the
+ * committed mission tracks the on-screen draft. Extracted so both the synchronous
+ * generate path and the async terrain-follow pass re-sync identically.
+ */
+function syncResultToEditingGroup(
+  editingGroupId: string,
+  polygon: LatLng[],
+  fullConfig: SurveyConfig,
+  result: SurveyResult,
+): void {
+  let items = surveyToMissionItems(result, fullConfig);
+  const missionStore = useMissionStore.getState();
+  const externalTakeoff = missionStore.missionItems.some(
+    (it) => it.command === MAV_CMD.NAV_TAKEOFF && it.groupId !== editingGroupId,
+  );
+  if (externalTakeoff && items[0]?.command === MAV_CMD.NAV_TAKEOFF) {
+    items = items.slice(1);
+  }
+  const currentGroup = missionStore.groups.find((g) => g.id === editingGroupId);
+  if (currentGroup && isSurveyGroup(currentGroup)) {
+    const probe: SurveyGroup = {
+      ...currentGroup,
+      polygon: polygon.map((p) => ({ lat: p.lat, lng: p.lng })),
+      config: fullConfig as unknown as Record<string, unknown>,
+    };
+    const signature = computeSurveyGroupSignature(probe);
+    missionStore.syncSurveyGroupFromDraft(
+      editingGroupId,
+      probe.polygon,
+      probe.config,
+      items,
+      signature,
+      result.generatorResult,
+    );
+  }
+}
+
+// Monotonic token so a slow async generator or terrain fetch from an earlier
+// config can't clobber a newer generate (the classic async-race guard).
+let generationSeq = 0;
 
 // Module-level flag — true after the initial hydration from settings, used to
 // suppress the persistence subscriber during the very first applyPresetConfig
@@ -271,6 +347,8 @@ export const useSurveyStore = create<SurveyStore>()(subscribeWithSelector((set, 
   result: null,
   showFootprints: false,
   isActive: false,
+  generating: false,
+  generatorError: null,
   editingGroupId: null,
   polygonEditMode: false,
   pendingRecompute: false,
@@ -285,23 +363,71 @@ export const useSurveyStore = create<SurveyStore>()(subscribeWithSelector((set, 
   },
 
   completePolygon: () => {
-    const { drawingVertices, config } = get();
+    const { drawingVertices } = get();
     if (drawingVertices.length < 3) return;
 
     const polygon = [...drawingVertices];
-    const fullConfig: SurveyConfig = { ...config, polygon };
-    const result = runGenerator(fullConfig);
-
-    set({ drawMode: 'none', drawingVertices: [], polygon, result });
+    set({ drawMode: 'none', drawingVertices: [], polygon });
+    // Generation runs through the shared path so async (remote) generators
+    // get the same busy/error handling as config edits.
+    void get().generateSurvey();
   },
 
   cancelDrawing: () => {
     set({ drawMode: 'none', drawingVertices: [] });
   },
 
-  setPattern: (pattern) => {
-    set({ config: { ...get().config, pattern } });
+  startBranchDraw: () => {
+    // Only meaningful for a corridor survey; a branch is another centerline.
+    if (get().config.pattern !== 'corridor') return;
+    set({ drawMode: 'branch', drawingVertices: [] });
+  },
+
+  completeBranch: () => {
+    const { drawingVertices, config } = get();
+    if (drawingVertices.length < 2) { set({ drawMode: 'none', drawingVertices: [] }); return; }
+    const branches = [...(config.corridorBranches ?? []), [...drawingVertices]];
+    set({ config: { ...config, corridorBranches: branches }, drawMode: 'none', drawingVertices: [] });
     get().requestRecompute({ immediate: true });
+  },
+
+  clearCorridorBranches: () => {
+    const { config } = get();
+    if (!config.corridorBranches || config.corridorBranches.length === 0) return;
+    const { corridorBranches: _omit, ...rest } = config;
+    set({ config: rest });
+    get().requestRecompute({ immediate: true });
+  },
+
+  setPattern: (pattern) => {
+    // Picking a built-in pattern always leaves module-generator mode; the two
+    // are mutually exclusive engine choices in the UI.
+    const { generatorId: _drop, ...rest } = get().config;
+    set({ config: { ...rest, pattern } });
+    get().requestRecompute({ immediate: true });
+  },
+
+  setGeneratorId: (id) => {
+    const { generatorId: _drop, ...rest } = get().config;
+    if (!id) {
+      set({ config: rest });
+    } else {
+      // Seed declared engine-param defaults so the generator sees a complete
+      // value set on first run; user-set values survive re-selection.
+      const fields = getSurveyGenerator(id)?.configFields ?? [];
+      const engineParams = { ...(rest.engineParams ?? {}) };
+      for (const f of fields) {
+        if (!(f.id in engineParams)) engineParams[f.id] = f.default;
+      }
+      set({ config: { ...rest, generatorId: id, engineParams } });
+    }
+    get().requestRecompute({ immediate: true });
+  },
+
+  setEngineParam: (id, value) => {
+    const { config } = get();
+    set({ config: { ...config, engineParams: { ...(config.engineParams ?? {}), [id]: value } } });
+    get().requestRecompute();
   },
 
   setAltitude: (altitude) => {
@@ -358,6 +484,13 @@ export const useSurveyStore = create<SurveyStore>()(subscribeWithSelector((set, 
 
   setAltitudeReference: (altitudeReference) => {
     set({ config: { ...get().config, altitudeReference } });
+  },
+
+  setTerrainFollow: (terrainFollow) => {
+    set({ config: { ...get().config, terrainFollow } });
+    // Turning it on triggers the async DEM bake; turning it off must regenerate
+    // so the baked altitudes are dropped back to the flat config value.
+    get().requestRecompute({ immediate: true });
   },
 
   setShowFootprints: (showFootprints) => {
@@ -474,6 +607,40 @@ export const useSurveyStore = create<SurveyStore>()(subscribeWithSelector((set, 
     else get().requestRecompute({ immediate: true });
   },
 
+  updateBranchVertex: (branchIndex, vertexIndex, lat, lng) => {
+    const { config, polygonEditMode } = get();
+    const branches = config.corridorBranches;
+    const line = branches?.[branchIndex];
+    if (!branches || !line) return;
+    const newLine = line.map((p, i) => (i === vertexIndex ? { lat, lng } : p));
+    const next = branches.map((b, bi) => (bi === branchIndex ? newLine : b));
+    set({ config: { ...config, corridorBranches: next } });
+    if (polygonEditMode) set({ pendingRecompute: true });
+    else get().requestRecompute({ immediate: true });
+  },
+
+  removeBranchVertex: (branchIndex, vertexIndex) => {
+    const { config, polygonEditMode } = get();
+    const branches = config.corridorBranches;
+    const line = branches?.[branchIndex];
+    if (!branches || !line) return;
+    let next: LatLng[][];
+    if (line.length <= 2) {
+      next = branches.filter((_, bi) => bi !== branchIndex); // would degenerate -> drop branch
+    } else {
+      const nl = line.filter((_, i) => i !== vertexIndex);
+      next = branches.map((b, bi) => (bi === branchIndex ? nl : b));
+    }
+    if (next.length > 0) {
+      set({ config: { ...config, corridorBranches: next } });
+    } else {
+      const { corridorBranches: _omit, ...rest } = config;
+      set({ config: rest });
+    }
+    if (polygonEditMode) set({ pendingRecompute: true });
+    else get().requestRecompute({ immediate: true });
+  },
+
   enterPolygonEdit: () => {
     const { polygon } = get();
     set({
@@ -517,14 +684,39 @@ export const useSurveyStore = create<SurveyStore>()(subscribeWithSelector((set, 
     else recomputeTimer = setTimeout(() => { recomputeTimer = null; run(); }, RECOMPUTE_DEBOUNCE_MS);
   },
 
-  generateSurvey: (opts) => {
+  generateSurvey: async (opts) => {
     const sync = opts?.sync ?? true;
     const { polygon, config, editingGroupId } = get();
-    if (!polygon || polygon.length < 3) return;
+    // Corridors are an open centerline (2+ points); area patterns need a ring (3+).
+    const minPoints = config.pattern === 'corridor' ? 2 : 3;
+    if (!polygon || polygon.length < minPoints) return;
 
     const fullConfig: SurveyConfig = { ...config, polygon };
-    const result = runGenerator(fullConfig);
-    set({ result });
+    // A new generation supersedes any in-flight async generate or terrain fetch.
+    const seq = ++generationSeq;
+    // Only async (remote) generators get the busy state; flipping it for the
+    // instant built-ins would flash the indicator on every slider tick.
+    const isAsync = generatorIsAsync(fullConfig);
+    if (isAsync) set({ generating: true });
+
+    let result: SurveyResult | null;
+    try {
+      result = await runGenerator(fullConfig);
+    } catch (err) {
+      // Stale failures stay silent - a newer generation owns the UI state.
+      if (seq === generationSeq) {
+        set({
+          generating: false,
+          generatorError: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return;
+    }
+    if (seq !== generationSeq) return;
+    set({ result, generating: false, generatorError: null });
+    if (!result) return;
+    // Const alias so the narrowed type survives into the closures below.
+    const generated = result;
 
     // Live-edit sync: when the survey panel is editing an existing
     // SurveyGroup, push the regenerated polygon/config/items through to
@@ -532,38 +724,27 @@ export const useSurveyStore = create<SurveyStore>()(subscribeWithSelector((set, 
     // Without this, vertex edits update the preview but leave the
     // previously-inserted WPs stale. Skipped on initial open (sync: false) so
     // opening a group for edit doesn't clobber its committed altitudes.
-    if (sync && editingGroupId && result) {
-      // Strip the leading NAV_TAKEOFF if the mission already has one
-      // outside this group, so we don't accumulate duplicates on every
-      // regeneration. Mirrors the logic in SurveyConfigPanel.handleInsertSurvey.
-      let items = surveyToMissionItems(result, fullConfig);
-      const missionStore = useMissionStore.getState();
-      const externalTakeoff = missionStore.missionItems.some(
-        (it) =>
-          it.command === MAV_CMD.NAV_TAKEOFF && it.groupId !== editingGroupId,
-      );
-      if (externalTakeoff && items[0]?.command === MAV_CMD.NAV_TAKEOFF) {
-        items = items.slice(1);
-      }
-      // Build a fake SurveyGroup-shaped object just for signature compute.
-      const currentGroup = missionStore.groups.find(
-        (g) => g.id === editingGroupId,
-      );
-      if (currentGroup && isSurveyGroup(currentGroup)) {
-        const probe: SurveyGroup = {
-          ...currentGroup,
-          polygon: polygon.map((p) => ({ lat: p.lat, lng: p.lng })),
-          config: fullConfig as unknown as Record<string, unknown>,
-        };
-        const signature = computeSurveyGroupSignature(probe);
-        missionStore.syncSurveyGroupFromDraft(
-          editingGroupId,
-          probe.polygon,
-          probe.config,
-          items,
-          signature,
-        );
-      }
+    if (sync && editingGroupId) {
+      syncResultToEditingGroup(editingGroupId, polygon, fullConfig, generated);
+    }
+
+    // Continuous terrain-follow: sample the DEM at every waypoint and bake
+    // ground+AGL absolute altitudes. Runs after the synchronous path so the
+    // preview appears instantly, then refines once elevations resolve. Cached +
+    // batched, so a slider that doesn't move waypoints is a pure cache hit.
+    if (config.terrainFollow && generated.waypoints.length > 0) {
+      void (async () => {
+        const outcome = await computeTerrainFollowAltitudes(generated, fullConfig);
+        // Stale guard: a newer generate ran while we were fetching.
+        if (seq !== generationSeq || !outcome) return;
+        const current = get().result;
+        if (current !== generated) return;
+        const terrainResult: SurveyResult = { ...generated, altitudes: outcome.altitudes };
+        set({ result: terrainResult });
+        if (get().editingGroupId === editingGroupId && editingGroupId) {
+          syncResultToEditingGroup(editingGroupId, polygon, fullConfig, terrainResult);
+        }
+      })();
     }
   },
 
@@ -592,28 +773,34 @@ export const useSurveyStore = create<SurveyStore>()(subscribeWithSelector((set, 
     const baseCount = missionStore.groups.filter(isSurveyGroup).length;
 
     const entries: Array<{ group: SurveyGroup; items: ReturnType<typeof surveyToMissionItems> }> = [];
-    await runWithActivity('Importing survey - generating waypoints...', () => {
-      areas.forEach((area, i) => {
-        // GIS boundaries are often digitized at sub-meter resolution (thousands of
-        // vertices). Survey line spacing is tens of meters, so that detail is
-        // wasted - and every vertex becomes a draggable marker plus per-edge work
-        // in scan-line clipping, which is what makes large-KML import lag. Reduce
-        // to a ~1 m tolerance: visually identical, orders of magnitude fewer points.
-        const rawPolygon = area.polygon.map((p) => ({ lat: p.lat, lng: p.lng }));
-        const rawHoles = area.holes.map((ring) =>
-          ring.map((p) => ({ lat: p.lat, lng: p.lng })),
-        );
-        const entry = buildSurveyGroupEntry(
-          rawPolygon,
-          rawHoles,
-          config,
-          `Imported ${baseCount + i + 1}`,
-          baseCount + i,
-          simplifyToleranceM,
-        );
-        if (entry) entries.push(entry);
+    try {
+      await runWithActivity('Importing survey - generating waypoints...', async () => {
+        for (const [i, area] of areas.entries()) {
+          // GIS boundaries are often digitized at sub-meter resolution (thousands of
+          // vertices). Survey line spacing is tens of meters, so that detail is
+          // wasted - and every vertex becomes a draggable marker plus per-edge work
+          // in scan-line clipping, which is what makes large-KML import lag. Reduce
+          // to a ~1 m tolerance: visually identical, orders of magnitude fewer points.
+          const rawPolygon = area.polygon.map((p) => ({ lat: p.lat, lng: p.lng }));
+          const rawHoles = area.holes.map((ring) =>
+            ring.map((p) => ({ lat: p.lat, lng: p.lng })),
+          );
+          const entry = await buildSurveyGroupEntry(
+            rawPolygon,
+            rawHoles,
+            config,
+            `Imported ${baseCount + i + 1}`,
+            baseCount + i,
+            simplifyToleranceM,
+          );
+          if (entry) entries.push(entry);
+        }
       });
-    });
+    } catch (err) {
+      // A remote generator failing mid-import shouldn't look like "no polygons".
+      const message = err instanceof Error ? err.message : String(err);
+      return { ok: false, areaCount: 0, error: `Generator failed: ${message}` };
+    }
 
     if (entries.length === 0) {
       return { ok: false, areaCount: 0, error: 'Could not generate a survey from the imported area(s)' };
@@ -629,12 +816,17 @@ export const useSurveyStore = create<SurveyStore>()(subscribeWithSelector((set, 
   },
 
   clearSurvey: () => {
+    // Invalidate any in-flight async generation so a late resolve can't
+    // repopulate the cleared draft.
+    generationSeq += 1;
     set({
       drawMode: 'none',
       drawingVertices: [],
       polygon: null,
       result: null,
       isActive: false,
+      generating: false,
+      generatorError: null,
       editingGroupId: null,
     });
   },
@@ -644,14 +836,35 @@ export const useSurveyStore = create<SurveyStore>()(subscribeWithSelector((set, 
   },
 
   deactivateSurvey: () => {
+    generationSeq += 1;
     set({
       isActive: false,
       drawMode: 'none',
       drawingVertices: [],
       polygon: null,
       result: null,
+      generating: false,
+      generatorError: null,
       editingGroupId: null,
     });
+  },
+
+  loadDraftFromPolygon: (polygon, holes) => {
+    if (polygon.length < 3) return;
+    const { config } = get();
+    generationSeq += 1;
+    set({
+      drawMode: 'none',
+      drawingVertices: [],
+      polygon: polygon.map((p) => ({ lat: p.lat, lng: p.lng })),
+      config: { ...config, holes: (holes ?? []).filter((h) => h.length >= 3) },
+      result: null,
+      isActive: true,
+      editingGroupId: null,
+      generating: false,
+      generatorError: null,
+    });
+    get().requestRecompute({ immediate: true });
   },
 
   setEditingGroupId: (id) => {
@@ -693,7 +906,7 @@ export const useSurveyStore = create<SurveyStore>()(subscribeWithSelector((set, 
     void runWithActivity('Loading survey...', () => get().generateSurvey({ sync: false }));
   },
 
-  addSurveyAreaFromPolygon: (polygon, opts) => {
+  addSurveyAreaFromPolygon: async (polygon, opts) => {
     if (polygon.length < 3) return null;
     const { config } = get();
     const missionStore = useMissionStore.getState();
@@ -701,14 +914,20 @@ export const useSurveyStore = create<SurveyStore>()(subscribeWithSelector((set, 
     const baseCount = missionStore.groups.filter(isSurveyGroup).length;
     const holes = opts?.holes ?? [];
     const name = opts?.name ?? `Survey ${baseCount + 1}`;
-    const entry = buildSurveyGroupEntry(
-      polygon,
-      holes,
-      config,
-      name,
-      baseCount,
-      simplifyToleranceM,
-    );
+    let entry: Awaited<ReturnType<typeof buildSurveyGroupEntry>>;
+    try {
+      entry = await buildSurveyGroupEntry(
+        polygon,
+        holes,
+        config,
+        name,
+        baseCount,
+        simplifyToleranceM,
+      );
+    } catch (err) {
+      set({ generatorError: err instanceof Error ? err.message : String(err) });
+      return null;
+    }
     if (!entry) return null;
     const ids = missionStore.addGroupsWithItems([entry]);
     const id = ids[0];
@@ -717,7 +936,7 @@ export const useSurveyStore = create<SurveyStore>()(subscribeWithSelector((set, 
     return id;
   },
 
-  addSurveyAreasFromPolygons: (areas) => {
+  addSurveyAreasFromPolygons: async (areas) => {
     if (areas.length === 0) return [];
     const { config } = get();
     const missionStore = useMissionStore.getState();
@@ -725,22 +944,28 @@ export const useSurveyStore = create<SurveyStore>()(subscribeWithSelector((set, 
     const baseCount = missionStore.groups.filter(isSurveyGroup).length;
 
     const entries: Array<{ group: SurveyGroup; items: ReturnType<typeof surveyToMissionItems> }> = [];
-    areas.forEach((area, i) => {
+    for (const [i, area] of areas.entries()) {
       const areaConfig = area.configOverride ? { ...config, ...area.configOverride } : config;
       // Corridors are open centerlines (>= 2 points); areas are closed (>= 3).
       const minPoints = areaConfig.pattern === 'corridor' ? 2 : 3;
-      if (area.polygon.length < minPoints) return;
+      if (area.polygon.length < minPoints) continue;
       const name = area.name ?? `Survey ${baseCount + entries.length + 1}`;
-      const entry = buildSurveyGroupEntry(
-        area.polygon,
-        area.holes ?? [],
-        areaConfig,
-        name,
-        baseCount + i,
-        simplifyToleranceM,
-      );
-      if (entry) entries.push(entry);
-    });
+      try {
+        const entry = await buildSurveyGroupEntry(
+          area.polygon,
+          area.holes ?? [],
+          areaConfig,
+          name,
+          baseCount + i,
+          simplifyToleranceM,
+        );
+        if (entry) entries.push(entry);
+      } catch (err) {
+        // One failing area (e.g. remote engine rejecting its polygon) doesn't
+        // sink the batch; surface the failure and keep going.
+        set({ generatorError: err instanceof Error ? err.message : String(err) });
+      }
+    }
 
     if (entries.length === 0) return [];
 
@@ -779,9 +1004,11 @@ useSurveyStore.subscribe(
   (state) => state.config,
   (config) => {
     if (isHydratingFromSettings) return;
-    // The Omit<SurveyConfig, 'polygon'> shape carries no polygon field already,
-    // but the cast keeps us tolerant of future shape changes.
-    useSettingsStore.getState().setSurveySavedConfig(config as unknown as Record<string, unknown>);
+    // corridorBranches are world-space centerlines tied to a specific corridor —
+    // scene-specific like the polygon, so strip them too. Persisting them would
+    // wrongly graft old branches onto a freshly drawn corridor next session.
+    const { corridorBranches: _scene, ...persistable } = config as unknown as Record<string, unknown>;
+    useSettingsStore.getState().setSurveySavedConfig(persistable);
   },
 );
 

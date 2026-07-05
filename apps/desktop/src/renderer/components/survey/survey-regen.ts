@@ -22,7 +22,7 @@ export interface RegenerateResult {
   reason?: string;
 }
 
-export function regenerateSurveyGroup(groupId: string): RegenerateResult {
+export async function regenerateSurveyGroup(groupId: string): Promise<RegenerateResult> {
   const store = useMissionStore.getState();
   const group = store.groups.find((g) => g.id === groupId);
   if (!group) return { ok: false, reason: 'Group not found' };
@@ -43,12 +43,11 @@ export function regenerateSurveyGroup(groupId: string): RegenerateResult {
     polygon: group.polygon,
   } as unknown as SurveyConfig;
 
-  const result = reg.generate(config);
-  if (result instanceof Promise) {
-    return {
-      ok: false,
-      reason: 'Async generator regeneration lands in a later PR',
-    };
+  let result;
+  try {
+    result = await reg.generate(config);
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
   }
   if (!result) {
     return { ok: false, reason: 'Generator returned no result' };
@@ -59,7 +58,14 @@ export function regenerateSurveyGroup(groupId: string): RegenerateResult {
     return { ok: false, reason: 'Generator produced no waypoints' };
   }
 
-  const signature = computeSurveyGroupSignature(group as SurveyGroup);
-  store.replaceSurveyGroupItems(groupId, items, signature);
+  // Re-read the group: an async generator may have taken a while, and the
+  // group could have been edited or deleted meanwhile.
+  const freshStore = useMissionStore.getState();
+  const freshGroup = freshStore.groups.find((g) => g.id === groupId);
+  if (!freshGroup || !isSurveyGroup(freshGroup)) {
+    return { ok: false, reason: 'Group changed during regeneration' };
+  }
+  const signature = computeSurveyGroupSignature(freshGroup as SurveyGroup);
+  freshStore.replaceSurveyGroupItems(groupId, items, signature, result.generatorResult);
   return { ok: true };
 }

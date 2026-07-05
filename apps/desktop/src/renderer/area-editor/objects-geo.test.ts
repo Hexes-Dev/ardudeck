@@ -77,6 +77,21 @@ describe('buildVertexHandles', () => {
     expect(fc.features[2]!.properties!['selected']).toBe(true);
     expect(fc.features[0]!.properties!['selected']).toBe(false);
   });
+
+  it('emits a handle per hole vertex, tagged with the hole index', () => {
+    const poly = makeFromWorldRing('polygon', [
+      { lat: 42, lng: 19 }, { lat: 42, lng: 19.002 }, { lat: 42.002, lng: 19.002 }, { lat: 42.002, lng: 19 },
+    ], 'P', {
+      holes: [[
+        { lat: 42.0005, lng: 19.0005 }, { lat: 42.0005, lng: 19.0015 }, { lat: 42.0015, lng: 19.001 },
+      ]],
+    });
+    const fc = buildVertexHandles(poly, null);
+    expect(fc.features).toHaveLength(7); // 4 outer + 3 hole
+    const holeHandles = fc.features.filter((f) => f.properties!['hole'] === 0);
+    expect(holeHandles).toHaveLength(3);
+    expect(holeHandles.every((f) => f.properties!['branch'] === -1)).toBe(true);
+  });
 });
 
 describe('buildDraftData', () => {

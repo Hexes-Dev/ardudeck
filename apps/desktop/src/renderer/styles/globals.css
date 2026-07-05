@@ -64,6 +64,13 @@
   --select-option-text: #e5e7eb;
   --select-option-hover: #374151;
   --select-color-scheme: dark;
+
+  /* Flight-mode category text, used ON SURFACES (fleet cards/lists). Bright for
+     dark mode; the tactical map icon keeps its own bright hex (dark disc). */
+  --mode-manual: #e5e7eb;
+  --mode-assisted: #facc15;
+  --mode-auto: #4ade80;
+  --mode-emergency: #f87171;
 }
 
 .light {
@@ -123,6 +130,12 @@
   --select-option-text: #111827;
   --select-option-hover: #f3f4f6;
   --select-color-scheme: light;
+
+  /* Darker, saturated mode-category text so it reads on light surfaces. */
+  --mode-manual: #4b5563;
+  --mode-assisted: #ca8a04;
+  --mode-auto: #16a34a;
+  --mode-emergency: #dc2626;
 }
 
 @layer base {
@@ -444,12 +457,34 @@ select,
 
 .tactical-vehicle-icon {
   cursor: pointer;
-  transition: filter 0.15s;
+  transition: filter 0.15s, transform 0.18s ease;
 }
 
 .tactical-vehicle-icon:hover {
   filter: brightness(1.25) !important;
 }
+
+/* Active/primary marker always sits above the fleet; a hovered fleet marker rises above
+   its peers so its expanded label is never covered. (.tactical-vehicle-marker forces
+   z-index 10000 !important, so these modifiers are how stacking order is controlled.) */
+.tactical-vehicle-marker.tvi-topmost { z-index: 10002 !important; }
+.tactical-vehicle-marker:hover { z-index: 10001 !important; }
+
+/* Compact fleet label: collapse to just the SYS id chip until hovered, so a tight cluster
+   stops being a pile of overlapping mode/alt/speed boxes. Hover reveals the full readout. */
+.tvi-compact .tvi-detail-inline,
+.tvi-compact .tvi-detail-block { display: none; }
+.tactical-vehicle-marker:hover .tvi-detail-inline { display: inline; }
+.tactical-vehicle-marker:hover .tvi-detail-block { display: block; }
+.tvi-compact .tactical-info-label { opacity: 0.9; }
+
+/* Leader line tying a fanned-out marker back to its true map position. */
+.tvi-leader { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+
+/* A grouped follower (tucked in tight around the main) hides its label entirely until
+   hovered, so the cluster stays clean - hover brings the full readout back. */
+.tvi-grouped .tactical-info-label { display: none; }
+.tvi-grouped:hover .tactical-info-label { display: block; }
 
 .tactical-selection-ring {
   animation: tactical-ring-spin 2s linear infinite;
@@ -489,6 +524,58 @@ select,
 
 .tactical-command-popup .leaflet-popup-content {
   margin: 10px;
+}
+
+/* Traffic contact popup — themed, readable in light + dark */
+.traffic-popup .leaflet-popup-content-wrapper {
+  background: var(--bg-overlay);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  color: var(--text-primary);
+  box-shadow: 0 8px 28px var(--shadow-color);
+}
+
+.traffic-popup .leaflet-popup-tip {
+  background: var(--bg-overlay);
+  border-right: 1px solid var(--border-default);
+  border-bottom: 1px solid var(--border-default);
+}
+
+.traffic-popup .leaflet-popup-content {
+  margin: 11px 13px;
+}
+
+.traffic-popup a.leaflet-popup-close-button {
+  color: var(--text-tertiary);
+  padding: 6px 7px 0 0;
+}
+
+.traffic-popup a.leaflet-popup-close-button:hover {
+  color: var(--text-primary);
+}
+
+/* Traffic popup on MapLibre (Area Editor) */
+.traffic-popup.maplibregl-popup .maplibregl-popup-content {
+  background: var(--bg-overlay);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  color: var(--text-primary);
+  box-shadow: 0 8px 28px var(--shadow-color);
+  padding: 11px 13px;
+}
+
+.traffic-popup.maplibregl-popup-anchor-top .maplibregl-popup-tip,
+.traffic-popup.maplibregl-popup-anchor-bottom .maplibregl-popup-tip,
+.traffic-popup.maplibregl-popup-anchor-left .maplibregl-popup-tip,
+.traffic-popup.maplibregl-popup-anchor-right .maplibregl-popup-tip {
+  border-top-color: var(--bg-overlay);
+  border-bottom-color: var(--bg-overlay);
+}
+
+.traffic-popup .maplibregl-popup-close-button {
+  color: var(--text-tertiary);
 }
 
 /* Waypoint markers - ensure proper drag behavior */

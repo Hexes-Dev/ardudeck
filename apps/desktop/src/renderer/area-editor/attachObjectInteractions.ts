@@ -20,7 +20,7 @@ import type { GeoJSONSource, MapMouseEvent, MapLayerMouseEvent } from 'maplibre-
 import { useObjectsStore, type ContextTarget } from './objects-store';
 import {
   makeRectangle, makeCircle, translateObject, rotateObject, scaleObjectAbout,
-  worldToLocal, objectWorldRing, isVertexEditable, type EditorObject, type LocalPt,
+  worldToLocal, objectWorldRing, objectWorldHoles, isVertexEditable, type EditorObject, type LocalPt,
 } from './area-object';
 import { buildObjectsData, buildTransformHandles, buildVertexHandles, buildDraftData } from './objects-geo';
 import { rectangleRing, circleRing, nearestEdgeIndex, polylineLength } from '../components/survey/geo-edit';
@@ -29,6 +29,18 @@ import { useSettingsStore } from '../stores/settings-store';
 import { formatSurveyDistanceM } from './survey-units';
 import { formatAreaFromSquareMeters } from '../../shared/user-units.js';
 import type { LatLng } from '../components/survey/survey-types';
+
+/** Distance (m) from a world point to edge `i` of a ring, in the point's local frame. */
+function edgeDistM(ring: LatLng[], i: number, p: LatLng): number {
+  if (i < 0 || ring.length < 2) return Infinity;
+  const a = latLngToLocal(p, ring[i]!);
+  const b = latLngToLocal(p, ring[(i + 1) % ring.length]!);
+  const dx = b.x - a.x; const dy = b.y - a.y;
+  const len2 = dx * dx + dy * dy;
+  let t = len2 > 0 ? -(a.x * dx + a.y * dy) / len2 : 0;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(a.x + t * dx, a.y + t * dy);
+}
 
 function src(map: maplibregl.Map, id: string): GeoJSONSource | null {
   const s = map.getSource(id);
@@ -56,7 +68,7 @@ type Drag =
   | { kind: 'move'; obj0: EditorObject; start: LatLng }
   | { kind: 'rotate'; obj0: EditorObject; startAngle: number }
   | { kind: 'scale'; obj0: EditorObject; anchor: LocalPt; hx: number; hy: number; axis: 'xy' | 'x' | 'y' }
-  | { kind: 'vertex'; index: number }
+  | { kind: 'vertex'; index: number; branch: number; hole: number }
   | { kind: 'measureVertex'; index: number }
   | { kind: 'shape'; tool: 'rectangle' | 'circle'; anchor: LatLng }
   | null;
@@ -148,7 +160,7 @@ export function attachObjectInteractions(map: maplibregl.Map): () => void {
   const unsubTool = useObjectsStore.subscribe(
     (s) => s.tool,
     (tool) => {
-      const placing = tool === 'polygon' || tool === 'corridor' || tool === 'measure' || tool === 'rectangle' || tool === 'circle' || tool === 'hole' || tool === 'split';
+      const placing = tool === 'polygon' || tool === 'corridor' || tool === 'measure' || tool === 'rectangle' || tool === 'circle' || tool === 'hole' || tool === 'split' || tool === 'branch';
       if (placing) map.doubleClickZoom.disable(); else map.doubleClickZoom.enable();
       map.getCanvas().style.cursor = placing ? 'crosshair' : '';
       if (tool !== 'measure') { measureCursor = null; label.style.display = 'none'; }
@@ -210,8 +222,12 @@ export function attachObjectInteractions(map: maplibregl.Map): () => void {
     if (get().tool !== 'edit') return;
     const idx = e.features?.[0]?.properties?.['vertex'];
     if (typeof idx !== 'number') return;
+    const br = e.features?.[0]?.properties?.['branch'];
+    const branch = typeof br === 'number' ? br : -1;
+    const hl = e.features?.[0]?.properties?.['hole'];
+    const hole = typeof hl === 'number' ? hl : -1;
     get().selectVertex(idx);
-    drag = { kind: 'vertex', index: idx };
+    drag = { kind: 'vertex', index: idx, branch, hole };
     dragHistoryPushed = false;
     map.dragPan.disable();
     e.preventDefault();
@@ -227,14 +243,28 @@ export function attachObjectInteractions(map: maplibregl.Map): () => void {
       return;
     }
     if (!sel || !isVertexEditable(sel)) return;
-    const i = nearestEdgeIndex(objectWorldRing(sel), { lat: e.lngLat.lat, lng: e.lngLat.lng });
-    get().insertVertexAfter(i, { lat: e.lngLat.lat, lng: e.lngLat.lng });
+    const p: LatLng = { lat: e.lngLat.lat, lng: e.lngLat.lng };
+    // Insert on whichever ring (outer or a hole) the click is closest to, so a
+    // click near a hole edge adds a hole vertex rather than an outer one.
+    let bestRing = -1; // -1 = outer, else hole index
+    let bestEdge = nearestEdgeIndex(objectWorldRing(sel), p);
+    let bestDist = edgeDistM(objectWorldRing(sel), bestEdge, p);
+    objectWorldHoles(sel).forEach((hole, hi) => {
+      const ei = nearestEdgeIndex(hole, p);
+      const d = edgeDistM(hole, ei, p);
+      if (d < bestDist) { bestDist = d; bestEdge = ei; bestRing = hi; }
+    });
+    get().insertVertexAfter(bestEdge, p, bestRing);
   };
   const onVertexContext = (e: MapLayerMouseEvent): void => {
     e.preventDefault();
     if (get().tool !== 'edit') return;
     const idx = e.features?.[0]?.properties?.['vertex'];
-    if (typeof idx === 'number') get().deleteVertex(idx);
+    const br = e.features?.[0]?.properties?.['branch'];
+    const hl = e.features?.[0]?.properties?.['hole'];
+    if (typeof idx === 'number') {
+      get().deleteVertex(idx, typeof br === 'number' ? br : -1, typeof hl === 'number' ? hl : -1);
+    }
   };
 
   // ---- select tool: drag a point of the selected measurement ----
@@ -283,7 +313,7 @@ export function attachObjectInteractions(map: maplibregl.Map): () => void {
         const sy = drag.axis === 'x' || Math.abs(denomY) < 1e-6 ? 1 : (pl.y - drag.anchor.y) / denomY;
         get().replaceObject(scaleObjectAbout(drag.obj0, sx, sy, drag.anchor));
       } else if (drag.kind === 'vertex') {
-        get().moveVertex(drag.index, p);
+        get().moveVertex(drag.index, p, drag.branch, drag.hole);
       } else if (drag.kind === 'measureVertex') {
         get().moveMeasurePoint(drag.index, p);
       } else if (drag.kind === 'shape') {
@@ -297,7 +327,7 @@ export function attachObjectInteractions(map: maplibregl.Map): () => void {
 
     // No drag: update draft / measure rubber-bands.
     const t = get().tool;
-    if ((t === 'polygon' || t === 'corridor' || t === 'hole') && get().draftPoints.length >= 1) {
+    if ((t === 'polygon' || t === 'corridor' || t === 'hole' || t === 'branch') && get().draftPoints.length >= 1) {
       draftCursor = p;
       syncObjects();
     } else if (t === 'split' && splitStart) {
@@ -337,7 +367,7 @@ export function attachObjectInteractions(map: maplibregl.Map): () => void {
   // ---- click (draft / measure / deselect) ----
   const onClick = (e: MapMouseEvent): void => {
     const t = get().tool;
-    if (t === 'polygon' || t === 'corridor' || t === 'hole') {
+    if (t === 'polygon' || t === 'corridor' || t === 'hole' || t === 'branch') {
       // Hole tool: the first click also targets the area underneath, so the user
       // doesn't have to select it first (unless a suitable area is already chosen).
       if (t === 'hole' && get().draftPoints.length === 0) {
@@ -348,6 +378,21 @@ export function attachObjectInteractions(map: maplibregl.Map): () => void {
           if (typeof id === 'string') {
             const obj = get().objects.find((o) => o.id === id);
             if (obj && obj.type !== 'corridor') get().selectObject(id);
+          }
+        }
+      }
+      // Branch tool: the first click targets the corridor underneath if one isn't
+      // already selected, so a branch always attaches to a real corridor.
+      if (t === 'branch' && get().draftPoints.length === 0) {
+        const cur = selectedObject();
+        if (!cur || cur.type !== 'corridor') {
+          const hit = map.queryRenderedFeatures(e.point, { layers: ['objects-fill', 'objects-outline'] });
+          for (const f of hit) {
+            const id = f.properties?.['id'];
+            if (typeof id === 'string') {
+              const obj = get().objects.find((o) => o.id === id);
+              if (obj && obj.type === 'corridor') { get().selectObject(id); break; }
+            }
           }
         }
       }
@@ -382,6 +427,10 @@ export function attachObjectInteractions(map: maplibregl.Map): () => void {
       e.preventDefault();
       draftCursor = null;
       get().finishDraft();
+    } else if (t === 'branch') {
+      e.preventDefault();
+      draftCursor = null;
+      get().finishBranch();
     } else if (t === 'hole') {
       e.preventDefault();
       draftCursor = null;
@@ -433,7 +482,7 @@ export function attachObjectInteractions(map: maplibregl.Map): () => void {
   };
   const clearPointer = (): void => {
     const t = get().tool;
-    map.getCanvas().style.cursor = (t === 'polygon' || t === 'corridor' || t === 'measure' || t === 'rectangle' || t === 'circle' || t === 'hole' || t === 'split') ? 'crosshair' : '';
+    map.getCanvas().style.cursor = (t === 'polygon' || t === 'corridor' || t === 'measure' || t === 'rectangle' || t === 'circle' || t === 'hole' || t === 'split' || t === 'branch') ? 'crosshair' : '';
   };
 
   // Edit tool: hovering the active shape's edge shows an add-point ("+") cursor;

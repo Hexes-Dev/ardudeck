@@ -370,6 +370,9 @@ interface SettingsStore {
   removeSurveyPreset: (id: string) => void;
   setLastSurveyPresetId: (id: string | null) => void;
   setSurveySavedConfig: (config: Record<string, unknown> | null) => void;
+  /** Imported boundary guides shown on the mission map (guide-store owns the shape). */
+  mapGuides: Record<string, unknown>[];
+  setMapGuides: (guides: Record<string, unknown>[]) => void;
 
   // User-saved camera presets (added to the camera dropdown). Built-in cameras
   // live in code (camera-presets.ts); this is the user slice, keyed by name.
@@ -790,6 +793,7 @@ export const useSettingsStore = create<SettingsStore>()(
   surveyPresets: [] as PersistedSurveyPreset[],
   lastSurveyPresetId: null as string | null,
   surveySavedConfig: null as Record<string, unknown> | null,
+  mapGuides: [] as Record<string, unknown>[],
   saveSurveyPreset: (preset: PersistedSurveyPreset) => {
     set((s) => {
       const others = s.surveyPresets.filter((p) => p.id !== preset.id);
@@ -821,6 +825,9 @@ export const useSettingsStore = create<SettingsStore>()(
   },
   setSurveySavedConfig: (config) => {
     set({ surveySavedConfig: config });
+  },
+  setMapGuides: (guides) => {
+    set({ mapGuides: guides });
   },
 
   // Computed
@@ -913,6 +920,7 @@ export const useSettingsStore = create<SettingsStore>()(
           surveyPresets: (settings.surveyPresets ?? []) as PersistedSurveyPreset[],
           lastSurveyPresetId: settings.lastSurveyPresetId ?? null,
           surveySavedConfig: (settings.surveySavedConfig as Record<string, unknown> | undefined) ?? null,
+          mapGuides: (settingsRecord.mapGuides as Record<string, unknown>[] | undefined) ?? [],
           userCameraPresets: (settingsRecord.userCameraPresets as CameraPreset[] | undefined) ?? [],
           _isInitialized: true,
         });
@@ -957,6 +965,7 @@ export const useSettingsStore = create<SettingsStore>()(
         ...(state.lastSurveyPresetId ? { lastSurveyPresetId: state.lastSurveyPresetId } : {}),
         ...(state.surveySavedConfig ? { surveySavedConfig: state.surveySavedConfig } : {}),
         userCameraPresets: state.userCameraPresets,
+        mapGuides: state.mapGuides,
       };
       await window.electronAPI?.saveSettings(payload);
     } catch (error) {
@@ -1268,6 +1277,7 @@ useSettingsStore.subscribe(
     aiProvider: state.aiProvider,
     aiWarningDismissed: state.aiWarningDismissed,
     surveyPresets: state.surveyPresets,
+    mapGuides: state.mapGuides,
     lastSurveyPresetId: state.lastSurveyPresetId,
     surveySavedConfig: state.surveySavedConfig,
     userCameraPresets: state.userCameraPresets,

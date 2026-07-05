@@ -12,7 +12,7 @@
  *    Show footprints toggle. Power users open once and it sticks for the session.
  *  - Stats + Insert button pinned at the bottom outside the scroll area.
  */
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, useMemo, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { useSurveyStore } from '../../stores/survey-store';
 import { useMissionStore } from '../../stores/mission-store';
@@ -20,9 +20,18 @@ import { useSettingsStore } from '../../stores/settings-store';
 import { useNavigationStore } from '../../stores/navigation-store';
 import { CameraPresetSelector } from './CameraPresetSelector';
 import { SurveyStatsPanel } from './SurveyStatsPanel';
+import { FleetSurveyPanel } from './FleetSurveyPanel';
+import { useActiveVehicleStore } from '../../stores/active-vehicle-store';
 import { estimateBatteryCount, estimateDataSizeGb } from './survey-stats';
 import { surveyToMissionItems } from './mission-builder';
-import { patternToGeneratorId, getSurveyGenerator } from './generator-registry';
+import {
+  getSurveyGenerator,
+  listSurveyGenerators,
+  resolveGeneratorId,
+  subscribeSurveyGenerators,
+  getSurveyGeneratorsVersion,
+  type GeneratorConfigField,
+} from './generator-registry';
 import { createSurveyGroup, createManualGroup, nextGroupColor, GROUP_COLOR_PALETTE } from '../../../shared/mission-group-types';
 import { splitIntoSorties } from './survey-sortie-split';
 import { computeSurveyGroupSignature } from './survey-group-signature';
@@ -96,6 +105,11 @@ export function SurveyConfigPanel() {
   const polygon = useSurveyStore((s) => s.polygon);
   const config = useSurveyStore((s) => s.config);
   const result = useSurveyStore((s) => s.result);
+  const generating = useSurveyStore((s) => s.generating);
+  const generatorError = useSurveyStore((s) => s.generatorError);
+  // Fleet survey: offer "split across fleet" once 2+ vehicles are connected.
+  const fleetCount = useActiveVehicleStore((s) => Object.keys(s.knownVehicles).length);
+  const [showFleetSplit, setShowFleetSplit] = useState(false);
   const showFootprints = useSurveyStore((s) => s.showFootprints);
   const editingGroupId = useSurveyStore((s) => s.editingGroupId);
   const polygonEditMode = useSurveyStore((s) => s.polygonEditMode);
@@ -105,6 +119,8 @@ export function SurveyConfigPanel() {
   const setEditingGroupId = useSurveyStore((s) => s.setEditingGroupId);
 
   const setPattern = useSurveyStore((s) => s.setPattern);
+  const setGeneratorId = useSurveyStore((s) => s.setGeneratorId);
+  const setEngineParam = useSurveyStore((s) => s.setEngineParam);
   const setAltitude = useSurveyStore((s) => s.setAltitude);
   const setSpeed = useSurveyStore((s) => s.setSpeed);
   const setFrontOverlap = useSurveyStore((s) => s.setFrontOverlap);
@@ -116,6 +132,7 @@ export function SurveyConfigPanel() {
   const setCameraOffOutside = useSurveyStore((s) => s.setCameraOffOutside);
   const setGridMode = useSurveyStore((s) => s.setGridMode);
   const setAltitudeReference = useSurveyStore((s) => s.setAltitudeReference);
+  const setTerrainFollow = useSurveyStore((s) => s.setTerrainFollow);
   const setShowFootprints = useSurveyStore((s) => s.setShowFootprints);
   const setGroundPattern = useSurveyStore((s) => s.setGroundPattern);
   const setSpiralDirection = useSurveyStore((s) => s.setSpiralDirection);
@@ -128,6 +145,10 @@ export function SurveyConfigPanel() {
   const setCorridorStrips = useSurveyStore((s) => s.setCorridorStrips);
   const setCorridorMode = useSurveyStore((s) => s.setCorridorMode);
   const setCorridorSideOffset = useSurveyStore((s) => s.setCorridorSideOffset);
+  const startBranchDraw = useSurveyStore((s) => s.startBranchDraw);
+  const completeBranch = useSurveyStore((s) => s.completeBranch);
+  const clearCorridorBranches = useSurveyStore((s) => s.clearCorridorBranches);
+  const drawMode = useSurveyStore((s) => s.drawMode);
   const setMaxTurnAngle = useSurveyStore((s) => s.setMaxTurnAngle);
   const setFlipLegs = useSurveyStore((s) => s.setFlipLegs);
   const setInvertPath = useSurveyStore((s) => s.setInvertPath);
@@ -156,10 +177,38 @@ export function SurveyConfigPanel() {
   const [customCamera, setCustomCamera] = useState<CameraPreset>(config.camera);
   const [insertSuccess, setInsertSuccess] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+
+  // Module-supplied generators (e.g. TOPAS) register after their module loads,
+  // which is async - subscribe so they appear without a panel remount.
+  const generatorsVersion = useSyncExternalStore(subscribeSurveyGenerators, getSurveyGeneratorsVersion);
+  const moduleGenerators = useMemo(
+    () => listSurveyGenerators().filter((g) => !g.id.startsWith('builtin.')),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- version is the registry's change counter
+    [generatorsVersion],
+  );
+  const activeGenerator = getSurveyGenerator(resolveGeneratorId(config));
+  const engineFields: GeneratorConfigField[] = config.generatorId
+    ? (activeGenerator?.configFields ?? [])
+    : [];
   const [importError, setImportError] = useState<string | null>(null);
   // null = not naming; '' or text = inline camera-name entry open. (Electron has
   // no window.prompt, so naming is an inline field.)
   const [cameraNameDraft, setCameraNameDraft] = useState<string | null>(null);
+
+  // Terrain-follow status line: "sampling..." until the async DEM bake lands,
+  // then the MSL altitude band the flight will cover.
+  const terrainFollowStatus = useMemo(() => {
+    if (!config.terrainFollow) return null;
+    const alts = result?.altitudes;
+    if (!alts || alts.length === 0) return 'sampling terrain...';
+    let min = Infinity;
+    let max = -Infinity;
+    for (const a of alts) {
+      if (a < min) min = a;
+      if (a > max) max = a;
+    }
+    return `MSL ${Math.round(min)}-${Math.round(max)}m`;
+  }, [config.terrainFollow, result]);
 
   const simplifyToleranceM = useSettingsStore((s) => s.surveyPerformance.importSimplifyToleranceM);
   const updateSurveyPerformance = useSettingsStore((s) => s.updateSurveyPerformance);
@@ -292,16 +341,18 @@ export function SurveyConfigPanel() {
     // result so the survey is editable + regeneratable later (PR 5 + 8).
     // The `generatorResult` carries any generator-specific extras (e.g. TOPAS
     // decomposition); built-in generators leave it null.
-    const generatorId = patternToGeneratorId(config.pattern);
+    const generatorId = resolveGeneratorId(fullConfig);
     const reg = getSurveyGenerator(generatorId);
     const survey = createSurveyGroup({
       name: `Survey ${existingGroups.filter((g) => g.kind === 'survey').length + 1}`,
       generatorId,
       generatorVersion: reg?.version ?? '1.0.0',
       polygon: polygon.map((p) => ({ lat: p.lat, lng: p.lng })),
+      workspace: fullConfig.workspace,
       config: fullConfig as unknown as Record<string, unknown>,
       color: nextGroupColor(existingGroups),
     });
+    survey.generatorResult = result.generatorResult ?? null;
     // Stamp the signature now so the group starts off in a non-stale
     // state. Subsequent polygon / config edits flip it to stale.
     survey.lastGeneratedSignature = computeSurveyGroupSignature(survey);
@@ -358,11 +409,11 @@ export function SurveyConfigPanel() {
           <button
             onClick={handleImportArea}
             className="px-3 py-1.5 text-xs rounded-md bg-surface-raised text-content hover:text-purple-300 transition-colors"
-            title="Import a boundary from a KML, KMZ, or GeoJSON file"
+            title="Import a boundary from a KML, KMZ, GeoJSON, or Shapefile (.shp / zipped)"
           >
             Import area from file
           </button>
-          <span className="text-[10px] text-content-tertiary">KML · KMZ · GeoJSON</span>
+          <span className="text-[10px] text-content-tertiary">KML · KMZ · GeoJSON · SHP</span>
 
           {/* Simplify tolerance — applied to imported boundaries. Dense GIS
               rings (thousands of points) are reduced to this tolerance so the
@@ -422,7 +473,7 @@ export function SurveyConfigPanel() {
         <button
           onClick={handleImportArea}
           className="p-1.5 text-content-secondary hover:text-purple-400 transition-colors"
-          title="Import area from file (KML/KMZ/GeoJSON)"
+          title="Import area from file (KML/KMZ/GeoJSON/Shapefile)"
         >
           <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
@@ -456,7 +507,21 @@ export function SurveyConfigPanel() {
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
           </svg>
         </button>
+        {fleetCount >= 2 && (
+          <button
+            onClick={() => setShowFleetSplit(true)}
+            disabled={!polygon}
+            className="p-1.5 text-content-secondary hover:text-cyan-400 transition-colors disabled:opacity-40"
+            title="Split this survey across the connected fleet"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16M12 4v16" />
+            </svg>
+          </button>
+        )}
       </div>
+
+      {showFleetSplit && <FleetSurveyPanel onClose={() => setShowFleetSplit(false)} />}
 
       <div className="p-3 space-y-3 overflow-y-auto flex-1 min-h-0">
         {/* Camera Section */}
@@ -584,6 +649,22 @@ export function SurveyConfigPanel() {
                     ))}
                   </div>
                 </div>
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={!!config.terrainFollow}
+                    onChange={(e) => setTerrainFollow(e.target.checked)}
+                    className="mt-0.5 w-3.5 h-3.5 rounded border-subtle bg-surface-input accent-purple-600 cursor-pointer"
+                  />
+                  <span className="text-[11px] text-content-secondary leading-snug">
+                    <span className="text-content">Terrain follow</span> - sample ground
+                    elevation at every waypoint and hold {config.altitude}m above it (bakes
+                    absolute MSL altitudes, no onboard terrain data needed).
+                    {terrainFollowStatus && (
+                      <span className="text-purple-300"> {terrainFollowStatus}</span>
+                    )}
+                  </span>
+                </label>
               </>
             )}
             <SpeedSliderInput label="Speed" valueMps={config.speed} onChangeMps={setSpeed} minMps={1} maxMps={30} />
@@ -617,7 +698,7 @@ export function SurveyConfigPanel() {
                     key={opt.id}
                     onClick={() => setPattern(opt.id)}
                     className={`px-2 py-1.5 text-xs rounded-lg transition-colors ${
-                      config.pattern === opt.id
+                      config.pattern === opt.id && !config.generatorId
                         ? 'bg-purple-600/80 text-white'
                         : 'bg-surface-raised text-content-secondary hover:text-content hover:bg-surface-raised'
                     }`}
@@ -629,6 +710,40 @@ export function SurveyConfigPanel() {
               </div>
             );
           })()}
+
+          {/* Module-supplied engines (registered via host.survey, e.g. TOPAS).
+              Mutually exclusive with the built-in patterns above. */}
+          {moduleGenerators.length > 0 && (
+            <div className="mt-1 grid grid-cols-1 gap-1">
+              {moduleGenerators.map((gen) => (
+                <button
+                  key={gen.id}
+                  onClick={() => setGeneratorId(config.generatorId === gen.id ? null : gen.id)}
+                  className={`px-2 py-1.5 text-xs rounded-lg text-left transition-colors ${
+                    config.generatorId === gen.id
+                      ? 'bg-teal-600/80 text-white'
+                      : 'bg-surface-raised text-content-secondary hover:text-content'
+                  }`}
+                  title={gen.description}
+                >
+                  <span className="flex items-center gap-1.5">
+                    {gen.displayName}
+                    {gen.capabilities.isRemote && (
+                      <span
+                        className={`px-1 py-px text-[9px] font-semibold uppercase tracking-wide rounded border ${
+                          config.generatorId === gen.id
+                            ? 'bg-white/15 text-white border-white/40'
+                            : 'bg-teal-500/20 text-teal-300 border-teal-500/30'
+                        }`}
+                      >
+                        Remote
+                      </span>
+                    )}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
 
           {/* Spiral direction sub-control — only when spiral pattern is active. */}
           {config.pattern === 'spiral' && (
@@ -698,6 +813,23 @@ export function SurveyConfigPanel() {
           )}
         </Section>
 
+        {/* Engine parameters - declared by the active module generator via
+            its configFields schema. Only shown while that engine is selected. */}
+        {engineFields.length > 0 && (
+          <Section title="Engine parameters">
+            <div className="space-y-2">
+              {engineFields.map((field) => (
+                <EngineParamControl
+                  key={field.id}
+                  field={field}
+                  value={config.engineParams?.[field.id]}
+                  onChange={(v) => setEngineParam(field.id, v)}
+                />
+              ))}
+            </div>
+          </Section>
+        )}
+
         {/* Corridor settings — only when the corridor pattern is active. The
             drawn polygon is treated as a centerline, not an area. */}
         {config.pattern === 'corridor' && (
@@ -763,6 +895,37 @@ export function SurveyConfigPanel() {
                 step={5}
                 unit="m"
               />
+
+              {/* Branches: extra centerlines that fork off the corridor (forked
+                  roads, power-line spurs). Each is flown as its own strip set. */}
+              <div className="flex items-center gap-2 pt-1">
+                <span className="text-xs text-content-secondary w-14 flex-shrink-0">Branches</span>
+                {drawMode === 'branch' ? (
+                  <button
+                    onClick={() => completeBranch()}
+                    className="flex-1 px-2 py-1 text-[11px] rounded-md bg-purple-600/80 text-white hover:bg-purple-600 transition-colors"
+                  >
+                    Click the map, double-click to finish
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => startBranchDraw()}
+                    className="flex-1 px-2 py-1 text-[11px] rounded-md bg-surface-raised text-content-secondary hover:text-content transition-colors"
+                    title="Draw a branch centerline that forks off this corridor"
+                  >
+                    + Add branch
+                  </button>
+                )}
+                {(config.corridorBranches?.length ?? 0) > 0 && (
+                  <button
+                    onClick={() => clearCorridorBranches()}
+                    className="px-2 py-1 text-[11px] rounded-md bg-surface-raised text-content-secondary hover:text-content transition-colors tabular-nums"
+                    title="Remove all branches"
+                  >
+                    Clear {config.corridorBranches!.length}
+                  </button>
+                )}
+              </div>
 
               {!isManualCamera && (config.corridorMode ?? 'plane') === 'plane' && (
                 <>
@@ -948,6 +1111,26 @@ export function SurveyConfigPanel() {
           )}
         </div>
 
+        {/* Async (remote) engine status: busy indicator, failures, advisories. */}
+        {generating && (
+          <div className="pt-3 flex items-center gap-2 text-[11px] text-content-secondary">
+            <span className="w-3 h-3 rounded-full border-2 border-teal-400/30 border-t-teal-400 animate-spin" />
+            Computing coverage plan{activeGenerator ? ` (${activeGenerator.displayName})` : ''}...
+          </div>
+        )}
+        {generatorError && !generating && (
+          <div className="mt-3 px-2.5 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-[11px] text-red-300 leading-snug">
+            {generatorError}
+          </div>
+        )}
+        {!generating && result?.warnings && result.warnings.length > 0 && (
+          <div className="mt-3 px-2.5 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-300 leading-snug space-y-1">
+            {result.warnings.map((w, i) => (
+              <div key={i}>{w}</div>
+            ))}
+          </div>
+        )}
+
         {/* Stats — show whenever we have a generated result. */}
         {result && result.waypoints.length > 0 && (
           <div className="pt-3 border-t border-subtle">
@@ -1013,15 +1196,20 @@ export function SurveyConfigPanel() {
             <div className="space-y-1.5">
               <button
                 onClick={handleInsertSurvey}
+                disabled={generating}
                 className={`w-full py-2 rounded-lg text-sm font-medium transition-colors ${
                   insertSuccess
                     ? 'bg-emerald-600 text-white'
-                    : 'bg-purple-600 hover:bg-purple-500 text-white'
+                    : generating
+                      ? 'bg-purple-600/40 text-white/60 cursor-wait'
+                      : 'bg-purple-600 hover:bg-purple-500 text-white'
                 }`}
               >
                 {insertSuccess
                   ? `Inserted ${result.waypoints.length} waypoints`
-                  : `Insert Survey (${result.waypoints.length} WPs)`}
+                  : generating
+                    ? 'Computing...'
+                    : `Insert Survey (${result.waypoints.length} WPs)`}
               </button>
               {!isManualCamera && estimateBatteryCount(result.stats.flightTime, config.enduranceMinutes ?? 20) > 1 && (
                 <button
@@ -1041,6 +1229,81 @@ export function SurveyConfigPanel() {
 }
 
 // --- Sub-components ---
+
+/**
+ * Render one declarative engine parameter (module generator configFields).
+ * Number fields reuse the SliderInput look; booleans and selects match the
+ * panel's existing control styling.
+ */
+function EngineParamControl({
+  field,
+  value,
+  onChange,
+}: {
+  field: GeneratorConfigField;
+  value: unknown;
+  onChange: (v: unknown) => void;
+}) {
+  if (field.type === 'number') {
+    const current = typeof value === 'number' ? value : field.default;
+    return (
+      <div>
+        <SliderInput
+          label={field.label}
+          value={current}
+          onChange={onChange}
+          min={field.min ?? 0}
+          max={field.max ?? Math.max(field.default * 10, 1)}
+          step={field.step ?? 1}
+          unit={field.unit ?? ''}
+        />
+        {field.description && (
+          <p className="text-[10px] text-content-tertiary leading-snug mt-0.5">{field.description}</p>
+        )}
+      </div>
+    );
+  }
+  if (field.type === 'boolean') {
+    const current = typeof value === 'boolean' ? value : field.default;
+    return (
+      <label className="flex items-start gap-2 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={current}
+          onChange={(e) => onChange(e.target.checked)}
+          className="mt-0.5 w-3.5 h-3.5 rounded border-subtle bg-surface-input accent-teal-600 cursor-pointer"
+        />
+        <span className="text-[11px] text-content-secondary leading-snug">
+          <span className="text-content">{field.label}</span>
+          {field.description ? ` - ${field.description}` : ''}
+        </span>
+      </label>
+    );
+  }
+  const current = typeof value === 'string' ? value : field.default;
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-xs text-content-secondary w-20 flex-shrink-0" title={field.description}>
+        {field.label}
+      </span>
+      <div className="flex gap-1 flex-1">
+        {field.options.map((opt) => (
+          <button
+            key={opt.value}
+            onClick={() => onChange(opt.value)}
+            className={`flex-1 px-2 py-1 text-[11px] rounded-md transition-colors ${
+              current === opt.value
+                ? 'bg-teal-600/80 text-white'
+                : 'bg-surface-raised text-content-secondary hover:text-content'
+            }`}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (

@@ -61,6 +61,32 @@ describe('computeMissionBriefing', () => {
     expect(b.maxFromHomeM).toBeGreaterThan(b.distanceM / 2);
   });
 
+  it('reports max altitude as height-above-home for asl-frame waypoints (issue #106)', () => {
+    // Site ground ~1100m ASL. ASL waypoints at 1180m are only 80m above home,
+    // comfortably under the ceiling - they must not read as 1180.
+    const b = computeMissionBriefing({
+      ...base,
+      homeAltM: 1100,
+      located: [
+        { lat: 0, lng: 0, altM: 1180, frame: 'asl' },
+        { lat: 0.01, lng: 0, altM: 1180, frame: 'asl' },
+      ],
+    });
+    expect(b.maxAltM).toBe(80);
+  });
+
+  it('treats relative-frame waypoints as already height-above-home', () => {
+    const b = computeMissionBriefing({
+      ...base,
+      homeAltM: 1100,
+      located: [
+        { lat: 0, lng: 0, altM: 60, frame: 'relative' },
+        { lat: 0.01, lng: 0, altM: 60, frame: 'relative' },
+      ],
+    });
+    expect(b.maxAltM).toBe(60);
+  });
+
   it('needs more batteries as the mission outlasts endurance', () => {
     // ~111km of legs at 10 m/s = ~3 hours; 20-min packs -> many batteries.
     const b = computeMissionBriefing({ ...base, located: legPoints(101) });

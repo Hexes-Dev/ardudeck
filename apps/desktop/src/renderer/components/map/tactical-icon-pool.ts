@@ -129,6 +129,30 @@ const MODE_CATEGORY_COLORS: Record<ModeCategory, string> = {
  * Classify a flight mode string into a color category.
  * Mode names come from ArduPilot telemetry (e.g. "Stabilize", "Guided", "RTL").
  */
+/** Category for a mode string (shared by the hex + CSS-var color helpers). */
+export function getModeCategory(mode: string): ModeCategory {
+  const m = mode.toUpperCase();
+  if (m === 'LAND' || m === 'BRAKE' || m === 'SMARTRTL' || m === 'SURFACE') return 'emergency';
+  if (m === 'AUTO' || m === 'GUIDED' || m === 'RTL' || m === 'MISSION' || m === 'QRTL') return 'auto';
+  if (
+    m === 'LOITER' || m === 'ALTHOLD' || m === 'ALT_HOLD' || m === 'POSHOLD' ||
+    m === 'POS_HOLD' || m === 'HOLD' || m === 'CIRCLE' || m === 'QLOITER' ||
+    m === 'QHOVER' || m === 'CRUISE' || m === 'FBWA' || m === 'FBWB' ||
+    m === 'FLYBYWIREA' || m === 'FLYBYWIREB' || m === 'FLOWHOLD'
+  ) return 'assisted';
+  return 'manual';
+}
+
+/**
+ * Theme-aware mode color for text ON A SURFACE (fleet cards/lists). Returns a CSS var
+ * that resolves bright in dark mode and darker/saturated in light mode, so it stays
+ * readable on either background. The map icon uses getModeCategoryColor (bright hex)
+ * because its label sits on a fixed dark disc.
+ */
+export function getModeCategoryVar(mode: string): string {
+  return `var(--mode-${getModeCategory(mode)})`;
+}
+
 export function getModeCategoryColor(mode: string): string {
   const m = mode.toUpperCase();
 

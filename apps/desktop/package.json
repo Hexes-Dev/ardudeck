@@ -13,8 +13,11 @@
   "main": "./out/main/index.js",
   "type": "module",
   "scripts": {
+    "build:sim-engine": "tsc -b ../sim-engine --force",
+    "predev": "pnpm build:sim-engine",
     "dev": "electron-vite dev",
     "dev:deeplink": "ARDUDECK_DEEPLINK=\"${ARDUDECK_DEEPLINK:-ardudeck://open?view=mission}\" electron-vite dev",
+    "prebuild": "pnpm build:sim-engine",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "package": "electron-builder",
@@ -25,6 +28,7 @@
   },
   "dependencies": {
     "@ardudeck/comms": "workspace:*",
+    "@ardudeck/sim-engine": "workspace:*",
     "@ardudeck/companion-types": "workspace:*",
     "@ardudeck/dataflash-parser": "workspace:^",
     "@ardudeck/mavlink-ts": "workspace:*",
@@ -66,6 +70,7 @@
     "@types/ws": "^8.5.0",
     "@vitejs/plugin-react": "^4.2.1",
     "@vitest/coverage-v8": "2.1.9",
+    "@xmldom/xmldom": "0.8.11",
     "autoprefixer": "^10.4.16",
     "electron": "28.3.3",
     "electron-builder": "^26.7.0",
@@ -125,7 +130,10 @@
       "resources/bin/**/*",
       "resources/firmware/**/*",
       "resources/sitl/**/*",
-      "**/*.node"
+      "**/*.node",
+      "node_modules/@ardudeck/sim-engine/**",
+      "node_modules/@ardudeck/sim-physics/**",
+      "node_modules/ws/**"
     ],
     "icon": "resources/icon",
     "win": {

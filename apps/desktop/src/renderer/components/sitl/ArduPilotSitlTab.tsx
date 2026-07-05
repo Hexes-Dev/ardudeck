@@ -8,11 +8,12 @@ import { useEffect, useMemo, useRef, useCallback, useState } from 'react';
 import { useArduPilotSitlStore, ARDUPILOT_MODELS } from '../../stores/ardupilot-sitl-store';
 import { useConnectionStore } from '../../stores/connection-store';
 import { useSettingsStore } from '../../stores/settings-store';
-import type { VirtualRCState, ArduPilotVehicleType, ArduPilotReleaseTrack, ArduPilotFrameInfo } from '../../../shared/ipc-channels';
+import type { VirtualRCState, ArduPilotVehicleType, ArduPilotReleaseTrack, ArduPilotFrameInfo, SwarmFormation, SwarmInstanceState } from '../../../shared/ipc-channels';
 import { getIpLocation } from '../../utils/ip-geolocation';
 import SitlEnvironmentPanel from './SitlEnvironmentPanel';
 import SitlFailurePanel from './SitlFailurePanel';
 import { CustomFramePanel } from './CustomFramePanel';
+import { useSwarmSitlStore } from '../../stores/swarm-sitl-store';
 import {
   altitudeValueFromMeters,
   toMetersFromAltitudeUnit,
@@ -26,11 +27,33 @@ const VEHICLE_TYPE_OPTIONS: Array<{ value: ArduPilotVehicleType; label: string; 
   { value: 'sub', label: 'Sub', icon: 'M11 19v-4H9.5C7.01 15 5 12.99 5 10.5S7.01 6 9.5 6h5C17.99 6 20 8.01 20 10.5S17.99 15 15.5 15H14v4h-3z' },
 ];
 
+// One-click home presets for the in-app simulator. CMAC is ArduPilot's canonical
+// SITL home (Canberra Model Aircraft Club); the rest are well-known open spaces.
+const HOME_PRESETS: Array<{ name: string; lat: number; lng: number; alt: number; heading: number }> = [
+  { name: 'CMAC (default)', lat: -35.3632621, lng: 149.1652374, alt: 584, heading: 353 },
+  { name: 'SF Bay', lat: 37.7749, lng: -122.4194, alt: 0, heading: 270 },
+  { name: 'Nevada Desert', lat: 39.5296, lng: -119.8138, alt: 1370, heading: 0 },
+  { name: 'Swiss Alps', lat: 46.5197, lng: 7.9628, alt: 1800, heading: 90 },
+];
+
 const RELEASE_TRACK_OPTIONS: Array<{ value: ArduPilotReleaseTrack; label: string; description: string }> = [
   { value: 'stable', label: 'Stable', description: 'Recommended for most users' },
   { value: 'beta', label: 'Beta', description: 'Release candidates and testing' },
   { value: 'dev', label: 'Dev', description: 'Latest development builds' },
 ];
+
+const SWARM_FORMATIONS: Array<{ value: SwarmFormation; label: string }> = [
+  { value: 'grid', label: 'Grid' },
+  { value: 'line', label: 'Line' },
+  { value: 'circle', label: 'Circle' },
+];
+
+const SWARM_STATE_STYLE: Record<SwarmInstanceState, { dot: string; label: string }> = {
+  spawning: { dot: 'bg-amber-400 animate-pulse', label: 'spawning' },
+  ready: { dot: 'bg-emerald-400', label: 'ready' },
+  exited: { dot: 'bg-content-tertiary', label: 'exited' },
+  error: { dot: 'bg-rose-400', label: 'error' },
+};
 
 export default function ArduPilotSitlTab() {
   const {
@@ -80,6 +103,28 @@ export default function ArduPilotSitlTab() {
     dismissCrashRecovery,
   } = useArduPilotSitlStore();
 
+  const {
+    count: swarmCount,
+    spacingM: swarmSpacing,
+    formation: swarmFormation,
+    isRunning: swarmRunning,
+    isStarting: swarmStarting,
+    isStopping: swarmStopping,
+    instances: swarmInstances,
+    lastError: swarmError,
+    setCount: setSwarmCount,
+    setSpacingM: setSwarmSpacing,
+    setFormation: setSwarmFormation,
+    start: startSwarm,
+    stop: stopSwarm,
+    initListeners: initSwarmListeners,
+    refreshStatus: refreshSwarmStatus,
+  } = useSwarmSitlStore();
+
+  // Run mode: a single vehicle, or a swarm fleet. Both share the airframe/home
+  // config above; they're mutually exclusive at runtime (same base port).
+  const [runMode, setRunMode] = useState<'single' | 'swarm'>('single');
+
   const { connectionState } = useConnectionStore();
   const { setPendingSitlSwitch, unitPreferences } = useSettingsStore();
   const altitudeUnit = unitPreferences.altitude;
@@ -125,12 +170,45 @@ export default function ArduPilotSitlTab() {
     }
   }, [setHomeLocation, homeLocation.alt, homeLocation.heading]);
 
+  const openSimWindow = useCallback(() => {
+    window.electronAPI?.openDetachedWindow?.({
+      componentId: 'sim-world',
+      title: '3D Sim World',
+      initialBounds: { width: 1280, height: 800 },
+    });
+  }, []);
+
+  // One-click: start standard SITL if it isn't already running (which auto-connects
+  // MAVLink via the connection panel's retry), then open the telemetry-driven 3D
+  // world window. No special physics engine — the 3D world reads MAVLink.
+  // EXACTLY the connection screen's working quick-start (handleSitlQuickStart):
+  // start SITL, and on success arm the auto-connect. Then open the 3D window.
+  // No extra guards — do the same thing that works.
+  const launchSim = useCallback(async () => {
+    const success = await start();
+    if (success) setPendingSitlSwitch(true);
+    openSimWindow();
+  }, [start, setPendingSitlSwitch, openSimWindow]);
+
   // Initialize listeners and check status on mount
   useEffect(() => {
     checkStatus();
     const cleanup = initListeners();
     return cleanup;
   }, [initListeners, checkStatus]);
+
+  // Swarm: subscribe to instance/state pushes and reconcile status on mount.
+  useEffect(() => {
+    refreshSwarmStatus();
+    const cleanup = initSwarmListeners();
+    return cleanup;
+  }, [initSwarmListeners, refreshSwarmStatus]);
+
+  // If a swarm is already running (e.g. on tab re-mount), reflect that in the
+  // mode toggle so the Run card shows swarm controls instead of the single one.
+  useEffect(() => {
+    if (swarmRunning) setRunMode('swarm');
+  }, [swarmRunning]);
 
   // Fetch the upstream frame catalog once on mount. Stays cached after first
   // load — refreshFrames is the explicit user action behind the refresh icon.
@@ -315,8 +393,18 @@ export default function ArduPilotSitlTab() {
       )}
 
       {/* Vehicle Type Selection */}
-      <div className="bg-surface-input border border-subtle rounded-lg p-4">
-        <h3 className="text-sm font-medium text-content mb-3">Vehicle Type</h3>
+      <div className="bg-surface-input border border-subtle rounded-xl p-5">
+        <div className="flex items-center gap-3 mb-5">
+          <div className="w-8 h-8 rounded-lg bg-blue-500/10 border border-blue-500/20 flex items-center justify-center shrink-0">
+            <svg className="w-4 h-4 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
+            </svg>
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-content">Vehicle Type</h3>
+            <p className="text-xs text-content-secondary">Choose the airframe class to simulate</p>
+          </div>
+        </div>
         <div className="grid grid-cols-4 gap-2">
           {VEHICLE_TYPE_OPTIONS.map((opt) => (
             <button
@@ -338,12 +426,25 @@ export default function ArduPilotSitlTab() {
         </div>
       </div>
 
-      {/* Configuration Row */}
-      <div className="grid grid-cols-2 gap-4">
-        {/* Model & Release Track */}
-        <div className="bg-surface-input border border-subtle rounded-lg p-4">
-          <h3 className="text-sm font-medium text-content mb-3">Configuration</h3>
-          <div className="space-y-3">
+      {/* Physics & Home/Scenarios row */}
+      <div className="grid grid-cols-2 gap-4 items-start">
+        {/* Physics & Frame */}
+        <div className="bg-surface-input border border-subtle rounded-xl p-5">
+          <div className="flex items-center gap-3 mb-5">
+            <div className="w-8 h-8 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center shrink-0">
+              <svg className="w-4 h-4 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3.6 9h16.8M3.6 15h16.8M12 3a15 15 0 010 18M12 3a15 15 0 000 18" />
+              </svg>
+            </div>
+            <div>
+              <h3 className="text-sm font-semibold text-content">Physics &amp; Frame</h3>
+              <p className="text-xs text-content-secondary">Flight dynamics model and airframe</p>
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            {/* Frame/Model */}
             <div>
               <div className="flex items-center justify-between mb-1">
                 <label className="text-xs text-content-secondary">Frame/Model</label>
@@ -380,6 +481,7 @@ export default function ArduPilotSitlTab() {
 
             <CustomFramePanel />
 
+            {/* Release Track */}
             <div>
               <label className="block text-xs text-content-secondary mb-1">Release Track</label>
               <div className="grid grid-cols-3 gap-1">
@@ -401,36 +503,73 @@ export default function ArduPilotSitlTab() {
               </div>
             </div>
 
-            <div className="flex items-center gap-4">
-              <div className="flex-1">
-                <label className="block text-xs text-content-secondary mb-1">Speedup</label>
-                <input
-                  type="number"
-                  value={speedup}
-                  onChange={(e) => setSpeedup(Math.max(1, parseInt(e.target.value) || 1))}
-                  disabled={isRunning || isStarting}
-                  min={1}
-                  max={10}
-                  className="w-full px-2 py-1.5 text-sm bg-surface-raised text-content border border rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-500/50 disabled:opacity-50"
-                />
+            {/* 3D Sim World — telemetry-driven view over standard SITL */}
+            <div className="rounded-lg border border-indigo-500/20 bg-indigo-500/[0.04] p-3">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-semibold text-content">3D Sim World</span>
+                <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-indigo-500/15 text-indigo-300">pop-out</span>
               </div>
-              <div className="flex items-center gap-2 pt-5">
-                <input
-                  type="checkbox"
-                  checked={wipeOnStart}
-                  onChange={(e) => setWipeOnStart(e.target.checked)}
-                  disabled={isRunning || isStarting}
-                  className="w-4 h-4 rounded border bg-surface-raised text-blue-500 focus:ring-blue-500/50"
-                />
-                <label className="text-xs text-content-secondary">Wipe EEPROM</label>
-              </div>
+              <p className="text-[11px] text-content-secondary mt-1 leading-snug">
+                A 3D view of the connected vehicle: fly, run missions, place obstacles (as exclusion
+                fences) and inject wind/failures live. Works with standard SITL - no special engine.
+              </p>
+              <button
+                onClick={launchSim}
+                disabled={isStarting}
+                data-tip={isRunning ? 'Open the 3D sim world window' : 'Start SITL, connect, and open the 3D world'}
+                className="mt-3 w-full py-2 text-sm font-medium text-indigo-300 bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/30 rounded-lg transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M14 3h7m0 0v7m0-7L10 14M19 14v5a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h5" />
+                </svg>
+                {isRunning ? 'Open 3D World' : isStarting ? 'Starting…' : 'Start SITL & Open 3D World'}
+              </button>
             </div>
           </div>
         </div>
 
-        {/* Home Location */}
-        <div className="bg-surface-input border border-subtle rounded-lg p-4">
-          <h3 className="text-sm font-medium text-content mb-3">Home Location</h3>
+        {/* Home & Scenarios */}
+        <div className="bg-surface-input border border-subtle rounded-xl p-5">
+          <div className="flex items-center gap-3 mb-5">
+            <div className="w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center shrink-0">
+              <svg className="w-4 h-4 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+            </div>
+            <div>
+              <h3 className="text-sm font-semibold text-content">Home &amp; Scenarios</h3>
+              <p className="text-xs text-content-secondary">Spawn location for the simulated vehicle</p>
+            </div>
+          </div>
+
+          {/* Scenario presets — populate the home fields below */}
+          <div className="mb-4">
+            <label className="block text-xs text-content-secondary mb-1.5">Scenario presets</label>
+            <div className="grid grid-cols-2 gap-2">
+              {HOME_PRESETS.map((p) => {
+                const active =
+                  Math.abs(homeLocation.lat - p.lat) < 1e-4 && Math.abs(homeLocation.lng - p.lng) < 1e-4;
+                return (
+                  <button
+                    key={p.name}
+                    onClick={() => setHomeLocation({ lat: p.lat, lng: p.lng, alt: p.alt, heading: p.heading })}
+                    disabled={isRunning || isStarting}
+                    data-tip={`${p.lat.toFixed(4)}, ${p.lng.toFixed(4)} · ${p.alt}m`}
+                    className={`px-2 py-2 text-xs rounded-lg border transition-colors ${
+                      active
+                        ? 'bg-blue-500/20 border-blue-500/50 text-blue-400'
+                        : 'bg-surface border text-content-secondary hover:bg-surface hover:text-content'
+                    } disabled:opacity-50 disabled:cursor-not-allowed`}
+                  >
+                    {p.name}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Home location fields — populated by presets above */}
           <div className="grid grid-cols-2 gap-2">
             <div>
               <label className="block text-xs text-content-secondary mb-1">Latitude</label>
@@ -533,9 +672,128 @@ export default function ArduPilotSitlTab() {
         </div>
       </div>
 
-      {/* Binary Status & Download */}
-      <div className="bg-surface-input border border-subtle rounded-lg p-4">
-        <div className="flex items-center justify-between">
+      {/* Run — mode (single / swarm) + launch settings + binary status + start/stop */}
+      <div className="bg-surface-input border border-subtle rounded-xl p-5">
+        <div className="flex items-center justify-between gap-3 mb-5">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-green-500/10 border border-green-500/20 flex items-center justify-center shrink-0">
+              <svg className="w-4 h-4 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            </div>
+            <div>
+              <h3 className="text-sm font-semibold text-content">Run</h3>
+              <p className="text-xs text-content-secondary">
+                {runMode === 'swarm' ? 'Launch a fleet of vehicles' : 'Launch settings and SITL control'}
+              </p>
+            </div>
+          </div>
+
+          {/* Single / Swarm mode toggle */}
+          <div className="inline-flex rounded-lg border border-subtle bg-surface p-0.5">
+            {(['single', 'swarm'] as const).map((m) => (
+              <button
+                key={m}
+                onClick={() => setRunMode(m)}
+                disabled={isRunning || isStarting || swarmRunning || swarmStarting}
+                className={`px-3 py-1 text-xs font-medium rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                  runMode === m ? 'bg-green-500/20 text-green-300' : 'text-content-secondary hover:text-content'
+                }`}
+              >
+                {m === 'single' ? 'Single' : 'Swarm'}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Launch settings strip — shared by both modes */}
+        <div className="flex items-end gap-4 mb-4 flex-wrap">
+          <div className="w-28">
+            <label
+              className="flex items-center gap-1 text-xs text-content-secondary mb-1 cursor-help"
+              data-tip="How fast the simulation runs vs. real time. 1x = real-time. Higher finishes flights quicker but uses more CPU - leave at 1x if unsure."
+            >
+              Sim speed
+              <svg className="w-3 h-3 text-content-tertiary" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            </label>
+            <div className="relative">
+              <input
+                type="number"
+                value={speedup}
+                onChange={(e) => setSpeedup(Math.max(1, parseInt(e.target.value) || 1))}
+                disabled={isRunning || isStarting || swarmRunning || swarmStarting}
+                min={1}
+                max={10}
+                className="w-full px-2 py-1.5 pr-6 text-sm bg-surface-raised text-content border border rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-500/50 disabled:opacity-50"
+              />
+              <span className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-content-tertiary pointer-events-none">x</span>
+            </div>
+          </div>
+          <label className="flex items-center gap-2 pb-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={wipeOnStart}
+              onChange={(e) => setWipeOnStart(e.target.checked)}
+              disabled={isRunning || isStarting || swarmRunning || swarmStarting}
+              className="w-4 h-4 rounded border bg-surface-raised text-blue-500 focus:ring-blue-500/50"
+            />
+            <span className="text-xs text-content-secondary">Wipe EEPROM</span>
+          </label>
+
+          {/* Swarm-only settings */}
+          {runMode === 'swarm' && (
+            <>
+              <div className="w-24">
+                <label className="block text-xs text-content-secondary mb-1">Vehicles</label>
+                <input
+                  type="number"
+                  min={2}
+                  max={20}
+                  value={swarmCount}
+                  onChange={(e) => setSwarmCount(parseInt(e.target.value, 10))}
+                  disabled={swarmRunning || swarmStarting}
+                  className="w-full px-2 py-1.5 text-sm bg-surface-raised text-content border border rounded-lg focus:outline-none focus:ring-1 focus:ring-purple-500/50 disabled:opacity-50"
+                />
+              </div>
+              <div className="w-24">
+                <label className="block text-xs text-content-secondary mb-1">Spacing (m)</label>
+                <input
+                  type="number"
+                  min={1}
+                  value={swarmSpacing}
+                  onChange={(e) => setSwarmSpacing(parseInt(e.target.value, 10))}
+                  disabled={swarmRunning || swarmStarting}
+                  className="w-full px-2 py-1.5 text-sm bg-surface-raised text-content border border rounded-lg focus:outline-none focus:ring-1 focus:ring-purple-500/50 disabled:opacity-50"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-content-secondary mb-1">Formation</label>
+                <div className="grid grid-cols-3 gap-1">
+                  {SWARM_FORMATIONS.map((f) => (
+                    <button
+                      key={f.value}
+                      onClick={() => setSwarmFormation(f.value)}
+                      disabled={swarmRunning || swarmStarting}
+                      className={`px-2.5 py-1.5 text-xs rounded-lg border transition-colors ${
+                        swarmFormation === f.value
+                          ? 'bg-purple-500/20 border-purple-500/50 text-purple-300'
+                          : 'bg-surface border text-content-secondary hover:bg-surface'
+                      } disabled:opacity-50 disabled:cursor-not-allowed`}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Binary status + start/stop */}
+        <div className="flex items-center justify-between rounded-lg border border-subtle bg-surface px-3 py-3">
           <div className="flex items-center gap-3">
             <div className={`w-2 h-2 rounded-full ${binaryInfo?.exists ? 'bg-green-400' : 'bg-amber-400'}`} />
             <div>
@@ -543,9 +801,11 @@ export default function ArduPilotSitlTab() {
                 {vehicleType.charAt(0).toUpperCase() + vehicleType.slice(1)} ({releaseTrack})
               </span>
               <p className="text-xs text-content-secondary">
-                {binaryInfo?.exists
-                  ? `Ready at ${binaryInfo.path?.split('/').pop()}`
-                  : 'Binary not downloaded'}
+                {!binaryInfo?.exists
+                  ? 'Binary not downloaded'
+                  : runMode === 'swarm'
+                    ? `Spawns ${swarmCount} vehicles on tcp 5760, 5770, 5780, …`
+                    : `Ready at ${binaryInfo.path?.split('/').pop()}`}
               </p>
             </div>
           </div>
@@ -572,56 +832,113 @@ export default function ArduPilotSitlTab() {
               </div>
             )}
 
-            {!isRunning ? (
+            {/* Action button — single Start/Stop or swarm Launch/Stop */}
+            {runMode === 'single' ? (
+              !isRunning ? (
+                <button
+                  onClick={start}
+                  disabled={!isStatusChecked || isStarting || !binaryInfo?.exists || connectionState.isConnected}
+                  className="px-4 py-2 text-sm font-medium text-white bg-green-600 hover:bg-green-500 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                >
+                  {isStarting ? (
+                    <>
+                      <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                      Starting...
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                      </svg>
+                      Start
+                    </>
+                  )}
+                </button>
+              ) : (
+                <button
+                  onClick={stop}
+                  disabled={isStopping}
+                  className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-500 rounded-lg transition-colors disabled:opacity-50 flex items-center gap-2"
+                >
+                  {isStopping ? (
+                    <>
+                      <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                      Stopping...
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z" />
+                      </svg>
+                      Stop
+                    </>
+                  )}
+                </button>
+              )
+            ) : !swarmRunning ? (
               <button
-                onClick={start}
-                disabled={!isStatusChecked || isStarting || !binaryInfo?.exists || connectionState.isConnected}
-                className="px-4 py-2 text-sm font-medium text-white bg-green-600 hover:bg-green-500 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                onClick={() => { void startSwarm(); }}
+                disabled={swarmStarting || !binaryInfo?.exists || connectionState.isConnected}
+                className="px-4 py-2 text-sm font-medium text-white bg-purple-600 hover:bg-purple-500 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
               >
-                {isStarting ? (
+                {swarmStarting ? (
                   <>
                     <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
                       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                     </svg>
-                    Starting...
+                    Launching…
                   </>
                 ) : (
-                  <>
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
-                    </svg>
-                    Start
-                  </>
+                  `Launch ${swarmCount} vehicles`
                 )}
               </button>
             ) : (
               <button
-                onClick={stop}
-                disabled={isStopping}
+                onClick={() => { void stopSwarm(); }}
+                disabled={swarmStopping}
                 className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-500 rounded-lg transition-colors disabled:opacity-50 flex items-center gap-2"
               >
-                {isStopping ? (
-                  <>
-                    <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                    </svg>
-                    Stopping...
-                  </>
-                ) : (
-                  <>
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z" />
-                    </svg>
-                    Stop
-                  </>
-                )}
+                {swarmStopping ? 'Stopping…' : 'Stop swarm'}
               </button>
             )}
           </div>
         </div>
+
+        {/* Swarm instance status grid */}
+        {runMode === 'swarm' && swarmInstances.length > 0 && (
+          <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+            {swarmInstances.map((inst) => {
+              const style = SWARM_STATE_STYLE[inst.state];
+              return (
+                <div
+                  key={inst.index}
+                  className="flex items-center gap-2 rounded-lg border border-subtle bg-surface px-2.5 py-2"
+                  data-tip={inst.error ?? undefined}
+                >
+                  <span className={`w-2 h-2 rounded-full shrink-0 ${style.dot}`} />
+                  <div className="min-w-0">
+                    <div className="text-xs text-content font-medium">SYS {inst.sysid}</div>
+                    <div className="text-[10px] text-content-tertiary font-mono truncate">
+                      tcp {inst.tcpPort} · {style.label}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {runMode === 'swarm' && swarmError && (
+          <div className="mt-3 text-xs text-rose-400">{swarmError}</div>
+        )}
       </div>
 
       {/* Connection hint */}

@@ -16,6 +16,9 @@ import { useMissionStore } from '../../stores/mission-store';
 import { useParameterStore } from '../../stores/parameter-store';
 import { useArduPilotSitlStore } from '../../stores/ardupilot-sitl-store';
 import { useSettingsStore } from '../../stores/settings-store';
+import { useActiveVehicleStore } from '../../stores/active-vehicle-store';
+import { useFleetVehicles } from '../../hooks/useFleet';
+import { useOrchestrationStore } from '../../stores/orchestration-store';
 import { isPreArmMessage, extractPreArmReason, matchPreArmError } from '../../../shared/prearm-checks';
 import { PreArmParamFix } from '../prearm/PreArmParamFix';
 import { PanelContainer, SectionTitle } from './panel-utils';
@@ -466,22 +469,62 @@ const MISSION_MODES: Record<ArduPilotVehicleClass, { auto: number; pause: number
   sub:    { auto: 3,  pause: 16, pauseLabel: 'PosHold' },
 };
 
-function MavlinkFlightControl() {
+function MavlinkFlightControl({ mavTypeOverride }: { mavTypeOverride?: number }) {
   const flight = useTelemetryStore((s) => s.flight);
   const messages = useMessagesStore((s) => s.messages);
   const connectionState = useConnectionStore((s) => s.connectionState);
   // Multi-signal VTOL detection: MAV_TYPE alone is unreliable on first
   // connect (FCU reports FIXED_WING until reboot picks up Q_ENABLE). Pulling
   // the live Q_ENABLE param + the running SITL frame closes both gaps.
-  const qEnable = useParameterStore((s) => s.parameters.get('Q_ENABLE')?.value);
+  const qEnableParam = useParameterStore((s) => s.parameters.get('Q_ENABLE')?.value);
   const sitlIsRunning = useArduPilotSitlStore((s) => s.isRunning);
   const sitlFrame = useArduPilotSitlStore((s) => s.model);
-  const vehicleClass = getVehicleClass(connectionState.mavType, {
+  // Detached windows (e.g. the 3D Sim World, Vision pop-outs) don't bulk-hydrate
+  // the parameter store, so Q_ENABLE - the decisive VTOL signal - is absent there
+  // and a quadplane misdetects as `plane` (giving fixed-wing modes). Fall back to
+  // a targeted one-shot read of just Q_ENABLE so class detection matches the main
+  // window regardless of which window hosts this panel. No-op in the main window
+  // (Q_ENABLE is already present) and self-heals across connect/disconnect.
+  const [qEnableFallback, setQEnableFallback] = useState<number | undefined>(undefined);
+  useEffect(() => {
+    if (typeof qEnableParam === 'number') return; // store already has it
+    if (!connectionState.isConnected) { setQEnableFallback(undefined); return; }
+    let cancelled = false;
+    void window.electronAPI?.readParameterBatch?.(['Q_ENABLE'])
+      .then((res) => {
+        if (cancelled) return;
+        const v = res?.values?.['Q_ENABLE'];
+        setQEnableFallback(typeof v === 'number' ? v : undefined);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [qEnableParam, connectionState.isConnected]);
+  const qEnable = qEnableParam ?? qEnableFallback;
+  // In fleet mode the active vehicle's MAV_TYPE drives the class (the legacy
+  // connectionState.mavType belongs to the idle primary connection).
+  const vehicleClass = getVehicleClass(mavTypeOverride ?? connectionState.mavType, {
     qEnable: typeof qEnable === 'number' ? qEnable : undefined,
     sitlFrame: sitlIsRunning ? sitlFrame : undefined,
   });
   const availableModes = ARDUPILOT_COMMON_MODES[vehicleClass];
   const capabilities = VEHICLE_CAPABILITIES[vehicleClass];
+  // Squad command: when a formation is active and the LEADER is selected, arm/disarm/mode
+  // fan out to the whole formation (the leader leads the squad). Otherwise commands act on
+  // just the active vehicle. Movement already propagates via the follow.leader loop.
+  const formationLeaderKey = useActiveVehicleStore((s) => s.formationLeaderKey);
+  const activeVehicleKey = useActiveVehicleStore((s) => s.activeVehicleKey);
+  const fleetVehicles = useFleetVehicles();
+  const squadKeys = formationLeaderKey && activeVehicleKey === formationLeaderKey
+    ? fleetVehicles.map((v) => v.key)
+    : null;
+  // Fleet takeoff routing: when the active vehicle belongs to an orchestrator fleet, take off
+  // via the engine's synchronized takeoff (squad if leading a formation, else just this one).
+  const orchServers = useOrchestrationStore((s) => s.servers);
+  const orchServer = Object.values(orchServers).find((s) => s.capabilities.includes('takeoff.synchronized'));
+  const activeFleetVehicle = fleetVehicles.find((v) => v.key === activeVehicleKey);
+  const fleetTakeoffSysids = orchServer && activeFleetVehicle
+    ? (squadKeys ? fleetVehicles.map((v) => v.sysid) : [activeFleetVehicle.sysid])
+    : null;
   const missionItems = useMissionStore((s) => s.missionItems);
   const currentSeq = useMissionStore((s) => s.currentSeq);
   const fetchMission = useMissionStore((s) => s.fetchMission);
@@ -587,7 +630,15 @@ function MavlinkFlightControl() {
       // VTOL takeoff aborted with motors back at 0% the FCU stays in the
       // takeoff state for a short window. Forwarding the user's Force
       // toggle to the disarm path is the unstick.
-      const ok = await window.electronAPI.mavlinkArmDisarm(wantArm, forceArm);
+      let ok: boolean;
+      if (squadKeys) {
+        const results = await Promise.all(squadKeys.map((k) =>
+          window.electronAPI.vehicleCommand(k, { kind: wantArm ? 'arm' : 'disarm', force: forceArm }),
+        ));
+        ok = results.some(Boolean);
+      } else {
+        ok = await window.electronAPI.mavlinkArmDisarm(wantArm, forceArm);
+      }
       if (!ok) {
         setIsLoading(false);
         setStatusMsg({ text: 'Not connected', type: 'error' });
@@ -618,7 +669,9 @@ function MavlinkFlightControl() {
     setModeLoading(modeNum);
     setStatusMsg(null);
     try {
-      const ok = await window.electronAPI.mavlinkSetMode(modeNum);
+      const ok = squadKeys
+        ? (await Promise.all(squadKeys.map((k) => window.electronAPI.vehicleCommand(k, { kind: 'setmode', customMode: modeNum })))).some(Boolean)
+        : await window.electronAPI.mavlinkSetMode(modeNum);
       if (!ok) {
         setStatusMsg({ text: 'Not connected', type: 'error' });
         setModeLoading(null);
@@ -664,6 +717,22 @@ function MavlinkFlightControl() {
   // for the chosen strategy.
   const handleTakeoff = async () => {
     setShowTakeoffDialog(false);
+
+    // Fleet vehicle: route through the orchestrator's synchronized takeoff, which runs the
+    // full GUIDED -> ARM -> NAV_TAKEOFF sequence per vehicle (with the right per-class mode)
+    // and is verified to climb. The client-side executeTakeoff below is for the primary
+    // single connection only. A formation leader takes off the whole squad.
+    if (orchServer && fleetTakeoffSysids) {
+      void window.electronAPI?.submitIntent?.(orchServer.transportId, {
+        kind: 'takeoff.synchronized',
+        vehicleSysids: fleetTakeoffSysids,
+        payload: { altitude: takeoffAlt },
+      });
+      setStatusMsg({ text: `Taking off to ${takeoffAlt}m...`, type: 'success' });
+      setTimeout(() => setStatusMsg(null), 3000);
+      return;
+    }
+
     const store = useTelemetryStore.getState;
     const result = await executeTakeoff({
       altitudeM:    takeoffAlt,
@@ -716,114 +785,223 @@ function MavlinkFlightControl() {
     <PanelContainer>
       <div ref={containerRef} data-tour="telemetry-flight-control" className="h-full min-h-0">
         {isHorizontal ? (
-          /* Horizontal layout — ARM button is THE hero control */
-          <div className="h-full flex flex-col justify-center gap-3">
-            <div className="flex items-center gap-4">
-              {/* Left: Mode + protocol */}
-              <div className="shrink-0 w-20">
-                <div className="text-content font-medium leading-tight">{flight.mode || 'Unknown'}</div>
-                <div className="text-[10px] text-content-secondary">MAVLink</div>
-              </div>
-
-              {/* CENTER: The ARM button — primary control */}
-              <div className="flex-1 flex justify-center">
-                <button
-                  onClick={() => handleArmDisarm()}
-                  disabled={isLoading}
-                  className={`
-                    flex items-center justify-center gap-3 min-w-[200px] px-8 py-3.5 rounded-xl
-                    font-bold text-base uppercase tracking-wider
-                    transition-all duration-200 select-none border-2
-                    ${isLoading ? 'cursor-wait' : 'cursor-pointer'}
-                    ${flight.armed
-                      ? 'bg-red-500/15 border-red-500/50 text-red-400 hover:bg-red-500/25 shadow-lg shadow-red-500/10'
-                      : forceArm
-                        ? 'bg-amber-500/15 border-amber-500/50 text-amber-400 hover:bg-amber-500/25 shadow-lg shadow-amber-500/10'
-                        : 'bg-surface border-subtle text-content hover:bg-surface-raised hover:text-content hover:border-default'
-                    }
-                  `}
-                >
-                  {isLoading ? (
-                    <>
-                      <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                      </svg>
-                      <span>{flight.armed ? 'Disarming...' : 'Arming...'}</span>
-                    </>
-                  ) : (
-                    <>
-                      <div className={`w-2.5 h-2.5 rounded-full ${
-                        flight.armed ? 'bg-red-400 animate-pulse' : forceArm ? 'bg-amber-400' : 'bg-content-tertiary'
-                      }`} />
-                      <span>{flight.armed ? 'Disarm' : forceArm ? 'Force Arm' : 'Arm'}</span>
-                    </>
-                  )}
-                </button>
-              </div>
-
-              {/* Right: Force toggle */}
-              <div className="shrink-0 w-20 flex justify-end">
-                <button
-                  onClick={() => setForceArm(!forceArm)}
-                  className={`
-                    flex items-center gap-2 px-3 py-2 rounded-lg transition-all
-                    ${forceArm
-                      ? 'bg-amber-500/10 border border-amber-500/30'
-                      : 'bg-surface border border-subtle hover:border-default'
-                    }
-                  `}
-                  title="Force ARM bypasses pre-arm safety checks"
-                >
-                  <svg className={`w-3.5 h-3.5 ${forceArm ? 'text-amber-400' : 'text-content-secondary'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                  </svg>
-                  <span className={`text-xs font-medium ${forceArm ? 'text-amber-300' : 'text-content'}`}>Force</span>
-                  <div className={`w-7 h-3.5 rounded-full transition-colors relative ${forceArm ? 'bg-amber-500' : 'bg-surface-raised'}`}>
-                    <div className={`absolute top-0.5 w-2.5 h-2.5 rounded-full bg-white shadow transition-transform ${forceArm ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
-                  </div>
-                </button>
-              </div>
-            </div>
-
-            {/* Status feedback — right below the ARM button */}
-            {statusMsg && (
-              <div className={`text-center text-xs font-medium ${statusColor}`}>{statusMsg.text}</div>
-            )}
-
-            {/* Pre-arm reasons as compact chips */}
-            {!flight.armed && preArmReasons.length > 0 && (
-              <div className="space-y-1">
-                <div className="flex flex-wrap items-center justify-center gap-1.5">
-                  {preArmReasons.map(({ reason, fix }, i) => {
-                    const hasFixContent = fix.params.length > 0 || fix.action || fix.navigateTo;
-                    return (
-                      <span
-                        key={i}
-                        className={`px-2 py-0.5 bg-red-500/10 border border-red-500/20 rounded text-red-300 text-[11px] ${hasFixContent ? 'cursor-pointer hover:bg-red-500/15' : ''}`}
-                        onClick={hasFixContent ? () => setExpandedPreArm((prev) => {
-                          const next = new Set(prev);
-                          if (next.has(reason)) next.delete(reason);
-                          else next.add(reason);
-                          return next;
-                        }) : undefined}
-                      >
-                        {reason} {hasFixContent && (expandedPreArm.has(reason) ? '▾' : '›')}
-                      </span>
-                    );
-                  })}
+          /* Horizontal layout — a command bar that spreads every control
+             across the available width instead of hiding them. A short, wide
+             dock should expose the same actions as the tall dock (modes,
+             takeoff, mission, force), just laid out left-to-right. */
+          <div className="relative h-full flex items-center justify-center">
+            <div className="flex items-stretch gap-3 max-w-full overflow-x-auto px-1">
+              {/* ARM cluster: state + mode, hero button, force toggle */}
+              <div className="shrink-0 flex flex-col justify-center gap-1.5">
+                <div className="flex items-center gap-1.5 text-xs">
+                  <div className={`w-2 h-2 rounded-full shrink-0 ${
+                    flight.armed ? 'bg-red-400 animate-pulse' : 'bg-content-tertiary'
+                  }`} />
+                  <span className={`font-medium ${flight.armed ? 'text-red-400' : 'text-content-secondary'}`}>
+                    {flight.armed ? 'ARMED' : 'DISARMED'}
+                  </span>
+                  <span className="text-content-tertiary">·</span>
+                  <span className="text-content truncate max-w-[140px]">{flight.mode || 'Unknown'}</span>
+                  <span className="text-[10px] text-content-tertiary shrink-0">MAVLink</span>
                 </div>
-                {preArmReasons.filter(({ reason }) => expandedPreArm.has(reason)).map(({ reason, fix }) => (
-                  <PreArmParamFix
-                    key={reason}
-                    paramIds={fix.params}
-                    hint={fix.hint}
-                    action={fix.action}
-                    navigateTo={fix.navigateTo}
-                  />
-                ))}
+                <div className="flex items-stretch gap-2">
+                  <button
+                    onClick={() => handleArmDisarm()}
+                    disabled={isLoading}
+                    className={`
+                      flex items-center justify-center gap-3 min-w-[180px] px-7 py-3 rounded-xl
+                      font-bold text-base uppercase tracking-wider
+                      transition-all duration-200 select-none border-2
+                      ${isLoading ? 'cursor-wait' : 'cursor-pointer'}
+                      ${flight.armed
+                        ? 'bg-red-500/15 border-red-500/50 text-red-400 hover:bg-red-500/25 shadow-lg shadow-red-500/10'
+                        : forceArm
+                          ? 'bg-amber-500/15 border-amber-500/50 text-amber-400 hover:bg-amber-500/25 shadow-lg shadow-amber-500/10'
+                          : 'bg-surface border-subtle text-content hover:bg-surface-raised hover:text-content hover:border-default'
+                      }
+                    `}
+                  >
+                    {isLoading ? (
+                      <>
+                        <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                        </svg>
+                        <span>{flight.armed ? 'Disarming...' : 'Arming...'}</span>
+                      </>
+                    ) : (
+                      <>
+                        <div className={`w-2.5 h-2.5 rounded-full ${
+                          flight.armed ? 'bg-red-400 animate-pulse' : forceArm ? 'bg-amber-400' : 'bg-content-tertiary'
+                        }`} />
+                        <span>{flight.armed ? 'Disarm' : forceArm ? 'Force Arm' : 'Arm'}</span>
+                      </>
+                    )}
+                  </button>
+
+                  {/* Force toggle — compact, stacked label over switch */}
+                  <button
+                    onClick={() => setForceArm(!forceArm)}
+                    className={`
+                      shrink-0 flex flex-col items-center justify-center gap-1 px-2.5 rounded-lg transition-all
+                      ${forceArm
+                        ? 'bg-amber-500/10 border border-amber-500/30'
+                        : 'bg-surface border border-subtle hover:border-default'
+                      }
+                    `}
+                    title="Force ARM bypasses pre-arm safety checks"
+                  >
+                    <span className={`text-[10px] font-medium ${forceArm ? 'text-amber-300' : 'text-content-secondary'}`}>Force</span>
+                    <div className={`w-7 h-3.5 rounded-full transition-colors relative ${forceArm ? 'bg-amber-500' : 'bg-surface-raised'}`}>
+                      <div className={`absolute top-0.5 w-2.5 h-2.5 rounded-full bg-white shadow transition-transform ${forceArm ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
+                    </div>
+                  </button>
+                </div>
               </div>
-            )}
+
+              <div className="w-px self-stretch bg-subtle/60 shrink-0" />
+
+              {/* Flight modes — fill into 2 rows, flowing into columns so the
+                  grid grows horizontally to use the available width. */}
+              <div className="grid grid-rows-2 grid-flow-col gap-1 content-center shrink-0">
+                {availableModes.map((mode) => {
+                  const isActive = flight.modeNum === mode.modeNum;
+                  return (
+                    <button
+                      key={mode.modeNum}
+                      onClick={() => handleSetMode(mode.modeNum)}
+                      title={mode.name}
+                      className={`px-3 py-1.5 min-w-[72px] rounded-md text-[11px] font-medium truncate
+                        transition-colors duration-150
+                        ${isActive
+                          ? 'bg-blue-500 text-white shadow-sm shadow-blue-500/30'
+                          : 'bg-surface-raised text-content hover:text-white border border-transparent hover:border-default'}
+                      `}
+                    >
+                      {mode.name}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="w-px self-stretch bg-subtle/60 shrink-0" />
+
+              {/* Takeoff + Mission — stacked in their own column */}
+              <div className="shrink-0 flex flex-col justify-center gap-1.5 min-w-[150px]">
+                {capabilities.takeoff.supported && (
+                  <button
+                    onClick={() => setShowTakeoffDialog(true)}
+                    disabled={flight.armed}
+                    className="w-full px-2 py-1.5 text-xs font-medium rounded-lg bg-surface border border-subtle hover:bg-surface-raised hover:border-default disabled:opacity-40 disabled:cursor-not-allowed text-content transition-all"
+                    title={flight.armed ? 'Already armed — click disarm first' : takeoffPresentation.buttonHint}
+                  >
+                    {takeoffPresentation.buttonLabel}
+                  </button>
+                )}
+                <div className="rounded-lg bg-surface border border-subtle p-1.5">
+                  <div className="flex items-center justify-between mb-1 px-1">
+                    <span className="text-[11px] text-content truncate">
+                      {missionLoaded
+                        ? <>
+                            {missionItems.length} wp
+                            <span className="text-content-tertiary"> · </span>
+                            <span className="font-mono text-content-secondary">
+                              {currentSeq != null
+                                ? `→ ${currentSeq + 1}/${missionItems.length}`
+                                : (isInAuto ? 'starting…' : 'idle')}
+                            </span>
+                          </>
+                        : <span className="text-content-secondary">No mission</span>}
+                    </span>
+                    <button
+                      onClick={() => { void fetchMission(); }}
+                      className="text-[11px] text-content-tertiary hover:text-content shrink-0"
+                      title="Reload mission from FC"
+                    >⟳</button>
+                  </div>
+                  {missionLoaded && (
+                    <div className="flex gap-1">
+                      <button
+                        onClick={() => handleSetMode(missionModes.auto)}
+                        disabled={!flight.armed || isInAuto}
+                        className="flex-1 px-2 py-1 text-[11px] font-medium rounded bg-emerald-500/10 border border-emerald-500/30 hover:bg-emerald-500/20 disabled:opacity-40 disabled:cursor-not-allowed text-emerald-300 transition-all"
+                        title={!flight.armed ? 'Arm first' : 'Switch to AUTO'}
+                      >
+                        {isInAuto ? 'Running' : 'Start'}
+                      </button>
+                      {isInAuto ? (
+                        <button
+                          onClick={() => handleSetMode(missionModes.pause)}
+                          disabled={!flight.armed}
+                          className="flex-1 px-2 py-1 text-[11px] font-medium rounded bg-amber-500/10 border border-amber-500/30 hover:bg-amber-500/20 disabled:opacity-40 disabled:cursor-not-allowed text-amber-300 transition-all"
+                        >Pause</button>
+                      ) : (
+                        <button
+                          onClick={() => handleSetMode(missionModes.auto)}
+                          disabled={!flight.armed || !isInPause}
+                          className="flex-1 px-2 py-1 text-[11px] font-medium rounded bg-blue-500/10 border border-blue-500/30 hover:bg-blue-500/20 disabled:opacity-40 disabled:cursor-not-allowed text-blue-300 transition-all"
+                          title={isInPause ? `Resume from ${missionModes.pauseLabel}` : `Pause first`}
+                        >Resume</button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+              {/* Contextual column — status, takeoff input, and pre-arm
+                  warnings ride in the horizontal flow as their own column.
+                  They add WIDTH (the bar scrolls sideways) rather than growing
+                  height or overlapping the controls, so a short strip never
+                  gets a vertical scrollbar and nothing ever covers a button. */}
+              {(statusMsg || showTakeoffDialog || (!flight.armed && preArmReasons.length > 0)) && (
+                <>
+                  <div className="w-px self-stretch bg-subtle/60 shrink-0" />
+                  <div className="shrink-0 flex flex-col justify-center gap-1">
+                    {statusMsg && (
+                      <div className={`text-xs font-medium ${statusColor}`}>{statusMsg.text}</div>
+                    )}
+
+                    {showTakeoffDialog && (
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[11px] text-content-secondary shrink-0">{takeoffPresentation.dialogPrompt}</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={100}
+                          value={takeoffAlt}
+                          onChange={(e) => setTakeoffAlt(Math.max(1, Math.min(100, Number(e.target.value))))}
+                          className="w-14 px-1.5 py-1 text-sm font-mono bg-surface-input border border-subtle rounded text-content"
+                        />
+                        <span className="text-[11px] text-content-secondary shrink-0">m</span>
+                        <button
+                          onClick={handleTakeoff}
+                          className="px-2.5 py-1 text-[11px] font-medium bg-blue-600 hover:bg-blue-500 text-white rounded transition-colors"
+                        >Go</button>
+                        <button
+                          onClick={() => setShowTakeoffDialog(false)}
+                          className="px-1.5 py-1 text-content-secondary hover:text-content transition-colors text-sm leading-none"
+                          title="Cancel"
+                          aria-label="Cancel takeoff"
+                        >✕</button>
+                      </div>
+                    )}
+
+                    {!flight.armed && preArmReasons.length > 0 && (
+                      <div className="grid grid-rows-2 grid-flow-col gap-1">
+                        {preArmReasons.map(({ reason, fix }, i) => (
+                          <span
+                            key={i}
+                            {...(fix.hint ? { 'data-tip': fix.hint } : {})}
+                            className="px-2 py-0.5 bg-red-500/10 border border-red-500/20 rounded text-red-300 text-[11px] truncate max-w-[180px]"
+                          >
+                            {reason}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
           </div>
         ) : (
           /* Vertical layout for side panels — compact to reclaim vertical
@@ -1086,8 +1264,15 @@ function MavlinkFlightControl() {
 export function FlightControlPanel() {
   const flight = useTelemetryStore((s) => s.flight);
   const connectionState = useConnectionStore((state) => state.connectionState);
-  const isConnected = connectionState?.isConnected ?? false;
-  const protocol = connectionState?.protocol;
+  const activeVehicleKey = useActiveVehicleStore((s) => s.activeVehicleKey);
+  const activeMavType = useActiveVehicleStore((s) => (s.activeVehicleKey ? s.knownVehicles[s.activeVehicleKey]?.mavType : undefined));
+  const primaryConnected = connectionState?.isConnected ?? false;
+  // In multi-vehicle mode the primary single connection is idle; the selected fleet
+  // vehicle is the live target. Treat that as connected + MAVLink so the controls
+  // render and act on the active vehicle (the main process routes commands to it).
+  const fleetActive = !primaryConnected && activeVehicleKey != null;
+  const isConnected = primaryConnected || fleetActive;
+  const protocol = fleetActive ? 'mavlink' : connectionState?.protocol;
   const fcVariant = connectionState?.fcVariant;
 
   const {
@@ -1206,7 +1391,7 @@ export function FlightControlPanel() {
 
   // MAVLink mode: show arm/disarm with force-arm option
   if (protocol === 'mavlink') {
-    return <MavlinkFlightControl />;
+    return <MavlinkFlightControl mavTypeOverride={fleetActive ? activeMavType : undefined} />;
   }
 
   return (

@@ -17,6 +17,8 @@ import {
   deserializeVtxConfig,
   serializeVtxConfig,
   deserializeOsdConfig,
+  serializeOsdElementPosition,
+  serializeOsdCharWrite,
   deserializeRxConfig,
   serializeRxConfig,
   SERIALRX_PROVIDER_NAMES,
@@ -34,6 +36,7 @@ import {
   sendMspRequestWithPayload,
   withConfigLock,
 } from './msp-transport.js';
+import { saveEeprom } from './msp-commands.js';
 
 // =============================================================================
 // Failsafe Configuration
@@ -256,6 +259,87 @@ export async function getOsdConfig(): Promise<OsdConfigData | null> {
         console.error('[MSP] OSD_CONFIG failed:', msg);
       }
       return null;
+    }
+  });
+}
+
+/** One element position to write to the FC's OSD layout. */
+export interface OsdElementWrite {
+  /** Betaflight element index (DISPLAY_FIELDS order). */
+  index: number;
+  x: number;
+  y: number;
+  visible: boolean;
+}
+
+/**
+ * Upload OSD element positions to the flight controller.
+ *
+ * Betaflight/iNav apply MSP_SET_OSD_CONFIG one element at a time
+ * ([index:u8, position:u16]), so we send one frame per element and then persist
+ * to EEPROM. Returns the number of elements successfully written.
+ */
+export async function setOsdConfig(
+  elements: OsdElementWrite[],
+): Promise<{ success: boolean; written: number; total: number; error?: string }> {
+  if (!ctx.currentTransport?.isOpen) {
+    return { success: false, written: 0, total: elements.length, error: 'Not connected' };
+  }
+
+  return withConfigLock(async () => {
+    let written = 0;
+    try {
+      for (const el of elements) {
+        const payload = serializeOsdElementPosition(el.index, el.x, el.y, el.visible);
+        await sendMspRequestWithPayload(MSP.SET_OSD_CONFIG, payload, 2000);
+        written++;
+      }
+      await saveEeprom();
+      ctx.sendLog('info', `OSD layout uploaded (${written} elements)`);
+      return { success: true, written, total: elements.length };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error('[MSP] SET_OSD_CONFIG failed:', msg);
+      ctx.sendLog('error', 'Failed to upload OSD layout', msg);
+      return { success: false, written, total: elements.length, error: msg };
+    }
+  });
+}
+
+/** One MAX7456 font character to upload: NVM address + its 54 pixel bytes. */
+export interface OsdFontChar {
+  address: number;
+  bytes: number[];
+}
+
+/**
+ * Upload a custom MCM font to a MAX7456 (analog) flight controller via
+ * MSP_OSD_CHAR_WRITE, one character at a time. MAX7456 NVM writes are slow, so
+ * we pace them. The FC typically needs a reboot afterwards for the new glyphs to
+ * take effect. Returns how many characters were written.
+ */
+export async function uploadOsdFont(
+  chars: OsdFontChar[],
+): Promise<{ success: boolean; written: number; total: number; error?: string }> {
+  if (!ctx.currentTransport?.isOpen) {
+    return { success: false, written: 0, total: chars.length, error: 'Not connected' };
+  }
+  return withConfigLock(async () => {
+    let written = 0;
+    try {
+      for (const c of chars) {
+        await sendMspRequestWithPayload(MSP.OSD_CHAR_WRITE, serializeOsdCharWrite(c.address, c.bytes), 2000);
+        written++;
+        // Pace NVM writes (MAX7456 char-write commit is ~12ms).
+        await new Promise((r) => setTimeout(r, 15));
+      }
+      ctx.sendLog('info', `OSD font uploaded (${written} characters) — reboot the FC to apply`);
+      return { success: true, written, total: chars.length };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error('[MSP] OSD_CHAR_WRITE failed:', msg);
+      ctx.sendLog('error', 'Failed to upload OSD font', msg);
+      return { success: false, written, total: chars.length, error: msg };
     }
   });
 }

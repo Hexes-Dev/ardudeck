@@ -12,10 +12,12 @@ import {
 import 'dockview-react/dist/styles/dockview.css';
 
 import { useTelemetryStore } from '../../stores/telemetry-store';
+import { FleetStrip } from '../fleet/FleetStrip';
 import { useLayoutStore } from '../../stores/layout-store';
 import { useConnectionStore } from '../../stores/connection-store';
 import { useSettingsStore } from '../../stores/settings-store';
 import { useEditModeStore } from '../../stores/edit-mode-store';
+import { useTileCacheAreaStore } from '../../stores/tile-cache-area-store';
 import { useTelemetryLayoutStore } from '../../stores/telemetry-layout-store';
 import { useResolvedTheme } from '../../hooks/useTheme';
 import type { TelemetrySpeed } from '../../../shared/ipc-channels';
@@ -35,6 +37,8 @@ import {
   FlightControlPanel,
   MapPanel,
   MessagesPanel,
+  SafetyMonitorPanel,
+  CameraPanel,
   PreflightCheckCard,
   // Mission panels (for monitoring during flight) - MissionMapPanel removed (merged into MapPanel)
   WaypointTablePanel,
@@ -70,7 +74,9 @@ const PANEL_ID_TO_DETACHED: Record<string, { componentId: string; defaultBounds?
   flightMode: { componentId: 'flight-mode' },
   flightControl: { componentId: 'flight-control' },
   map: { componentId: 'map', defaultBounds: { width: 960, height: 720 } },
+  camera: { componentId: 'camera', defaultBounds: { width: 960, height: 600 } },
   messages: { componentId: 'messages' },
+  safetyMonitor: { componentId: 'safety-monitor', defaultBounds: { width: 420, height: 520 } },
 };
 
 /**
@@ -85,7 +91,13 @@ const PANEL_ID_TO_DETACHED: Record<string, { componentId: string; defaultBounds?
 function PanelHeaderActions(props: IDockviewHeaderActionsProps): JSX.Element | null {
   const active = props.activePanel;
   if (!active) return null;
-  const mapping = PANEL_ID_TO_DETACHED[active.id];
+  // Preset panels use the bare id ("map"); panels added via the Add Panel menu
+  // get a unique "<id>-<timestamp>". Match either so menu-added panels (e.g.
+  // Camera, which is never in a preset) still get a Pop out button.
+  const baseId = Object.keys(PANEL_ID_TO_DETACHED).find(
+    (k) => active.id === k || active.id.startsWith(`${k}-`),
+  );
+  const mapping = baseId ? PANEL_ID_TO_DETACHED[baseId] : undefined;
   if (!mapping) return null;
   const title = active.title ?? active.id;
 
@@ -125,7 +137,9 @@ const components: Record<string, React.FC<IDockviewPanelProps>> = {
   FlightModePanel: () => <PanelWrapper component={FlightModePanel} />,
   FlightControlPanel: () => <PanelWrapper component={FlightControlPanel} />,
   MapPanel: () => <PanelWrapper component={MapPanel} />,
+  CameraPanel: () => <PanelWrapper component={CameraPanel} />,
   MessagesPanel: () => <PanelWrapper component={MessagesPanel} />,
+  SafetyMonitorPanel: () => <PanelWrapper component={SafetyMonitorPanel} />,
   PreflightCheckCard: () => <PanelWrapper component={PreflightCheckCard} />,
   // Mission panels (for monitoring during flight) - readOnly mode
   // Note: MissionMapPanel removed - mission data now integrated into MapPanel
@@ -461,6 +475,7 @@ function LayoutToolbar({
   supportsMissionPlanning,
   isMavlink,
   isSitlRunning,
+  hasMapPanel,
 }: {
   onSave: (name: string) => void;
   onLoad: (name: string) => void;
@@ -471,10 +486,13 @@ function LayoutToolbar({
   supportsMissionPlanning: boolean;
   isMavlink: boolean;
   isSitlRunning: boolean;
+  hasMapPanel: boolean;
 }) {
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const mapMode = useEditModeStore((s) => s.mapMode);
   const setMapMode = useEditModeStore((s) => s.setMapMode);
+  const cacheActive = useTileCacheAreaStore((s) => s.active);
+  const setCacheActive = useTileCacheAreaStore((s) => s.setActive);
   const [layoutName, setLayoutName] = useState('');
 
   // Filter presets based on capabilities
@@ -566,6 +584,22 @@ function LayoutToolbar({
 
       <div className="flex-1" />
 
+      {/* Offline map caching - select an area on the map to save. Only when a map is shown. */}
+      {hasMapPanel && (
+        <button
+          onClick={() => setCacheActive(!cacheActive)}
+          data-tip="Select an area on the map to save for offline use"
+          className={`px-2 py-1 text-xs rounded border transition-colors flex items-center gap-1.5 shrink-0 ${
+            cacheActive ? 'bg-emerald-600 text-white border-emerald-500' : 'bg-surface-raised text-content border-default hover:bg-surface-raised'
+          }`}
+        >
+          <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+          </svg>
+          Offline maps
+        </button>
+      )}
+
       {/* 2D/3D Map Toggle - dev-only until 3D is reworked */}
       {import.meta.env.DEV && (
         <div className="flex items-center rounded-lg overflow-hidden border border-subtle shrink-0">
@@ -606,7 +640,7 @@ function LayoutToolbar({
 const MISSION_PANEL_IDS = ['waypoints', 'altitudeProfile'];
 
 // MAVLink-only panel IDs (STATUSTEXT doesn't exist in MSP)
-const MAVLINK_PANEL_IDS = ['messages', 'preflightCheck'];
+const MAVLINK_PANEL_IDS = ['messages', 'preflightCheck', 'safetyMonitor'];
 
 // SITL-only panel IDs (only shown when ArduPilot SITL is running)
 const SITL_PANEL_IDS = ['sitlEnvironment', 'sitlFailures'];
@@ -796,6 +830,7 @@ export function TelemetryDashboard() {
   const { layouts, activeLayoutName, loadLayouts, saveLayout, setActiveLayout } = useLayoutStore();
   const connectionState = useConnectionStore((s) => s.connectionState);
   const [layoutLoaded, setLayoutLoaded] = useState(false);
+  const [hasMapPanel, setHasMapPanel] = useState(true);
 
   // Check if mission planning is supported
   // Betaflight (BTFL) and Cleanflight (CLFL) do NOT support missions
@@ -817,12 +852,16 @@ export function TelemetryDashboard() {
     if (!apiRef.current || !layoutLoaded) return;
 
     const handleLayoutChange = () => {
-      if (apiRef.current) {
-        const data = apiRef.current.toJSON();
-        window.electronAPI?.saveLayout(TELEMETRY_AUTOSAVE_NAME, data);
-      }
+      const api = apiRef.current;
+      if (!api) return;
+      window.electronAPI?.saveLayout(TELEMETRY_AUTOSAVE_NAME, api.toJSON());
+      const mapPresent = api.panels.some((p) => p.id === 'map' || p.id.startsWith('map-'));
+      setHasMapPanel(mapPresent);
+      // Caching needs the map; close the mode if the panel is gone.
+      if (!mapPresent) useTileCacheAreaStore.getState().setActive(false);
     };
 
+    handleLayoutChange();
     // Subscribe to layout changes
     const disposable = apiRef.current.onDidLayoutChange(handleLayoutChange);
 
@@ -980,17 +1019,22 @@ export function TelemetryDashboard() {
         supportsMissionPlanning={supportsMissionPlanning}
         isMavlink={connectionState.protocol === 'mavlink'}
         isSitlRunning={isSitlRunning}
+        hasMapPanel={hasMapPanel}
       />
 
-      {/* Dockview container */}
-      <div className="flex-1">
-        <DockviewReact
-          components={components}
-          onReady={onReady}
-          theme={resolvedTheme === 'light' ? themeLight : themeDark}
-          rightHeaderActionsComponent={PanelHeaderActions}
-          className="h-full"
-        />
+      {/* Fleet strip (left) + dockview container. The strip renders nothing for
+          a single vehicle, so single-vehicle layout is unchanged. */}
+      <div className="flex-1 flex flex-row min-h-0">
+        <FleetStrip />
+        <div className="flex-1 min-w-0">
+          <DockviewReact
+            components={components}
+            onReady={onReady}
+            theme={resolvedTheme === 'light' ? themeLight : themeDark}
+            rightHeaderActionsComponent={PanelHeaderActions}
+            className="h-full"
+          />
+        </div>
       </div>
     </div>
   );

@@ -35,6 +35,20 @@ const ITEMS: LaunchItem[] = [
     launch: () => { window.electronAPI?.openAreaEditor?.().catch(() => undefined); },
   },
   {
+    id: 'sim-world',
+    label: '3D Sim World',
+    desc: 'Fly SITL in a persistent 3D world: obstacles, fences, missions',
+    iconColor: 'text-emerald-400',
+    badge: 'New',
+    icon: (
+      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3.6 9h16.8M3.6 15h16.8M12 3a15 15 0 010 18M12 3a15 15 0 000 18" />
+      </svg>
+    ),
+    launch: () => { window.electronAPI?.openDetachedWindow?.({ componentId: 'sim-world', title: '3D Sim World', initialBounds: { width: 1280, height: 800 } }); },
+  },
+  {
     id: 'inspector',
     label: 'MAVLink Inspector',
     desc: 'Watch live messages and graphs',

@@ -260,6 +260,50 @@ const sensorNodes: NodeDefinition[] = [
     properties: [],
     luaTemplate: 'ahrs:wind_estimate()',
   },
+  {
+    type: 'sensor-param-get',
+    label: 'Read Parameter',
+    description: 'Read a flight controller parameter live (e.g. CAM1_TRIGG_DIST). Returns 0 if the parameter does not exist.',
+    category: 'sensors',
+    inputs: [],
+    outputs: [
+      { id: 'value', label: 'Value', type: 'number', direction: 'output' },
+    ],
+    properties: [
+      { id: 'param_name', label: 'Parameter Name', type: 'string', defaultValue: 'CAM1_TRIGG_DIST' },
+    ],
+    luaTemplate: 'param:get(NAME)',
+  },
+  {
+    type: 'sensor-gpio-read',
+    label: 'Read GPIO Pin',
+    description: 'Read the digital level of a GPIO pin (e.g. a camera hotshoe feedback pin). Wire a Pin input to set it from a parameter, or use the Pin property.',
+    category: 'sensors',
+    inputs: [
+      { id: 'pin', label: 'Pin', type: 'number', direction: 'input' },
+    ],
+    outputs: [
+      { id: 'level', label: 'Level (0/1)', type: 'number', direction: 'output' },
+      { id: 'is_high', label: 'Is High', type: 'boolean', direction: 'output' },
+    ],
+    properties: [
+      { id: 'pin', label: 'Pin (fallback)', type: 'number', defaultValue: 54, min: 0, max: 255 },
+    ],
+    luaTemplate: 'gpio:read(PIN)',
+  },
+  {
+    type: 'sensor-current-waypoint',
+    label: 'Current Waypoint',
+    description: 'The active mission navigation waypoint index and command id.',
+    category: 'sensors',
+    inputs: [],
+    outputs: [
+      { id: 'index', label: 'Index', type: 'number', direction: 'output' },
+      { id: 'nav_id', label: 'Command ID', type: 'number', direction: 'output' },
+    ],
+    properties: [],
+    luaTemplate: 'mission:get_current_nav_index()',
+  },
 ];
 
 // ── Logic ───────────────────────────────────────────────────────
@@ -834,6 +878,22 @@ const timingNodes: NodeDefinition[] = [
       { id: 'triggered', label: 'Triggered', type: 'boolean', direction: 'output' },
     ],
     properties: [],
+  },
+  {
+    type: 'timing-watchdog',
+    label: 'Watchdog Timer',
+    description: 'Outputs Expired if no Kick is received within the timeout. The timer resets on every Kick, and holds reset while Enable is false.',
+    category: 'timing',
+    inputs: [
+      { id: 'kick', label: 'Kick', type: 'boolean', direction: 'input' },
+      { id: 'enable', label: 'Enable', type: 'boolean', direction: 'input', defaultValue: true },
+    ],
+    outputs: [
+      { id: 'expired', label: 'Expired', type: 'boolean', direction: 'output' },
+    ],
+    properties: [
+      { id: 'timeout_ms', label: 'Timeout (ms)', type: 'number', defaultValue: 3000, min: 100, max: 120000, step: 100 },
+    ],
   },
   {
     type: 'timing-latch',

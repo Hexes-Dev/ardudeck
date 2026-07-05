@@ -29,6 +29,51 @@ export function patternToGeneratorId(pattern: SurveyPattern): string {
   return `builtin.${pattern}`;
 }
 
+/**
+ * Which generator a config runs through. `config.generatorId` (set when the
+ * user picks a module-supplied engine) wins over the legacy pattern mapping,
+ * but only while that generator is actually registered - if the module is
+ * uninstalled mid-session the config falls back to the built-in pattern
+ * instead of dead-ending.
+ */
+export function resolveGeneratorId(config: Pick<SurveyConfig, 'pattern' | 'generatorId'>): string {
+  if (config.generatorId && registry.has(config.generatorId)) return config.generatorId;
+  return patternToGeneratorId(config.pattern);
+}
+
+/**
+ * Declarative extra parameter a generator wants the survey panel to render.
+ * Values live in `SurveyConfig.engineParams[field.id]` and persist with the
+ * group's config, so module UIs stay out of the panel internals.
+ */
+export type GeneratorConfigField =
+  | {
+      type: 'number';
+      id: string;
+      label: string;
+      default: number;
+      min?: number;
+      max?: number;
+      step?: number;
+      unit?: string;
+      description?: string;
+    }
+  | {
+      type: 'boolean';
+      id: string;
+      label: string;
+      default: boolean;
+      description?: string;
+    }
+  | {
+      type: 'select';
+      id: string;
+      label: string;
+      default: string;
+      options: Array<{ value: string; label: string }>;
+      description?: string;
+    };
+
 export interface SurveyGeneratorCapabilities {
   /** Generator can take interior boundaries (no-fly zones) inside the ROI. */
   supportsHoles: boolean;
@@ -51,6 +96,11 @@ export interface SurveyGeneratorRegistration {
   description: string;
   capabilities: SurveyGeneratorCapabilities;
   /**
+   * Extra parameters the survey panel renders for this generator (an
+   * "Engine parameters" section). Optional; built-ins declare none.
+   */
+  configFields?: GeneratorConfigField[];
+  /**
    * Execute the generator. Sync returns from built-ins are wrapped so callers
    * always `await` regardless of generator implementation. The current
    * `SurveyConfig` shape is preserved for PR 3; PR 4 introduces a richer
@@ -61,16 +111,38 @@ export interface SurveyGeneratorRegistration {
 
 const registry = new Map<string, SurveyGeneratorRegistration>();
 
+// Registration reactivity: module generators register after first render
+// (module load is async), so UI listing generators subscribes here. A plain
+// version counter keeps this useSyncExternalStore-compatible.
+let registryVersion = 0;
+const registryListeners = new Set<() => void>();
+
+function notifyRegistryChanged(): void {
+  registryVersion += 1;
+  for (const l of registryListeners) l();
+}
+
+export function subscribeSurveyGenerators(listener: () => void): () => void {
+  registryListeners.add(listener);
+  return () => registryListeners.delete(listener);
+}
+
+/** Monotonic change counter - the snapshot for useSyncExternalStore. */
+export function getSurveyGeneratorsVersion(): number {
+  return registryVersion;
+}
+
 export function registerSurveyGenerator(reg: SurveyGeneratorRegistration): void {
   if (registry.has(reg.id)) {
     // Re-registering with the same id is allowed (HMR, test reseeds). Newer
     // wins; the registry is module-scoped, not persisted.
   }
   registry.set(reg.id, reg);
+  notifyRegistryChanged();
 }
 
 export function unregisterSurveyGenerator(id: string): void {
-  registry.delete(id);
+  if (registry.delete(id)) notifyRegistryChanged();
 }
 
 export function getSurveyGenerator(id: string): SurveyGeneratorRegistration | undefined {
@@ -88,4 +160,5 @@ export function listSurveyGenerators(): SurveyGeneratorRegistration[] {
  */
 export function _resetRegistryForTests(): void {
   registry.clear();
+  notifyRegistryChanged();
 }

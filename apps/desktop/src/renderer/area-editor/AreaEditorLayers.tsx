@@ -34,6 +34,16 @@ const OVERLAY_ICONS: Record<AreaEditorOverlayId, JSX.Element> = {
       <path strokeLinecap="round" strokeLinejoin="round" d="M3 8h11a2.5 2.5 0 10-2.5-2.5M3 16h15a2.5 2.5 0 11-2.5 2.5M3 12h17a2.5 2.5 0 10-2.5-2.5" />
     </svg>
   ),
+  traffic: (
+    <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 19V9m0 0l8 5V7.5a.75.75 0 00-1.1-.66L12 9zm0 0L5.1 6.84A.75.75 0 004 7.5V14l8-5z" />
+    </svg>
+  ),
+  gliders: (
+    <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M3 11l9 1.5L21 11M12 12.5V17m0 0l-2.5 2m2.5-2l2.5 2" />
+    </svg>
+  ),
 };
 
 export function AreaEditorLayers(): JSX.Element {

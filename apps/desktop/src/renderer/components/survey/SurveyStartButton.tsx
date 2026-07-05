@@ -5,8 +5,13 @@
  * The detailed pattern (grid / crosshatch / perimeter / spiral) is still tuned
  * in the survey config panel after a type is chosen.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useSurveyStore } from '../../stores/survey-store';
+import {
+  listSurveyGenerators,
+  subscribeSurveyGenerators,
+  getSurveyGeneratorsVersion,
+} from './generator-registry';
 import type { SurveyPattern } from './survey-types';
 
 interface SurveyType {
@@ -47,7 +52,16 @@ const SURVEY_TYPES: SurveyType[] = [
 export function SurveyStartButton() {
   const activateSurvey = useSurveyStore((s) => s.activateSurvey);
   const setPattern = useSurveyStore((s) => s.setPattern);
+  const setGeneratorId = useSurveyStore((s) => s.setGeneratorId);
   const startDrawing = useSurveyStore((s) => s.startDrawing);
+
+  // Module-supplied engines (e.g. TOPAS) register async after module load.
+  const generatorsVersion = useSyncExternalStore(subscribeSurveyGenerators, getSurveyGeneratorsVersion);
+  const moduleGenerators = useMemo(
+    () => listSurveyGenerators().filter((g) => !g.id.startsWith('builtin.')),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- version is the registry's change counter
+    [generatorsVersion],
+  );
 
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -64,6 +78,16 @@ export function SurveyStartButton() {
   const start = (pattern: SurveyPattern) => {
     activateSurvey();
     setPattern(pattern);
+    startDrawing();
+    setOpen(false);
+  };
+
+  const startWithGenerator = (generatorId: string) => {
+    activateSurvey();
+    // Module engines cover areas; keep the base pattern on 'grid' so the draw
+    // tool expects a closed polygon, then flip the engine on top of it.
+    setPattern('grid');
+    setGeneratorId(generatorId);
     startDrawing();
     setOpen(false);
   };
@@ -98,6 +122,28 @@ export function SurveyStartButton() {
               <span className="min-w-0">
                 <span className="block text-xs font-medium text-content">{t.label}</span>
                 <span className="block text-[10px] text-content-tertiary leading-snug">{t.desc}</span>
+              </span>
+            </button>
+          ))}
+
+          {/* Module-supplied coverage engines (installed via Hangar). */}
+          {moduleGenerators.map((gen) => (
+            <button
+              key={gen.id}
+              onClick={() => startWithGenerator(gen.id)}
+              className="w-full text-left px-3 py-2 hover:bg-surface-raised transition-colors flex items-start gap-2.5"
+            >
+              <span className="text-teal-400 mt-0.5 shrink-0">{AREA_ICON}</span>
+              <span className="min-w-0">
+                <span className="flex items-center gap-1.5">
+                  <span className="text-xs font-medium text-content">{gen.displayName}</span>
+                  {gen.capabilities.isRemote && (
+                    <span className="px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-teal-300 bg-teal-500/15 border border-teal-500/30 rounded">
+                      Remote
+                    </span>
+                  )}
+                </span>
+                <span className="block text-[10px] text-content-tertiary leading-snug">{gen.description}</span>
               </span>
             </button>
           ))}

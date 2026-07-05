@@ -14,6 +14,8 @@ import {
 export interface AutoAdjustDialogProps {
   waypoints: PlannerWaypoint[];
   safeBuffer: number;
+  /** Home/launch ground elevation (ASL m); needed to keep relative waypoints in frame. */
+  homeElevationMeters?: number;
   onApply: (result: PlanResult) => void;
   onClose: () => void;
 }
@@ -68,6 +70,7 @@ function buildTerrainLookup(samples: TerrainSample[]): TerrainLookup {
 export function AutoAdjustAltitudeDialog({
   waypoints,
   safeBuffer,
+  homeElevationMeters,
   onApply,
   onClose,
 }: AutoAdjustDialogProps) {
@@ -127,6 +130,15 @@ export function AutoAdjustAltitudeDialog({
     [terrainSamples],
   );
 
+  // Home ground elevation anchors 'relative'-frame waypoints. Fall back to the
+  // terrain under the first waypoint (the takeoff area) when home is unknown.
+  const homeElevation = useMemo(() => {
+    if (homeElevationMeters != null) return homeElevationMeters;
+    const first = waypoints[0];
+    if (terrainLookup && first) return terrainLookup.elevationAt(first.latitude, first.longitude) ?? 0;
+    return 0;
+  }, [homeElevationMeters, terrainLookup, waypoints]);
+
   const preview: PlanResult | null = useMemo(() => {
     if (!terrainLookup) return null;
     return planTerrainSafeAltitudes(waypoints, terrainLookup, {
@@ -135,8 +147,9 @@ export function AutoAdjustAltitudeDialog({
       insertIntermediates,
       sampleStepMeters: sampleStep,
       minSpacingMeters: minSpacing,
+      homeElevationMeters: homeElevation,
     });
-  }, [terrainLookup, waypoints, safeBuffer, insertIntermediates, sampleStep, minSpacing]);
+  }, [terrainLookup, waypoints, safeBuffer, insertIntermediates, sampleStep, minSpacing, homeElevation]);
 
   const raiseCount = preview?.raisedAltitudes.size ?? 0;
   const insertCount = preview?.inserts.length ?? 0;

@@ -9,7 +9,9 @@ export { FlightModePanel } from './FlightModePanel';
 export { FlightControlPanel } from './FlightControlPanel';
 export { MapPanel } from './MapPanel';
 export { MessagesPanel } from './MessagesPanel';
+export { SafetyMonitorPanel } from './SafetyMonitorPanel';
 export { PreflightCheckCard } from '../prearm/PreflightCheckCard';
+export { CameraPanel } from '../camera/CameraPanel';
 
 // Re-export mission panels for use in telemetry dashboard
 // Note: MissionMapPanel not exported here - mission data now integrated into MapPanel
@@ -33,7 +35,9 @@ export const PANEL_COMPONENTS = {
   flightMode: { component: 'FlightModePanel', title: 'Flight Mode' },
   flightControl: { component: 'FlightControlPanel', title: 'Flight Control' },
   map: { component: 'MapPanel', title: 'Map' }, // Unified map with mission overlays
+  camera: { component: 'CameraPanel', title: 'Vision' },
   messages: { component: 'MessagesPanel', title: 'Messages' },
+  safetyMonitor: { component: 'SafetyMonitorPanel', title: 'Safety Monitor' },
   preflightCheck: { component: 'PreflightCheckCard', title: 'Pre-flight Checks' },
   // Mission panels (for monitoring during flight)
   // Note: missionMap removed - mission data now integrated into unified MapPanel

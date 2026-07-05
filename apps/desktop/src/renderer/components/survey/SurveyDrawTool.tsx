@@ -13,12 +13,13 @@ export function SurveyDrawTool() {
   const editingGroupId = useSurveyStore((s) => s.editingGroupId);
   const addVertex = useSurveyStore((s) => s.addVertex);
   const completePolygon = useSurveyStore((s) => s.completePolygon);
+  const completeBranch = useSurveyStore((s) => s.completeBranch);
   const cancelDrawing = useSurveyStore((s) => s.cancelDrawing);
   const deactivateSurvey = useSurveyStore((s) => s.deactivateSurvey);
 
   useMapEvents({
     click: (e) => {
-      if (drawMode === 'polygon') {
+      if (drawMode === 'polygon' || drawMode === 'branch') {
         addVertex(e.latlng.lat, e.latlng.lng);
         return;
       }
@@ -32,16 +33,20 @@ export function SurveyDrawTool() {
       }
     },
     dblclick: (e) => {
-      if (drawMode !== 'polygon') return;
+      if (drawMode === 'none') return;
       e.originalEvent.preventDefault();
       e.originalEvent.stopPropagation();
+      if (drawMode === 'branch') {
+        if (drawingVertices.length >= 1) completeBranch(); // dbl-click adds the final point
+        return;
+      }
       if (drawingVertices.length >= 2) {
         // Double-click adds a vertex then completes (3+ total)
         completePolygon();
       }
     },
     contextmenu: (e) => {
-      if (drawMode !== 'polygon') return;
+      if (drawMode === 'none') return;
       e.originalEvent.preventDefault();
       cancelDrawing();
     },
@@ -49,19 +54,20 @@ export function SurveyDrawTool() {
 
   // Keyboard shortcuts
   useEffect(() => {
-    if (drawMode !== 'polygon') return;
+    if (drawMode === 'none') return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         cancelDrawing();
-      } else if (e.key === 'Enter' && drawingVertices.length >= 3) {
-        completePolygon();
+      } else if (e.key === 'Enter') {
+        if (drawMode === 'branch' && drawingVertices.length >= 2) completeBranch();
+        else if (drawMode === 'polygon' && drawingVertices.length >= 3) completePolygon();
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [drawMode, drawingVertices.length, cancelDrawing, completePolygon]);
+  }, [drawMode, drawingVertices.length, cancelDrawing, completePolygon, completeBranch]);
 
   return null;
 }

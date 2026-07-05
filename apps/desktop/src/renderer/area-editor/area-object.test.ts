@@ -21,6 +21,10 @@ import {
   isVertexEditable,
   bufferObject,
   splitObjectByLine,
+  clipRingToPolygon,
+  buildCommitAreas,
+  type EditorObject,
+  type LocalPt,
 } from './area-object';
 
 const CENTER: LatLng = { lat: 42, lng: 19 };
@@ -199,5 +203,156 @@ describe('splitObjectByLine', () => {
   it('returns null for corridors', () => {
     const corridor = makeFromWorldRing('corridor', [{ lat: 42, lng: 19 }, { lat: 42.001, lng: 19.001 }], 'C');
     expect(splitObjectByLine(corridor, { lat: 42, lng: 18.9 }, { lat: 42, lng: 19.1 })).toBeNull();
+  });
+
+  const localRingArea = (r: LatLng[]): number => Math.abs(
+    r.reduce((acc, p, i) => {
+      const q = r[(i + 1) % r.length]!;
+      const o = latLngToLocal(CENTER, p);
+      const o2 = latLngToLocal(CENTER, q);
+      return acc + (o.x * o2.y - o2.x * o.y);
+    }, 0) / 2,
+  );
+
+  it('slices an annulus through its ring into C-shaped pieces with no holes', () => {
+    // 200x200 outer with a centered 80x80 hole.
+    const ann = makeRectangle(CENTER, 200, 200, 'Ann');
+    ann.holes.push([
+      { x: -40, y: -40 }, { x: 40, y: -40 }, { x: 40, y: 40 }, { x: -40, y: 40 },
+    ]);
+    const parts = splitObjectByLine(ann, { lat: 42.01, lng: 19 }, { lat: 41.99, lng: 19 });
+    expect(parts).not.toBeNull();
+    expect(parts!).toHaveLength(2);
+    // The hole is consumed into the boundary - each piece is a single C ring.
+    expect(parts!.every((p) => p.holes.length === 0)).toBe(true);
+    const total = parts!.reduce((a, p) => a + localRingArea(objectWorldRing(p)), 0);
+    // 40000 outer - 6400 hole = 33600.
+    expect(total).toBeGreaterThan(31000);
+    expect(total).toBeLessThan(35000);
+  });
+
+  it('keeps a hole the cut misses on the side that contains it', () => {
+    const ann = makeRectangle(CENTER, 200, 200, 'Ann');
+    // 40x40 hole offset east (x in [30,70]) - entirely on one side of the x=0 cut.
+    ann.holes.push([
+      { x: 30, y: -20 }, { x: 70, y: -20 }, { x: 70, y: 20 }, { x: 30, y: 20 },
+    ]);
+    const parts = splitObjectByLine(ann, { lat: 42.01, lng: 19 }, { lat: 41.99, lng: 19 });
+    expect(parts).not.toBeNull();
+    expect(parts!).toHaveLength(2);
+    const withHole = parts!.filter((p) => p.holes.length > 0);
+    expect(withHole).toHaveLength(1);
+    expect(withHole[0]!.holes[0]!.length).toBe(4);
+  });
+});
+
+describe('clipRingToPolygon', () => {
+  // 200x200 outer centered on origin.
+  const outer: LocalPt[] = [
+    { x: -100, y: -100 }, { x: 100, y: -100 }, { x: 100, y: 100 }, { x: -100, y: 100 },
+  ];
+  const area = (r: LocalPt[]): number => Math.abs(
+    r.reduce((a, p, i) => { const q = r[(i + 1) % r.length]!; return a + (p.x * q.y - q.x * p.y); }, 0) / 2,
+  );
+
+  it('returns a fully-inside ring unchanged', () => {
+    const hole: LocalPt[] = [{ x: -20, y: -20 }, { x: 20, y: -20 }, { x: 20, y: 20 }, { x: -20, y: 20 }];
+    const out = clipRingToPolygon(hole, outer);
+    expect(out).toHaveLength(1);
+    expect(area(out[0]!)).toBeCloseTo(1600, 0);
+  });
+
+  it('trims a ring that pokes past one edge to the part inside', () => {
+    // Spans x in [50, 200] - the right half is outside the outer (max x 100).
+    const hole: LocalPt[] = [{ x: 50, y: -30 }, { x: 200, y: -30 }, { x: 200, y: 30 }, { x: 50, y: 30 }];
+    const out = clipRingToPolygon(hole, outer);
+    expect(out).toHaveLength(1);
+    // Clipped to x in [50,100], y in [-30,30] = 50*60 = 3000.
+    expect(area(out[0]!)).toBeCloseTo(3000, 0);
+    // Every vertex now within the outer bounds.
+    expect(out[0]!.every((p) => p.x <= 100.001 && p.x >= -100.001)).toBe(true);
+  });
+
+  it('returns nothing for a ring entirely outside', () => {
+    const hole: LocalPt[] = [{ x: 200, y: 200 }, { x: 260, y: 200 }, { x: 230, y: 260 }];
+    expect(clipRingToPolygon(hole, outer)).toHaveLength(0);
+  });
+
+  it('yields two inside parts when the bridge between them sits outside', () => {
+    // Two vertical bars joined only by a connector above the top edge (y>100):
+    // clipping removes the connector, leaving two separate inside lobes.
+    const hole: LocalPt[] = [
+      { x: -80, y: 50 }, { x: -40, y: 50 }, { x: -40, y: 120 }, { x: 40, y: 120 },
+      { x: 40, y: 50 }, { x: 80, y: 50 }, { x: 80, y: 150 }, { x: -80, y: 150 },
+    ];
+    const out = clipRingToPolygon(hole, outer);
+    expect(out.length).toBe(2);
+    expect(out.every((r) => r.every((p) => p.y <= 100.001))).toBe(true);
+  });
+});
+
+describe('buildCommitAreas', () => {
+  const config = { altitude: 80 };
+
+  it('commits every visible area with the shared config, no workspace key', () => {
+    const a = makeRectangle(CENTER, 100, 100, 'A');
+    const b = makeRectangle({ lat: 42.01, lng: 19.01 }, 50, 50, 'B');
+    const out = buildCommitAreas([a, b], config);
+    expect(out).toHaveLength(2);
+    expect(out[0]!.polygon).toHaveLength(4);
+    expect(out[0]!.config).toBe(config);
+    expect(out[0]!.workspace).toBeUndefined();
+  });
+
+  it('excludes the workspace object and attaches its ring to each area', () => {
+    const a = makeRectangle(CENTER, 100, 100, 'A');
+    const b = makeRectangle({ lat: 42.01, lng: 19.01 }, 50, 50, 'B');
+    const ws: EditorObject = { ...makeRectangle(CENTER, 1000, 1000, 'WS'), role: 'workspace' };
+    const out = buildCommitAreas([a, ws, b], config);
+    expect(out).toHaveLength(2); // workspace not committed as an area
+    const wsRing = objectWorldRing(ws);
+    for (const area of out) {
+      expect(area.workspace).toEqual(wsRing);
+    }
+  });
+
+  it('attaches the workspace to corridor commits too', () => {
+    const corridor = makeFromWorldRing(
+      'corridor',
+      [CENTER, { lat: 42.001, lng: 19.001 }],
+      'C1',
+      { corridorWidthM: 40 },
+    );
+    const ws: EditorObject = { ...makeRectangle(CENTER, 1000, 1000, 'WS'), role: 'workspace' };
+    const out = buildCommitAreas([corridor, ws], config);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.kind).toBe('corridor');
+    expect(out[0]!.corridorWidth).toBe(40);
+    expect(out[0]!.workspace).toEqual(objectWorldRing(ws));
+  });
+
+  it('ignores holes on the workspace object - only the outer ring is attached', () => {
+    const a = makeRectangle(CENTER, 100, 100, 'A');
+    const ws: EditorObject = {
+      ...makeRectangle(CENTER, 1000, 1000, 'WS'),
+      role: 'workspace',
+      holes: [[{ x: -10, y: -10 }, { x: 10, y: -10 }, { x: 0, y: 10 }]],
+    };
+    const out = buildCommitAreas([a, ws], config);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.workspace).toEqual(objectWorldRing(ws));
+  });
+
+  it('skips a hidden workspace object entirely', () => {
+    const a = makeRectangle(CENTER, 100, 100, 'A');
+    const ws: EditorObject = { ...makeRectangle(CENTER, 1000, 1000, 'WS'), role: 'workspace', visible: false };
+    const out = buildCommitAreas([a, ws], config);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.workspace).toBeUndefined();
+  });
+
+  it('returns no areas when only the workspace object exists', () => {
+    const ws: EditorObject = { ...makeRectangle(CENTER, 1000, 1000, 'WS'), role: 'workspace' };
+    expect(buildCommitAreas([ws], config)).toHaveLength(0);
   });
 });

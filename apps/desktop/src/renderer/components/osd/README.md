@@ -1,6 +1,6 @@
-# OSD Simulator Component
+# OSD Tool Component
 
-A real-time On-Screen Display (OSD) simulator that renders flight telemetry using MAX7456/AT7456E compatible MCM fonts, exactly as it would appear in FPV goggles.
+A real-time On-Screen Display (OSD) tool that renders flight telemetry using MAX7456/AT7456E compatible MCM fonts, exactly as it would appear in FPV goggles.
 
 ## Features
 
