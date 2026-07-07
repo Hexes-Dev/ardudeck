@@ -175,6 +175,14 @@ const GENERIC_FALLBACK: PreArmPattern = {
 };
 
 /**
+ * ArduPilot re-broadcasts every failing pre-arm check roughly every 30 s while
+ * disarmed (PREARM_DISPLAY_PERIOD). A pre-arm message older than this window
+ * means the FC has stopped reporting it - the failure is resolved (e.g. a
+ * fresh battery was plugged in). One broadcast period plus margin.
+ */
+export const PREARM_STALE_MS = 40_000;
+
+/**
  * Check if a STATUSTEXT message is a pre-arm message.
  */
 export function isPreArmMessage(text: string): boolean {

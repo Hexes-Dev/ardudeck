@@ -1,7 +1,8 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useMessagesStore } from '../../stores/messages-store';
 import {
   PREARM_CATEGORIES,
+  PREARM_STALE_MS,
   isPreArmMessage,
   matchPreArmError,
   type PreArmCategory,
@@ -15,16 +16,26 @@ export function PreflightCheckCard() {
   const [isChecking, setIsChecking] = useState(false);
   const [expandedCategories, setExpandedCategories] = useState<Set<PreArmCategory>>(new Set());
 
+  // The FC re-broadcasts failing checks every ~30 s (bumping the message's
+  // timestamp in the store), so errors age out on their own once resolved.
+  // Tick to re-evaluate freshness even when no new messages arrive.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 5_000);
+    return () => clearInterval(id);
+  }, []);
+
   // Filter for fresh pre-arm messages and match them
   const activeErrors = useMemo(() => {
+    const freshAfter = Math.max(lastCheckTs, now - PREARM_STALE_MS);
     return messages
-      .filter((m) => m.timestamp >= lastCheckTs && isPreArmMessage(m.text))
+      .filter((m) => m.timestamp >= freshAfter && isPreArmMessage(m.text))
       .map((m) => {
         const result = matchPreArmError(m.text);
         return result ? { message: m, ...result } : null;
       })
       .filter((x): x is NonNullable<typeof x> => x !== null);
-  }, [messages, lastCheckTs]);
+  }, [messages, lastCheckTs, now]);
 
   // Group errors by category, deduplicate by reason
   const errorsByCategory = useMemo(() => {
