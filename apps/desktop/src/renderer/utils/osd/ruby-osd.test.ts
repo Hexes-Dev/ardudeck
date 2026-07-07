@@ -38,7 +38,10 @@ describe('RubyFPV OSD element catalog (from flags_osd.h)', () => {
     expect(new Set(ids).size).toBe(ids.length);
     const pairs = RUBY_OSD_ELEMENTS.map((e) => `${e.field}:${e.shift}`);
     expect(new Set(pairs).size).toBe(pairs.length);
-    for (const e of RUBY_OSD_ELEMENTS) expect(e.shift).toBeGreaterThanOrEqual(0), expect(e.shift).toBeLessThanOrEqual(31);
+    for (const e of RUBY_OSD_ELEMENTS) {
+      expect(e.shift).toBeGreaterThanOrEqual(0);
+      expect(e.shift).toBeLessThanOrEqual(31);
+    }
   });
 });
 

@@ -111,6 +111,7 @@ import {
   type ParamValue,
 } from '@ardudeck/mavlink-ts';
 import { IPC_CHANNELS, SEVERITY_LABELS, type ConnectOptions, type ConnectionState, type ConsoleLogEntry, type SavedLayout, type LayoutStoreSchema, type SettingsStoreSchema, type SigningStatus, type TelemetrySpeed, type TransportInfoIpc, type VehicleInfoIpc, type SetActiveSelectionPayload, type VehicleCommand, type MissionVehicleProgress, type OrchestrationIntentIpc, type OrchestrationStatusIpc, type OrchestratorSource, type OrchestratorStatus, type CameraSourceConfig, type GimbalCommand, type CameraCommand } from '../shared/ipc-channels.js';
+import { DEFAULT_USER_UNIT_PREFERENCES } from '../shared/user-units.js';
 import { initAutoUpdater, checkForUpdates, downloadUpdate, installUpdate } from './updater.js';
 import type { ParamValuePayload, ParameterProgress } from '../shared/parameter-types.js';
 import { PARAMETER_METADATA_URLS, mavTypeToVehicleType, type VehicleType, type ParameterMetadata, type ParameterMetadataStore } from '../shared/parameter-metadata.js';
@@ -267,6 +268,7 @@ const settingsStore = new Store<SettingsStoreSchema>({
       batteryCapacity: 1500,
     }],
     activeVehicleId: 'default',
+    unitPreferences: DEFAULT_USER_UNIT_PREFERENCES,
     flightStats: {
       totalFlightTimeSeconds: 0,
       totalDistanceMeters: 0,

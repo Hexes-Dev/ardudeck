@@ -25,11 +25,12 @@ export function ApplyProfileButton({ profile, onBeforeStart, size = 'compact' }:
   const isSitl = useConnectionStore(s => s.connectionState.isSitl ?? false);
   const paramCount = useParameterStore(s => s.parameters.size);
   const armed = useTelemetryStore(s => s.flight.armed);
+  const hasFleetVehicles = useActiveVehicleStore(s => Object.keys(s.knownVehicles).length > 0);
   // A fleet is live but there's no primary single connection. Profiles are a bulk
   // parameter write, which runs over a DIRECT connection only (params are not
   // routed per fleet vehicle) - so we surface that instead of a misleading
   // "Connect first" when the operator clearly is connected to a fleet.
-  const fleetOnly = !isConnected && useActiveVehicleStore(s => Object.keys(s.knownVehicles).length > 0);
+  const fleetOnly = !isConnected && hasFleetVehicles;
   const applyStatus = useProfileApplyStore(s => s.status);
   const activeProfileId = useProfileApplyStore(s => s.activeProfileId);
 

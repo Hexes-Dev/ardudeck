@@ -27,6 +27,7 @@ import { rectangleRing, circleRing, nearestEdgeIndex, polylineLength } from '../
 import { latLngToLocal, distanceLatLng, polygonArea } from '../components/survey/geo-math';
 import { useSettingsStore } from '../stores/settings-store';
 import { formatSurveyDistanceM } from './survey-units';
+import { formatAreaFromSquareMeters } from '../../shared/user-units.js';
 import type { LatLng } from '../components/survey/survey-types';
 
 /** Distance (m) from a world point to edge `i` of a ring, in the point's local frame. */
@@ -57,14 +58,10 @@ function buildMeasureData(points: LatLng[], cursor: LatLng | null, selected: boo
 }
 
 function formatDist(m: number): string {
-  return formatSurveyDistanceM(m, useSettingsStore.getState().surveyUnits);
+  return formatSurveyDistanceM(m, useSettingsStore.getState().unitPreferences.distance);
 }
 function formatArea(m2: number): string {
-  if (useSettingsStore.getState().surveyUnits === 'imperial') {
-    const acres = m2 / 4046.856;
-    return acres >= 1 ? `${acres.toFixed(2)} ac` : `${Math.round(m2 * 10.7639)} ft²`;
-  }
-  return m2 >= 10000 ? `${(m2 / 10000).toFixed(2)} ha` : `${Math.round(m2)} m²`;
+  return formatAreaFromSquareMeters(m2, useSettingsStore.getState().unitPreferences.area);
 }
 
 type Drag =

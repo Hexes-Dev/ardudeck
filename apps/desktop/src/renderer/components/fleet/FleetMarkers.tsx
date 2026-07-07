@@ -29,6 +29,8 @@ import { useFleetVehicles, selectActiveVehicle, type FleetVehicle } from '../../
 import { useActiveVehicleStore } from '../../stores/active-vehicle-store';
 import { useFormationStore } from '../../stores/formation-store';
 import { useVehicleColor } from '../../stores/vehicle-appearance-store';
+import { useSettingsStore } from '../../stores/settings-store';
+import { formatAltitudeFromMeters, formatSpeedFromMetersPerSecond } from '../../../shared/user-units.js';
 
 const ICON_SIZE = 52;
 const ICON_CENTER = ICON_SIZE / 2;
@@ -166,6 +168,8 @@ function useFanOffsets(
 function FleetMarker({ v, isLeader, offset }: { v: FleetVehicle; isLeader: boolean; offset?: Offset }) {
   const markerRef = useRef<L.Marker | null>(null);
   const identityColor = useVehicleColor(v.key, v.sysid);
+  const altitudeUnit = useSettingsStore((s) => s.unitPreferences.altitude);
+  const speedUnit = useSettingsStore((s) => s.unitPreferences.speed);
   const isMain = offset?.main ?? false;
   const icon = useMemo(
     () => createTacticalVehicleIcon({
@@ -188,9 +192,11 @@ function FleetMarker({ v, isLeader, offset }: { v: FleetVehicle; isLeader: boole
     updateTacticalIconDOM(el, {
       heading: v.heading,
       groundspeed: v.groundspeed,
+      speedText: formatSpeedFromMetersPerSecond(v.groundspeed, speedUnit),
       altitudeAgl: v.altitudeAgl,
+      altitudeText: formatAltitudeFromMeters(v.altitudeAgl, altitudeUnit),
     }, v.vehicleClass === 'antenna');
-  }, [v.heading, v.groundspeed, v.altitudeAgl, v.vehicleClass, icon]);
+  }, [v.heading, v.groundspeed, v.altitudeAgl, v.vehicleClass, icon, speedUnit, altitudeUnit]);
 
   // Apply the grouping offset: translate + scale the icon content to its tucked-in position
   // and draw a dashed leader line from the true map point (marker centre) to it. Reapplied
