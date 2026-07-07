@@ -34,6 +34,9 @@ import { computeOffsetPosition } from '../../utils/geo-offset';
 import { FenceMapOverlay } from '../geofence/FenceMapOverlay';
 import { RallyMapOverlay } from '../rally/RallyMapOverlay';
 
+// Live survey execution progress (path tint + cell states + readout card)
+import { SurveyProgressOverlay, SurveyProgressCard } from '../survey/SurveyProgressOverlay';
+
 // Terrain elevation overlay
 import { TerrainOverlayLayer, type ElevationRange } from '../map/TerrainOverlayLayer';
 import { ElevationLegend } from '../map/ElevationLegend';
@@ -2187,6 +2190,10 @@ const TelemetryMap2D = React.memo(function TelemetryMap2D() {
         </div>
       )}
 
+      {/* Live survey progress readout (renders nothing until a survey group
+          has actual progress). Drops below the "No GPS fix" badge slot. */}
+      {showMission && <SurveyProgressCard className={hasValidGps ? 'top-2 left-2' : 'top-10 left-2'} />}
+
       {/* Elevation legend (above stats overlay) */}
       {showTerrain && elevationRange.max > 0 && (
         <div className="absolute bottom-[120px] left-2 z-[1000]">
@@ -2368,6 +2375,9 @@ const TelemetryMap2D = React.memo(function TelemetryMap2D() {
         {/* Self-subscribed + memoized so live telemetry re-renders don't rebuild
             every waypoint marker/DivIcon. See MissionOverlays above. */}
         {showMission && <MissionOverlays />}
+        {/* Live survey progress tint over the group paths (self-subscribed,
+            recomputes on MISSION_CURRENT changes + 1 Hz position samples). */}
+        {showMission && <SurveyProgressOverlay />}
         {/* ======= END MISSION OVERLAYS ======= */}
 
         {/* Map overlays (self-subscribed to avoid re-rendering terrain) */}

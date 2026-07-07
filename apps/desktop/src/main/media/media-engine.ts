@@ -23,6 +23,8 @@ import { join } from 'node:path';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { app } from 'electron';
 import { mediaBinariesDownloader } from './media-binaries-downloader.js';
+import { buildWfbngSdp, buildWfbngFfmpegArgs, wfbngPort, wfbngShouldTranscode } from './wfbng.js';
+import { wfbngReceiver } from './wfbng-receiver.js';
 import type {
   CameraSourceConfig,
   CameraStartResult,
@@ -45,11 +47,16 @@ interface ActiveSession {
   /** ffmpeg recording process, if recording. */
   record?: ChildProcess;
   recordPath?: string;
+  /** True when this session started the wfb-ng dongle receiver sidecar. */
+  usesWfbReceiver?: boolean;
 }
 
 export class MediaEngine {
   private hub: ChildProcess | null = null;
   private sessions = new Map<string, ActiveSession>();
+  /** In-flight start() per source id, so concurrent starts of the same feed
+      (Vision panel + OSD backdrop + grid tile all mount at once) run once. */
+  private starting = new Map<string, Promise<CameraStartResult>>();
   private ffmpegPath: string | null = null;
   private mediamtxPath: string | null = null;
   private hubReady = false;
@@ -286,8 +293,23 @@ export class MediaEngine {
   /**
    * Start a stream. `resolvedUrl` lets the caller override config.url (used for
    * 'mavlink' sources whose URI is discovered at runtime).
+   *
+   * Idempotent + concurrency-safe per source: an already-live session is
+   * returned as-is, and concurrent starts of the same source share one
+   * in-flight attempt (prevents duplicate ffmpeg bridges and, for wfbng, a
+   * dongle claim-storm from multiple render surfaces).
    */
   async start(source: CameraSourceConfig, resolvedUrl?: string): Promise<CameraStartResult> {
+    const live = this.sessions.get(source.id);
+    if (live && live.session.status === 'live') return { ok: true, session: live.session };
+    const inflight = this.starting.get(source.id);
+    if (inflight) return inflight;
+    const p = this.doStart(source, resolvedUrl).finally(() => { this.starting.delete(source.id); });
+    this.starting.set(source.id, p);
+    return p;
+  }
+
+  private async doStart(source: CameraSourceConfig, resolvedUrl?: string): Promise<CameraStartResult> {
     // WebRTC sources are already WHEP — no hub, no transcode.
     if (source.kind === 'webrtc') {
       const url = resolvedUrl ?? source.url;
@@ -311,19 +333,40 @@ export class MediaEngine {
     const url = resolvedUrl ?? source.url;
     if (!url) return { ok: false, error: 'Source has no url' };
 
-    const needsBridge = source.kind === 'rtp-udp' || source.kind === 'rubyfpv';
+    const needsBridge = source.kind === 'rtp-udp' || source.kind === 'rubyfpv' || source.kind === 'wfbng';
     let ingest: ChildProcess | undefined;
 
     if (needsBridge) {
-      // Raw H.264/UDP -> publish into the hub over RTSP, copy only.
       if (!this.ffmpegPath) return { ok: false, error: 'ffmpeg required to bridge UDP sources' };
-      ingest = spawn(this.ffmpegPath, [
-        '-fflags', 'nobuffer', '-flags', 'low_delay',
-        '-i', url,
-        '-c', 'copy',
-        '-f', 'rtsp', '-rtsp_transport', 'tcp',
-        this.rtspUrl(name),
-      ], { stdio: ['ignore', 'ignore', 'pipe'], shell: process.platform === 'win32' });
+      let args: string[];
+      if (source.kind === 'wfbng') {
+        // Dongle mode (default): ArduDeck drives the plugged-in RTL8812AU via
+        // the wfb-ng receiver sidecar, which emits RTP on the local udp port.
+        // Network mode skips this - a separate ground station forwards here.
+        if ((source.wfbMode ?? 'dongle') === 'dongle') {
+          const rx = await wfbngReceiver.ensureRunning(wfbngPort(url));
+          if (!rx.ok) return { ok: false, error: rx.error };
+        }
+        // wfb-ng ground stations forward RAW RTP (not MPEG-TS), which ffmpeg
+        // can only parse via an SDP description. H.265 is transcoded to H.264
+        // because the WebRTC playback path cannot decode H.265.
+        const codec = source.wfbCodec ?? 'h265';
+        const sdpDir = join(app.getPath('userData'), 'media-sdp');
+        mkdirSync(sdpDir, { recursive: true });
+        const sdpPath = join(sdpDir, `${name}.sdp`);
+        writeFileSync(sdpPath, buildWfbngSdp(wfbngPort(url), codec));
+        args = buildWfbngFfmpegArgs(sdpPath, wfbngShouldTranscode(codec, source.wfbTranscode), this.rtspUrl(name));
+      } else {
+        // Raw H.264/UDP -> publish into the hub over RTSP, copy only.
+        args = [
+          '-fflags', 'nobuffer', '-flags', 'low_delay',
+          '-i', url,
+          '-c', 'copy',
+          '-f', 'rtsp', '-rtsp_transport', 'tcp',
+          this.rtspUrl(name),
+        ];
+      }
+      ingest = spawn(this.ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'], shell: process.platform === 'win32' });
       ingest.on('exit', () => {
         const a = this.sessions.get(source.id);
         if (a && a.session.status !== 'stopped') a.session.status = 'error';
@@ -361,6 +404,7 @@ export class MediaEngine {
     };
     const active: ActiveSession = { session };
     if (ingest) active.ingest = ingest;
+    if (source.kind === 'wfbng' && (source.wfbMode ?? 'dongle') === 'dongle') active.usesWfbReceiver = true;
     this.sessions.set(source.id, active);
     return { ok: true, session };
   }
@@ -373,6 +417,10 @@ export class MediaEngine {
     if (active.ingest) killProc(active.ingest);
     if (active.session.path && !active.ingest) await this.removeHubPath(active.session.path);
     this.sessions.delete(sourceId);
+    // Last dongle-mode session gone -> release the dongle receiver.
+    if (active.usesWfbReceiver && ![...this.sessions.values()].some((s) => s.usesWfbReceiver)) {
+      wfbngReceiver.stop();
+    }
   }
 
   /** Grab a single JPEG frame from a live session. */

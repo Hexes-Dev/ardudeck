@@ -1,5 +1,5 @@
 import type { ComponentType } from 'react';
-import type { ModuleManifest } from './manifest.js';
+import type { ModuleManifest, MountPointName } from './manifest.js';
 
 export interface PtyCreateOptions {
   shell: string;
@@ -76,6 +76,89 @@ export interface SurveyGeneratorRegistration {
   generate(config: unknown): unknown | Promise<unknown>;
 }
 
+// --- HUD overlay extension point ------------------------------------------
+// Geometry of the first-party fighter HUD's SVG viewBox, so a `cameraOverlay`
+// module can draw reticles (pippers, steering lines) in the SAME coordinate
+// space and have them line up with the pitch ladder. A module renders its own
+// absolutely-positioned SVG using this viewBox + preserveAspectRatio
+// 'xMidYMid meet' and the `scale` group, then places symbols at
+// `centerX + azDeg * pxPerDeg`, `centerY + pitchDeg * pxPerDeg`. Live attitude
+// / velocity come from `telemetry`; this is pure geometry.
+
+export interface HudProjection {
+  /** viewBox width / height the HUD is drawn in (SVG user units). */
+  viewBoxW: number;
+  viewBoxH: number;
+  /** Boresight (screen centre) in viewBox units. */
+  centerX: number;
+  centerY: number;
+  /** viewBox units per degree of pitch / azimuth. */
+  pxPerDeg: number;
+  /** Overall scale multiplier applied to the fixed instrument cluster. */
+  scale: number;
+  /** Resolved HUD symbology colour (hex), so a reticle matches the HUD. */
+  color: string;
+  /** HUD line-weight multiplier, so stroke widths match. */
+  lineWeight: number;
+}
+
+// --- OSD element extension point ------------------------------------------
+// The character-cell OSD (rendered into the flight controller's DisplayPort /
+// MSP font buffer). A module contributes an element type; the host lists it in
+// the OSD Designer palette and calls `render` when composing the buffer.
+
+/** Minimal writer over the host's OSD character buffer (host adapts its real
+ *  buffer to this). Coordinates are cell columns / rows. */
+export interface OsdCharBuffer {
+  drawString(x: number, y: number, str: string): void;
+  setChar(x: number, y: number, code: number): void;
+}
+
+export interface OsdElementRegistration {
+  /** Stable id serialized into saved OSD layouts. Must NOT collide with a
+   *  built-in element id; using the module's reverse-DNS prefix is recommended. */
+  id: string;
+  name: string;
+  /** Palette grouping (host categories: 'general' | 'attitude' | 'mission' | …). */
+  category: string;
+  description?: string;
+  /** Footprint in character cells, for palette preview + bounds. */
+  size: { width: number; height: number };
+  /** Default placement + whether it starts enabled on a fresh layout. */
+  defaultPosition?: { x: number; y: number; enabled: boolean };
+  previewText?: string;
+  /**
+   * Draw the element into the char buffer at cell (x, y). `values` is the
+   * host's live-telemetry snapshot (fields: latitude, longitude, altitude,
+   * speed, heading, targetLat, targetLon, …). The module computes whatever it
+   * needs from `values` plus its own state and writes cells via `buffer`.
+   */
+  render(buffer: OsdCharBuffer, x: number, y: number, values: unknown): void;
+}
+
+// --- Module panel (dock) extension point -----------------------------------
+// A single host-owned dock arbitrates the corner so modules don't collide:
+// each module contributes a titled panel, the host renders one collision-free
+// tray of launcher chips and owns positioning + open/close chrome. This
+// replaces the free-positioned `floatingOverlay` for module settings/controls.
+
+export interface ModulePanelRegistration {
+  /** Stable, module-scoped id. */
+  id: string;
+  /** Shown on the launcher chip and the panel header. */
+  title: string;
+  /** Optional short text tag (2-3 chars) for the chip. No emoji. */
+  badge?: string;
+  /**
+   * How much room the panel needs. 'compact' (default) opens in the dock
+   * dropdown - right for small settings forms. 'large' opens in a resizable,
+   * draggable floating window - right for interactive UIs (a chat, a terminal).
+   */
+  size?: 'compact' | 'large';
+  /** The panel BODY only - the host provides the chip, frame, header, close. */
+  component: ComponentType;
+}
+
 export interface RendererHostApi {
   moduleSlug: string;
   telemetry: {
@@ -105,7 +188,54 @@ export interface RendererHostApi {
   };
   invoke(channel: string, data: unknown): Promise<unknown>;
   log(level: 'info' | 'warn' | 'error', ...args: unknown[]): void;
-  registerMountPoint(name: 'floatingOverlay', component: ComponentType): void;
+  registerMountPoint(name: MountPointName, component: ComponentType): void;
+  /**
+   * Contribute a panel to the host-owned module dock (one collision-free tray
+   * the host renders in a corner). The module supplies only the panel body; the
+   * host owns the launcher chip, placement, and open/close chrome. Prefer this
+   * over a raw `floatingOverlay` for module settings/controls.
+   */
+  panels: {
+    register(reg: ModulePanelRegistration): void;
+    /** Remove a panel this module registered. Other modules' ids are ignored. */
+    unregister(id: string): void;
+  };
+  /**
+   * HUD overlay geometry for `cameraOverlay` modules. `getProjection()` returns
+   * null when the fighter HUD isn't currently active (the module should draw
+   * nothing); `subscribe` fires on activation / config (scale) changes.
+   */
+  hud: {
+    getProjection(): HudProjection | null;
+    subscribe(listener: (p: HudProjection | null) => void): () => void;
+  };
+  /**
+   * Contribute a character-cell OSD element. It appears in the OSD Designer
+   * palette alongside built-ins. Registering an id this module already
+   * registered replaces it.
+   */
+  osd: {
+    registerElement(reg: OsdElementRegistration): void;
+    /** Remove an element this module registered. Other modules' ids are ignored. */
+    unregisterElement(id: string): void;
+  };
+  /**
+   * Read-only mission waypoints (host MissionItem shape: `{ seq, latitude,
+   * longitude, command, … }`), for target selection. `subscribe` fires on
+   * mission edits / uploads.
+   */
+  mission: {
+    getWaypoints(): unknown[];
+    subscribe(listener: (waypoints: unknown[]) => void): () => void;
+  };
+  /**
+   * Read-only active map command target for the primary vehicle (the guided
+   * "move here" goto / orbit centre), or null when idle.
+   */
+  commandTarget: {
+    get(): unknown;
+    subscribe(listener: (target: unknown) => void): () => void;
+  };
   survey: {
     /**
      * Contribute a coverage engine to the survey planner. It appears next to

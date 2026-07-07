@@ -7,6 +7,7 @@
 import { useEffect, useState } from 'react';
 import { useCameraStore, sourcesForVehicle } from '../../stores/camera-store';
 import { CAMERA_PRESETS, presetById } from './camera-presets';
+import { WfbngSetupGuide } from './WfbngSetupGuide';
 import type { CameraSourceConfig, GimbalControlMode } from '../../../shared/camera-types';
 import { DEFAULT_GIMBAL_CONFIG } from '../../../shared/camera-types';
 
@@ -73,6 +74,7 @@ export function CameraSourceMenu({ vehicleKey, onClose }: CameraSourceMenuProps)
           )}
         </div>
         {preset?.note && <p className="mt-1 text-[10px] leading-tight text-content-tertiary">{preset.note}</p>}
+        {preset?.kind === 'wfbng' && <WfbngSetupGuide port={5600} />}
         {preset?.kind === 'uvc' && (
           <div className="mt-1.5 flex flex-col gap-1">
             {uvcDevices.length === 0 && <span className="text-[10px] text-content-tertiary">No capture devices detected.</span>}
@@ -185,7 +187,7 @@ function SourceRow({ source, selected, onSelect, onChange, onRemove }: {
           className="mt-1 w-full rounded bg-surface-input px-1.5 py-0.5 font-mono text-[11px] text-content"
         />
       )}
-      <div className="mt-1 flex items-center gap-2 text-[10px] text-content-secondary">
+      <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-content-secondary">
         <span className="uppercase">{source.kind}</span>
         <label className="flex items-center gap-1">
           HFOV
@@ -198,6 +200,41 @@ function SourceRow({ source, selected, onSelect, onChange, onRemove }: {
             title="Horizontal field of view — needed for click-to-point accuracy"
           />
         </label>
+        {source.kind === 'wfbng' && (
+          <>
+            <label className="flex items-center gap-1" title="Dongle: ArduDeck receives directly with the plugged-in dongle. Network: a separate ground station forwards video to the udp url.">
+              Via
+              <select
+                value={source.wfbMode ?? 'dongle'}
+                onChange={(e) => onChange({ wfbMode: e.target.value as 'dongle' | 'network' })}
+                className="rounded bg-surface-input px-1 py-0.5 text-content"
+              >
+                <option value="dongle">Dongle</option>
+                <option value="network">Network</option>
+              </select>
+            </label>
+            <label className="flex items-center gap-1" title="Codec the camera sends. WiFiLink 2 defaults to H.265.">
+              Codec
+              <select
+                value={source.wfbCodec ?? 'h265'}
+                onChange={(e) => onChange({ wfbCodec: e.target.value as 'h265' | 'h264' })}
+                className="rounded bg-surface-input px-1 py-0.5 text-content"
+              >
+                <option value="h265">H.265</option>
+                <option value="h264">H.264</option>
+              </select>
+            </label>
+            <label className="flex items-center gap-1" title="Convert to H.264 so the stream can render (required for H.265; costs some CPU)">
+              <input
+                type="checkbox"
+                checked={source.wfbTranscode ?? (source.wfbCodec ?? 'h265') === 'h265'}
+                onChange={(e) => onChange({ wfbTranscode: e.target.checked })}
+                className="accent-blue-500"
+              />
+              Convert
+            </label>
+          </>
+        )}
         {(source.kind === 'rtsp' || source.kind === 'mavlink') && (
           <label className="flex items-center gap-1" title="RTSP transport: Auto negotiates UDP then falls back to TCP. UDP = lowest latency on a clean LAN; TCP = reliable through firewalls / lossy links.">
             RTSP
@@ -225,7 +262,7 @@ function Shell({ children, onClose }: { children: React.ReactNode; onClose: () =
   return (
     <>
       <div className="fixed inset-0 z-30" onClick={onClose} />
-      <div className="absolute right-2 top-9 z-40 w-72 rounded-xl border border-default bg-surface-solid p-3 shadow-xl">
+      <div className="absolute right-2 top-9 z-40 w-96 max-w-[calc(100vw-1rem)] max-h-[calc(100vh-6rem)] overflow-y-auto overflow-x-hidden rounded-xl border border-default bg-surface-solid p-3 shadow-xl">
         {children}
       </div>
     </>

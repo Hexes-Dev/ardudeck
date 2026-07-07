@@ -109,3 +109,6 @@ auto.key
 **/auto.crt
 **/auto.key
 reference/
+
+# Locally-built media/receiver binaries (bundled by CI, never committed)
+apps/desktop/resources/bin/*/ardudeck-wfb-rx*

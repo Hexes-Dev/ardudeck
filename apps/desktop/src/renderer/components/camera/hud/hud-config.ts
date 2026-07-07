@@ -30,7 +30,22 @@ export const FIXED_WIDGETS = [
   'vsi',
   'ccip',
   'ccrp',
+  'groundSpeed',
 ] as const;
+
+/**
+ * HUD profile: which instrument arrangement renders. 'auto' follows the
+ * connected vehicle type (rover/boat → ground). The two arrangements are
+ * independently customisable widget maps, so tuning the rover HUD never
+ * disturbs the aircraft HUD and vice versa.
+ */
+export type HudProfile = 'auto' | 'air' | 'ground';
+
+/** MAV_TYPE values that drive on the ground (10 rover, 11 surface boat). */
+export function resolveHudProfile(profile: HudProfile, mavType: number | undefined): 'air' | 'ground' {
+  if (profile !== 'auto') return profile;
+  return mavType === 10 || mavType === 11 ? 'ground' : 'air';
+}
 
 /** Widgets the user can drag around (corner readouts / graph). */
 export const MOVABLE_WIDGETS = ['status', 'battery', 'home', 'linkGraph'] as const;
@@ -62,6 +77,7 @@ export interface HudWidgetMeta {
 }
 
 export const HUD_WIDGETS: HudWidgetMeta[] = [
+  { id: 'groundSpeed', label: 'Ground speed box', movable: false },
   { id: 'horizon', label: 'Horizon line', movable: false },
   { id: 'pitchLadder', label: 'Pitch ladder', movable: false },
   { id: 'fpm', label: 'Flight path marker', movable: false },
@@ -86,6 +102,9 @@ export interface Vec2 {
 
 export interface HudConfig {
   widgets: Record<HudWidgetId, boolean>;
+  /** Independent widget arrangement used when the ground profile is active. */
+  widgetsGround: Record<HudWidgetId, boolean>;
+  profile: HudProfile;
   color: HudColor;
   /** Line-weight multiplier, ~0.6 .. 1.8. */
   lineWeight: number;
@@ -112,6 +131,34 @@ export const DEFAULT_POSITIONS: Record<string, Vec2> = {
   ...DEFAULT_READOUT_POSITIONS,
 };
 
+/**
+ * Ground-vehicle default arrangement: aviation instruments off, a big ground
+ * speed box, tilt/steering/waypoint readouts on. Users can still toggle
+ * anything back on - these are just the rover/boat starting point.
+ */
+export const DEFAULT_GROUND_WIDGETS: Record<HudWidgetId, boolean> = {
+  horizon: false,
+  pitchLadder: false,
+  fpm: false,
+  boresight: true,
+  bankArc: false,
+  headingTape: true,
+  airspeedTape: false,
+  altitudeTape: false,
+  vsi: false,
+  ccip: false,
+  ccrp: false,
+  groundSpeed: true,
+  status: true,
+  battery: true,
+  home: true,
+  linkGraph: false,
+  ...readoutsOff(),
+  steer: true,
+  tilt: true,
+  wpDist: true,
+};
+
 export const DEFAULT_HUD_CONFIG: HudConfig = {
   widgets: {
     horizon: true,
@@ -125,12 +172,15 @@ export const DEFAULT_HUD_CONFIG: HudConfig = {
     vsi: true,
     ccip: false,
     ccrp: false,
+    groundSpeed: false,
     status: true,
     battery: true,
     home: true,
     linkGraph: false,
     ...readoutsOff(),
   },
+  widgetsGround: { ...DEFAULT_GROUND_WIDGETS },
+  profile: 'auto',
   color: 'green',
   lineWeight: 1,
   glow: true,
@@ -197,6 +247,7 @@ export function normalizeHudConfig(partial: Partial<HudConfig> | undefined): Hud
     ...DEFAULT_HUD_CONFIG,
     ...partial,
     widgets: { ...DEFAULT_HUD_CONFIG.widgets, ...(partial.widgets ?? {}) },
+    widgetsGround: { ...DEFAULT_GROUND_WIDGETS, ...(partial.widgetsGround ?? {}) },
     positions: { ...DEFAULT_POSITIONS, ...(partial.positions ?? {}) },
   };
 }

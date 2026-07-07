@@ -10,6 +10,8 @@ import { SYM } from './osd-symbols';
 import { OsdScreenBuffer } from './font-renderer';
 import type { OsdElementId } from './element-registry';
 import type { CcrpResult } from '../../utils/ccrp-calculator';
+import { getModuleOsdElement } from '../../modules/module-osd-registry';
+import type { OsdCharBuffer } from '@ardudeck/module-sdk';
 
 // ---------------------------------------------------------------------------
 // Demo telemetry interface (expanded)
@@ -109,7 +111,7 @@ export const DEFAULT_DEMO_VALUES: DemoTelemetry = {
 
 export function renderElement(
   buffer: OsdScreenBuffer,
-  id: OsdElementId,
+  id: OsdElementId | string,
   x: number,
   y: number,
   values: DemoTelemetry,
@@ -283,6 +285,15 @@ export function renderElement(
     case 'wind_vertical':
       renderWindVertical(buffer, x, y, values.windVertical);
       break;
+
+    // Any id not handled above is a module-contributed element. The host's
+    // OsdScreenBuffer already implements the SDK OsdCharBuffer methods, so the
+    // real buffer is passed straight through.
+    default: {
+      const reg = getModuleOsdElement(id);
+      if (reg) reg.render(buffer as unknown as OsdCharBuffer, x, y, values);
+      break;
+    }
   }
 }
 

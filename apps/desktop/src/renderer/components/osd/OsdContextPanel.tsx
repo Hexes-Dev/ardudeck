@@ -6,7 +6,7 @@
  * - Otherwise, the preview's data controls: demo sliders, or live status.
  */
 
-import type { OsdElementId } from '../../stores/osd-store';
+import type { OsdElementKey } from '../../stores/osd-store';
 import type { OsdDataSource } from '../../stores/osd-store';
 import { OsdDemoPanel } from './OsdDemoPanel';
 import { OsdLivePanel } from './OsdLivePanel';
@@ -14,7 +14,7 @@ import { OsdEditPanel } from './OsdEditPanel';
 
 interface Props {
   dataSource: OsdDataSource;
-  selectedElement: OsdElementId | null;
+  selectedElement: OsdElementKey | null;
   onClearSelection: () => void;
 }
 

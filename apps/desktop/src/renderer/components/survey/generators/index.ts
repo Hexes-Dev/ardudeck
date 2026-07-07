@@ -22,7 +22,7 @@ registerSurveyGenerator({
   description:
     'Boustrophedon lawnmower pattern. Parallel scan lines across the polygon with overshoot for turns.',
   capabilities: {
-    supportsHoles: false,
+    supportsHoles: true,
     supportsWorkspace: false,
     requiresCamera: true,
     isAsync: false,
@@ -38,7 +38,7 @@ registerSurveyGenerator({
   description:
     'Two perpendicular grid passes. Higher photo density and improved 3D reconstruction over a single grid.',
   capabilities: {
-    supportsHoles: false,
+    supportsHoles: true,
     supportsWorkspace: false,
     requiresCamera: true,
     isAsync: false,

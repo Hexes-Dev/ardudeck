@@ -29,7 +29,11 @@ export type HudReadoutId =
   | 'lon'
   | 'windSpeed'
   | 'mode'
-  | 'gforce';
+  | 'gforce'
+  | 'steer'
+  | 'tilt'
+  | 'wpDist'
+  | 'xtrack';
 
 export type HudReadoutCategory = 'Power' | 'Flight' | 'Speed' | 'Navigation' | 'Environment' | 'Status';
 
@@ -64,6 +68,14 @@ export interface ReadoutSource {
   windSpeed?: number;
   mode: string;
   gForce?: number;
+  /** Steering output, -100 (full left) .. +100 (full right). Ground vehicles. */
+  steer?: number;
+  /** Vehicle attitude for the tilt readout (rollover awareness on slopes). */
+  roll?: number;
+  pitch?: number;
+  /** Autopilot nav solution (NAV_CONTROLLER_OUTPUT) - only while navigating. */
+  wpDistance?: number;
+  xtrackError?: number;
 }
 
 export const HUD_READOUTS: HudReadoutMeta[] = [
@@ -85,6 +97,10 @@ export const HUD_READOUTS: HudReadoutMeta[] = [
   { id: 'windSpeed', label: 'WIND', description: 'Wind speed', category: 'Environment' },
   { id: 'mode', label: 'MODE', description: 'Flight mode', category: 'Status' },
   { id: 'gforce', label: 'G', description: 'G-force', category: 'Status' },
+  { id: 'steer', label: 'STEER', description: 'Steering output (ground vehicles)', category: 'Status' },
+  { id: 'tilt', label: 'TILT', description: 'Roll/pitch tilt (rollover awareness)', category: 'Status' },
+  { id: 'wpDist', label: 'WP', description: 'Distance to active waypoint', category: 'Navigation' },
+  { id: 'xtrack', label: 'XTK', description: 'Crosstrack error', category: 'Navigation' },
 ];
 
 export const READOUT_IDS: readonly HudReadoutId[] = HUD_READOUTS.map((r) => r.id);
@@ -164,6 +180,28 @@ export function formatReadout(id: HudReadoutId, v: ReadoutSource, u: UnitProfile
     case 'gforce': {
       const g = num(v.gForce);
       return g == null ? { label, value: '-- G' } : { label, value: `${g.toFixed(1)} G` };
+    }
+    case 'steer': {
+      const s = num(v.steer);
+      if (s == null) return dash;
+      const mag = Math.round(Math.min(100, Math.abs(s)));
+      return { label, value: mag < 1 ? 'CTR' : `${s < 0 ? 'L' : 'R'} ${mag}%` };
+    }
+    case 'tilt': {
+      const r = num(v.roll);
+      const p = num(v.pitch);
+      if (r == null || p == null) return dash;
+      return { label, value: `R${Math.round(r)}° P${Math.round(p)}°` };
+    }
+    case 'wpDist': {
+      const d = num(v.wpDistance);
+      return d == null ? dash : { label, value: `${Math.round(u.dist(d))} ${u.distUnit}` };
+    }
+    case 'xtrack': {
+      const x = num(v.xtrackError);
+      if (x == null) return dash;
+      const mag = u.dist(Math.abs(x));
+      return { label, value: `${x < 0 ? 'L' : 'R'} ${mag < 10 ? mag.toFixed(1) : Math.round(mag)} ${u.distUnit}` };
     }
   }
 }

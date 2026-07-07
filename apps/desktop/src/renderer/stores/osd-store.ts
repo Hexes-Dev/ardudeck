@@ -18,10 +18,15 @@ import { calculateCcrp } from '../utils/ccrp-calculator';
 import { usePayloadStore } from './payload-store';
 import {
   type OsdElementId,
+  type OsdElementKey,
   buildDefaultPositions,
   buildBfIndexMap,
 } from '../utils/osd/element-registry';
 import { ELEMENT_REGISTRY } from '../utils/osd/element-registry';
+import {
+  listModuleOsdElements,
+  subscribeModuleOsdElements,
+} from '../modules/module-osd-registry';
 import {
   type DemoTelemetry,
   DEFAULT_DEMO_VALUES,
@@ -43,7 +48,7 @@ import {
 } from '../utils/osd/ardupilot-osd';
 
 // Re-export types used by consumers
-export type { OsdElementId } from '../utils/osd/element-registry';
+export type { OsdElementId, OsdElementKey } from '../utils/osd/element-registry';
 export type { DemoTelemetry } from '../utils/osd/element-renderers';
 
 // Import bundled fonts (Vite raw imports)
@@ -77,9 +82,28 @@ export interface OsdElementPosition {
   enabled: boolean;
 }
 
+/**
+ * Layout map. Built-in ids resolve to a guaranteed position (mapped type),
+ * while module-contributed string ids resolve to `OsdElementPosition | undefined`
+ * (index signature under noUncheckedIndexedAccess) and must be guarded.
+ */
+export type OsdElementPositions = Record<OsdElementId, OsdElementPosition> & {
+  [key: string]: OsdElementPosition;
+};
+
 /** Default element positions built from registry */
 export const DEFAULT_ELEMENT_POSITIONS: Record<OsdElementId, OsdElementPosition> =
   buildDefaultPositions() as Record<OsdElementId, OsdElementPosition>;
+
+/** Seed positions for every currently-registered module element. */
+function moduleDefaultPositions(): Record<string, OsdElementPosition> {
+  const out: Record<string, OsdElementPosition> = {};
+  for (const reg of listModuleOsdElements()) {
+    const dp = reg.defaultPosition ?? { x: 1, y: 1, enabled: false };
+    out[reg.id] = { x: dp.x, y: dp.y, enabled: dp.enabled };
+  }
+  return out;
+}
 
 /** What feeds the preview. */
 export type OsdDataSource = 'demo' | 'live';
@@ -144,15 +168,24 @@ const persisted = loadPersisted();
 
 function mergePositions(
   saved: Record<string, OsdElementPosition> | undefined,
-): Record<OsdElementId, OsdElementPosition> {
-  const base = { ...DEFAULT_ELEMENT_POSITIONS };
+): OsdElementPositions {
+  const base: Record<string, OsdElementPosition> = {
+    ...DEFAULT_ELEMENT_POSITIONS,
+    ...moduleDefaultPositions(),
+  };
   if (saved) {
     for (const def of ELEMENT_REGISTRY) {
       const s = saved[def.id];
       if (s) base[def.id] = { x: s.x, y: s.y, enabled: s.enabled };
     }
+    // Restore saved module-element positions (string ids). Keep them even if the
+    // contributing module hasn't registered yet this session, so a later
+    // registration doesn't clobber the user's placement.
+    for (const [id, s] of Object.entries(saved)) {
+      if (!(id in DEFAULT_ELEMENT_POSITIONS)) base[id] = { x: s.x, y: s.y, enabled: s.enabled };
+    }
   }
-  return base;
+  return base as OsdElementPositions;
 }
 
 // ── FC detection ──────────────────────────────────────────────────────────
@@ -185,8 +218,8 @@ interface OsdStore {
   // Demo values
   demoValues: DemoTelemetry;
 
-  // Element positions (the working layout)
-  elementPositions: Record<OsdElementId, OsdElementPosition>;
+  // Element positions (the working layout; includes module-contributed ids)
+  elementPositions: OsdElementPositions;
 
   // Named local presets
   presets: Record<string, Record<string, OsdElementPosition>>;
@@ -219,9 +252,10 @@ interface OsdStore {
   resetDemoValues: () => void;
 
   // Actions — layout
-  setElementPosition: (id: OsdElementId, position: Partial<OsdElementPosition>) => void;
-  toggleElement: (id: OsdElementId) => void;
+  setElementPosition: (id: OsdElementKey, position: Partial<OsdElementPosition>) => void;
+  toggleElement: (id: OsdElementKey) => void;
   resetElementPositions: () => void;
+  mergeModuleElementDefaults: () => void;
   autoArrangeToCanvas: () => void;
   savePreset: (name: string) => void;
   loadPreset: (name: string) => void;
@@ -377,32 +411,57 @@ export const useOsdStore = create<OsdStore>((set, get) => ({
   },
 
   // ── layout ────────────────────────────────────────────────────────────
-  setElementPosition: (id: OsdElementId, position: Partial<OsdElementPosition>) => {
-    set((state) => ({
-      elementPositions: {
-        ...state.elementPositions,
-        [id]: { ...state.elementPositions[id], ...position },
-      },
-    }));
+  setElementPosition: (id: OsdElementKey, position: Partial<OsdElementPosition>) => {
+    set((state) => {
+      const prev = state.elementPositions[id] ?? { x: 0, y: 0, enabled: false };
+      return {
+        elementPositions: {
+          ...state.elementPositions,
+          [id]: { ...prev, ...position },
+        },
+      };
+    });
     get().updateScreenBuffer();
     savePersisted(get());
   },
 
-  toggleElement: (id: OsdElementId) => {
-    set((state) => ({
-      elementPositions: {
-        ...state.elementPositions,
-        [id]: { ...state.elementPositions[id], enabled: !state.elementPositions[id].enabled },
-      },
-    }));
+  toggleElement: (id: OsdElementKey) => {
+    set((state) => {
+      const prev = state.elementPositions[id] ?? { x: 0, y: 0, enabled: false };
+      return {
+        elementPositions: {
+          ...state.elementPositions,
+          [id]: { ...prev, enabled: !prev.enabled },
+        },
+      };
+    });
     get().updateScreenBuffer();
     savePersisted(get());
   },
 
   resetElementPositions: () => {
-    set({ elementPositions: { ...DEFAULT_ELEMENT_POSITIONS } });
+    set({ elementPositions: mergePositions(undefined) });
     get().updateScreenBuffer();
     savePersisted(get());
+  },
+
+  // Ensure any module element registered after init has a seeded position, so
+  // it shows in the palette and can be enabled. Never overwrites existing
+  // (possibly user-adjusted or persisted) placements.
+  mergeModuleElementDefaults: () => {
+    set((state) => {
+      const next: Record<string, OsdElementPosition> = { ...state.elementPositions };
+      let changed = false;
+      for (const reg of listModuleOsdElements()) {
+        if (!next[reg.id]) {
+          const dp = reg.defaultPosition ?? { x: 1, y: 1, enabled: false };
+          next[reg.id] = { x: dp.x, y: dp.y, enabled: dp.enabled };
+          changed = true;
+        }
+      }
+      return changed ? { elementPositions: next as OsdElementPositions } : {};
+    });
+    get().updateScreenBuffer();
   },
 
   // Redistribute every element across the CURRENT canvas using its default
@@ -731,7 +790,7 @@ export const useOsdStore = create<OsdStore>((set, get) => ({
       values = demoValues;
     }
 
-    for (const [id, pos] of Object.entries(elementPositions) as [OsdElementId, OsdElementPosition][]) {
+    for (const [id, pos] of Object.entries(elementPositions) as [OsdElementKey, OsdElementPosition][]) {
       if (!pos.enabled) continue;
 
       if (id === 'ccrp_indicator') {
@@ -760,3 +819,9 @@ export const useOsdStore = create<OsdStore>((set, get) => ({
 export function osdRowsFor(videoType: VideoType): number {
   return getOsdRows(videoType);
 }
+
+// Seed positions (and trigger a re-render) whenever a module registers or
+// unregisters an OSD element after store init.
+subscribeModuleOsdElements(() => {
+  useOsdStore.getState().mergeModuleElementDefaults();
+});

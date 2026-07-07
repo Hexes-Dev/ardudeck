@@ -6,7 +6,7 @@
  */
 
 import {
-  type OsdElementId,
+  type OsdElementKey,
   type ElementSize,
   ELEMENT_REGISTRY,
   getElementSizeFromRegistry,
@@ -24,6 +24,6 @@ for (const def of ELEMENT_REGISTRY) {
 /**
  * Get element size with fallback
  */
-export function getElementSize(id: OsdElementId): ElementSize {
+export function getElementSize(id: OsdElementKey): ElementSize {
   return getElementSizeFromRegistry(id);
 }

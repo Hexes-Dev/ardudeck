@@ -6,6 +6,8 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import { IPC_CHANNELS, type ConnectOptions, type ConnectionState, type ConsoleLogEntry, type SavedLayout, type SettingsStoreSchema, type MSPConnectOptions, type MSPConnectionState, type MSPTelemetryData, type SitlConfig, type SitlStatus, type SitlExitData, type VirtualRCState, type ArduPilotSitlConfig, type ArduPilotSitlStatus, type ArduPilotSitlExitData, type ArduPilotSitlDownloadProgress, type ArduPilotSitlBinaryInfo, type ArduPilotFrameCatalog, type ArduPilotVehicleType, type ArduPilotReleaseTrack, type SwarmSitlConfig, type SwarmSitlStatus, type SwarmInstanceStatus, type SwarmSitlLogLine, type AppUpdateInfo, type SigningStatus, type TelemetrySpeed, type StatusMessage, type TileCacheStats, type TileCacheDownloadProgress, type TileCacheSettings, type TileCacheDownloadRegion, type CompanionConnectOptions, type CompanionConnectionIpcState, type CompanionDiscoveryResult, type TransportInfoIpc, type VehicleInfoIpc, type SetActiveSelectionPayload, type VehicleCommand, type MissionVehicleProgress, type OrchestrationIntentIpc, type OrchestrationStatusIpc, type OrchestratorSource, type OrchestratorStatus, type CameraSourceConfig, type CameraStartResult, type CameraMediaActionResult, type MediaEngineStatus, type GimbalCommand, type CameraCommand, type VideoStreamInfoIpc, type GimbalAttitudeIpc, type GimbalInfoIpc } from '../shared/ipc-channels.js';
 import type { SigningAuditSnapshot } from '../shared/signing-audit-types.js';
+import type { StreamDiagnosis, ElrsModuleInfo, ElrsSetModeResult, ElrsProgressEvent } from '../shared/link-doctor-types.js';
+import type { WfbngStatus } from '../shared/camera-types.js';
 import type { VehicleFlightHistory } from '../shared/fleet-log-types.js';
 import type { DetachedWindowInfo, OpenDetachedRequest } from '../shared/window-types.js';
 import type { ExportArea } from '../shared/kml-export.js';
@@ -436,6 +438,49 @@ const api = {
     return () => ipcRenderer.removeListener('connection:error', handler);
   },
 
+  // Link Doctor / ELRS module setup
+  onConnectionDiagnosis: (callback: (diagnosis: StreamDiagnosis) => void) => {
+    const handler = (_: unknown, diagnosis: StreamDiagnosis) => callback(diagnosis);
+    ipcRenderer.on(IPC_CHANNELS.CONNECTION_DIAGNOSIS, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.CONNECTION_DIAGNOSIS, handler);
+  },
+
+  linkDoctorProbe: (port: string, baudRate: number): Promise<StreamDiagnosis> =>
+    ipcRenderer.invoke(IPC_CHANNELS.LINKDOCTOR_PROBE, port, baudRate),
+
+  linkDoctorProbeUdp: (port: number): Promise<{ diagnosis: StreamDiagnosis; sender: string | null }> =>
+    ipcRenderer.invoke(IPC_CHANNELS.LINKDOCTOR_PROBE_UDP, port),
+
+  elrsDetect: (port: string): Promise<ElrsModuleInfo | null> =>
+    ipcRenderer.invoke(IPC_CHANNELS.ELRS_DETECT, port),
+
+  elrsSetLinkMode: (port: string, targetMode: string): Promise<ElrsSetModeResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.ELRS_SET_LINK_MODE, port, targetMode),
+
+  elrsCancel: (): Promise<void> =>
+    ipcRenderer.invoke(IPC_CHANNELS.ELRS_CANCEL),
+
+  onElrsProgress: (callback: (progress: ElrsProgressEvent) => void) => {
+    const handler = (_: unknown, progress: ElrsProgressEvent) => callback(progress);
+    ipcRenderer.on(IPC_CHANNELS.ELRS_PROGRESS, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.ELRS_PROGRESS, handler);
+  },
+
+  wfbngStatus: (): Promise<WfbngStatus> =>
+    ipcRenderer.invoke(IPC_CHANNELS.WFBNG_STATUS),
+
+  wfbngImportKey: (): Promise<{ imported: boolean }> =>
+    ipcRenderer.invoke(IPC_CHANNELS.WFBNG_IMPORT_KEY),
+
+  wfbngSetOptions: (opts: { channel?: number; bandwidth?: 20 | 40 }): Promise<void> =>
+    ipcRenderer.invoke(IPC_CHANNELS.WFBNG_SET_OPTIONS, opts),
+
+  wfbngInstall: (): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke(IPC_CHANNELS.WFBNG_INSTALL),
+
+  wfbngLocalIps: (): Promise<string[]> =>
+    ipcRenderer.invoke(IPC_CHANNELS.WFBNG_LOCAL_IPS),
+
   onConsoleLog: (callback: (entry: ConsoleLogEntry) => void) => {
     const handler = (_: unknown, entry: ConsoleLogEntry) => callback(entry);
     ipcRenderer.on(IPC_CHANNELS.CONSOLE_LOG, handler);
@@ -504,6 +549,7 @@ const api = {
   readParameterBatch: (paramIds: string[]): Promise<{
     success: boolean;
     values: Record<string, number>;
+    types: Record<string, number>;
     missing: string[];
     error?: string;
   }> => ipcRenderer.invoke(IPC_CHANNELS.PARAM_READ_BATCH, paramIds),

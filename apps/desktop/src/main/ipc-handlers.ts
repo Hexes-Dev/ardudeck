@@ -107,13 +107,14 @@ import {
   serializeRequestDataStream,
   REQUEST_DATA_STREAM_ID,
   REQUEST_DATA_STREAM_CRC_EXTRA,
+  getAllMessageInfos,
   type ParamValue,
 } from '@ardudeck/mavlink-ts';
 import { IPC_CHANNELS, SEVERITY_LABELS, type ConnectOptions, type ConnectionState, type ConsoleLogEntry, type SavedLayout, type LayoutStoreSchema, type SettingsStoreSchema, type SigningStatus, type TelemetrySpeed, type TransportInfoIpc, type VehicleInfoIpc, type SetActiveSelectionPayload, type VehicleCommand, type MissionVehicleProgress, type OrchestrationIntentIpc, type OrchestrationStatusIpc, type OrchestratorSource, type OrchestratorStatus, type CameraSourceConfig, type GimbalCommand, type CameraCommand } from '../shared/ipc-channels.js';
 import { initAutoUpdater, checkForUpdates, downloadUpdate, installUpdate } from './updater.js';
 import type { ParamValuePayload, ParameterProgress } from '../shared/parameter-types.js';
 import { PARAMETER_METADATA_URLS, mavTypeToVehicleType, type VehicleType, type ParameterMetadata, type ParameterMetadataStore } from '../shared/parameter-metadata.js';
-import type { AttitudeData, PositionData, GpsData, BatteryData, VfrHudData, FlightState, RcChannelsData } from '../shared/telemetry-types.js';
+import type { AttitudeData, PositionData, GpsData, BatteryData, VfrHudData, FlightState, RcChannelsData, NavControllerData } from '../shared/telemetry-types.js';
 import { COPTER_MODES, PLANE_MODES, ROVER_MODES, SUB_MODES } from '../shared/telemetry-types.js';
 import type { MissionItem, MissionProgress, MavFrame } from '../shared/mission-types.js';
 import { MAV_MISSION_RESULT, MAV_MISSION_TYPE } from '../shared/mission-types.js';
@@ -145,8 +146,12 @@ import {
   deserializeGimbalManagerInformation,
 } from '@ardudeck/mavlink-ts';
 import { LogDownloadManager, type LogListEntry } from './mavlink-log/index.js';
+import { classifyStream, classifyDatagrams } from './link-doctor/stream-classifier.js';
+import { detectElrsModule, setElrsLinkMode, cancelElrsOperation } from './link-doctor/elrs-service.js';
+import { wfbngReceiver } from './media/wfbng-receiver.js';
 import { decodeServoOutputRaw } from './servo-output-decode.js';
 import { writeFile, readFile } from 'node:fs/promises';
+import { networkInterfaces } from 'node:os';
 import { createDataFlashParser, runHealthChecks } from '@ardudeck/dataflash-parser';
 import { sitlProcess } from './sitl/sitl-process.js';
 import { mediaEngine } from './media/media-engine.js';
@@ -287,6 +292,11 @@ let mavlinkParser: MAVLinkParser | null = null;
 let heartbeatTimeout: NodeJS.Timeout | null = null;
 let heartbeatWatchdog: NodeJS.Timeout | null = null;
 let heartbeatGraceTimer: NodeJS.Timeout | null = null;
+
+// Link Doctor: raw bytes captured while waiting for the first heartbeat,
+// classified on timeout to explain WHAT the port was speaking (capped 4KB).
+let linkDoctorSample: Uint8Array[] = [];
+let linkDoctorSampleBytes = 0;
 
 // Heartbeat watchdog: detect when vehicle stops sending heartbeats.
 // Two-stage model (mimics Mission Planner behavior):
@@ -1120,7 +1130,7 @@ function decodeFleetTelemetry(packet: MAVLinkPacket): Record<string, unknown> | 
       const vehicleType = payload[4]!;
       const baseMode = payload[6]!;
       const systemStatus = payload[7]!;
-      if (NON_VEHICLE_TYPES.has(vehicleType)) return null;
+      if (!isVehicleHeartbeat(vehicleType, payload[5]!, packet.compid)) return null;
       const armed = (baseMode & 0x80) !== 0 && systemStatus >= 3;
       let modeName = `Mode ${customMode}`;
       if (vehicleType === 1 || (vehicleType >= 19 && vehicleType <= 25)) modeName = PLANE_MODES[customMode] || modeName;
@@ -1244,7 +1254,7 @@ function createBackgroundDiscoveryHandler(
           }
           if (packet.msgid === 0 && packet.payload.length >= 8) {
             const vehicleType = packet.payload[4]!;
-            if (NON_VEHICLE_TYPES.has(vehicleType)) continue;
+            if (!isVehicleHeartbeat(vehicleType, packet.payload[5]!, packet.compid)) continue;
             const result = connectionRegistry.recordHeartbeat(
               transportId, packet.sysid, packet.compid, vehicleType,
             );
@@ -1834,6 +1844,24 @@ const NON_VEHICLE_TYPES = new Set([
   42, // Winch
 ]);
 
+// A heartbeat only identifies a controllable vehicle when its MAV_TYPE is one
+// we know, its autopilot field is a real flight stack (radios, gimbals and GCS
+// software mark themselves MAV_AUTOPILOT_INVALID), and it doesn't come from
+// the telemetry-radio component id that SiK/mLRS/ELRS radios use. Unknown
+// MAV_TYPEs are rejected because ghost heartbeats from stream misalignment
+// carry arbitrary type bytes (seen live: a phantom "type 193" vehicle from an
+// ELRS link that hijacked the primary connection and the fleet list).
+const MAV_AUTOPILOT_INVALID = 8;
+const MAV_COMP_ID_TELEMETRY_RADIO = 68;
+function isVehicleHeartbeat(vehicleType: number, autopilot: number, compid: number): boolean {
+  return (
+    !NON_VEHICLE_TYPES.has(vehicleType) &&
+    VEHICLE_NAMES[vehicleType] !== undefined &&
+    autopilot !== MAV_AUTOPILOT_INVALID &&
+    compid !== MAV_COMP_ID_TELEMETRY_RADIO
+  );
+}
+
 // Safely send IPC message to all live windows (main + every detached pop-out).
 // The `mainWindow` argument is kept for backwards compatibility with the
 // 60+ existing call sites but is no longer the sole target — every detached
@@ -1922,6 +1950,7 @@ const MSG_ATTITUDE = 30;
 const MSG_GLOBAL_POSITION_INT = 33;
 const MSG_RC_CHANNELS_RAW = 35;
 const MSG_RC_CHANNELS = 65;
+const MSG_NAV_CONTROLLER_OUTPUT = 62;
 const MSG_VFR_HUD = 74;
 const MSG_COMMAND_ACK = 77;
 const MSG_WIND = 168;
@@ -2058,8 +2087,8 @@ function parseTelemetry(mainWindow: BrowserWindow, packet: MAVLinkPacket): void 
         });
       }
 
-      // Only process heartbeats from the connected autopilot, not companion computers/cameras/etc.
-      if (NON_VEHICLE_TYPES.has(vehicleType)) break;
+      // Only process heartbeats from the connected autopilot, not companion computers/cameras/radios/etc.
+      if (!isVehicleHeartbeat(vehicleType, autopilotType, packet.compid)) break;
       if (connectionState.componentId != null && packet.compid !== connectionState.componentId) break;
 
       currentVehicleType = vehicleType;
@@ -2231,6 +2260,23 @@ function parseTelemetry(mainWindow: BrowserWindow, packet: MAVLinkPacket): void 
       const speed = readFloat(payload, 4);
       const speedZ = readFloat(payload, 8);
       queueMavlinkTelemetry(mainWindow, { wind: { direction, speed, speedZ } });
+      break;
+    }
+
+    case MSG_NAV_CONTROLLER_OUTPUT: {
+      // NAV_CONTROLLER_OUTPUT (62) wire order: nav_roll(4), nav_pitch(4),
+      //   alt_error(4), aspd_error(4), xtrack_error(4), nav_bearing(2, i16),
+      //   target_bearing(2, i16), wp_dist(2, u16)
+      if (payload.length < 26) break;
+      const navController: NavControllerData = {
+        altError: readFloat(payload, 8),
+        aspdError: readFloat(payload, 12),
+        xtrackError: readFloat(payload, 16),
+        navBearing: readInt16(payload, 20),
+        targetBearing: readInt16(payload, 22),
+        wpDist: readUint16(payload, 24),
+      };
+      queueMavlinkTelemetry(mainWindow, { navController });
       break;
     }
 
@@ -3194,6 +3240,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
     }
     const transport = buildBackgroundTransport(options);
     const parser = new MAVLinkParser();
+    parser.registerMessages(getAllMessageInfos());
     const transportId = connectionRegistry.register(transport, parser, options);
 
     const dataHandler = createBackgroundDiscoveryHandler(transportId, mainWindow);
@@ -3278,6 +3325,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
     }
     const link = new OrchestrationServerLink(url, token);
     const parser = new MAVLinkParser();
+    parser.registerMessages(getAllMessageInfos());
     const transportId = connectionRegistry.register(link, parser, { type: 'tcp', host: url });
 
     const dataHandler = createBackgroundDiscoveryHandler(transportId, mainWindow);
@@ -3690,6 +3738,13 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
     return async (data: Uint8Array) => {
       if (!mavlinkParser) return;
 
+      // Link Doctor: keep a raw sample of what arrived while we waited for a
+      // heartbeat, so a failed connect can say what the port was speaking.
+      if (connectionState.isWaitingForHeartbeat && linkDoctorSampleBytes < 4096) {
+        linkDoctorSample.push(data);
+        linkDoctorSampleBytes += data.length;
+      }
+
       // BSOD FIX: Queue data and process with backpressure
       pendingMavlinkData.push(data);
 
@@ -3847,9 +3902,9 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
               const vehicleType = packet.payload[4]!;
               const autopilotType = packet.payload[5]!;
 
-              // Skip heartbeats from non-vehicle components (companion computers, cameras, GCS, etc.)
+              // Skip heartbeats from non-vehicle components (companion computers, cameras, GCS, radios, etc.)
               // These send their own heartbeats but don't represent the actual vehicle
-              if (NON_VEHICLE_TYPES.has(vehicleType)) {
+              if (!isVehicleHeartbeat(vehicleType, autopilotType, packet.compid)) {
                 sendLog(mainWindow, 'debug', `Ignoring heartbeat from non-vehicle component: ${VEHICLE_NAMES[vehicleType] || vehicleType} (sysid=${packet.sysid}, compid=${packet.compid})`);
                 continue;
               }
@@ -4031,6 +4086,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
     // Clean up old MAVLink state
     cleanupTransportListeners();
     mavlinkParser = new MAVLinkParser();
+    mavlinkParser.registerMessages(getAllMessageInfos());
 
     // Set up full MAVLink pipeline
     mavlinkDataHandler = createMavlinkDataHandler();
@@ -4646,6 +4702,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
 
       // Create parser
       mavlinkParser = new MAVLinkParser();
+      mavlinkParser.registerMessages(getAllMessageInfos());
 
       // BSOD FIX: MAVLink data handler with backpressure to prevent event loop starvation
       // Stored at module level so we can properly remove it on disconnect
@@ -4904,6 +4961,8 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
         packetsReceived: 0,
         packetsSent: 0,
       };
+      linkDoctorSample = [];
+      linkDoctorSampleBytes = 0;
       sendConnectionState(mainWindow);
 
       // Set heartbeat timeout - try MSP if no MAVLink heartbeat
@@ -4981,9 +5040,21 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
             // The renderer will start/stop telemetry based on which view is active.
             // This prevents wasted polling when user is on config screens.
           } else {
-            // Neither MAVLink nor MSP
-            const errorMsg = 'Device did not respond to MAVLink or MSP. Check connection.';
-            sendLog(mainWindow, 'error', 'No protocol detected', errorMsg);
+            // Neither MAVLink nor MSP. Ask the Link Doctor what the port was
+            // actually speaking so the error explains itself.
+            const sample = new Uint8Array(linkDoctorSampleBytes);
+            let offset = 0;
+            for (const chunk of linkDoctorSample) {
+              sample.set(chunk.subarray(0, Math.min(chunk.length, sample.length - offset)), offset);
+              offset += chunk.length;
+              if (offset >= sample.length) break;
+            }
+            const diagnosis = classifyStream(sample);
+            safeSend(mainWindow, IPC_CHANNELS.CONNECTION_DIAGNOSIS, diagnosis);
+            const errorMsg = diagnosis.protocol === 'silence' || diagnosis.protocol === 'unknown'
+              ? 'Device did not respond to MAVLink or MSP. Check connection.'
+              : diagnosis.summary;
+            sendLog(mainWindow, 'error', 'No protocol detected', `${errorMsg} (link doctor: ${diagnosis.protocol})`);
             safeSend(mainWindow, 'connection:error', errorMsg);
             connectionState.isWaitingForHeartbeat = false;
             sendConnectionState(mainWindow);
@@ -5001,6 +5072,153 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
       mavlinkParser = null;
       return false;
     }
+  });
+
+  // ── Link Doctor / ELRS module setup ─────────────────────────────────────
+  // Serial ports are exclusive: these probes open their own transport, so
+  // they refuse to touch the port the primary connection is using.
+  const assertPortFree = (port: string): void => {
+    if (currentTransport?.isOpen && connectionState.portPath === port) {
+      throw new Error('This port is in use by the active connection. Disconnect first.');
+    }
+  };
+
+  ipcMain.handle(IPC_CHANNELS.LINKDOCTOR_PROBE, async (_e, port: string, baudRate: number) => {
+    assertPortFree(port);
+    const transport = new SerialTransport(port, { baudRate });
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    const onData = (d: Uint8Array): void => {
+      if (total < 8192) {
+        chunks.push(d);
+        total += d.length;
+      }
+    };
+    await transport.open();
+    transport.on('data', onData);
+    try {
+      await new Promise((r) => setTimeout(r, 1800));
+    } finally {
+      transport.off('data', onData);
+      try { await transport.close(); } catch { /* port may vanish mid-probe */ }
+    }
+    const sample = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) {
+      sample.set(c, off);
+      off += c.length;
+    }
+    return classifyStream(sample);
+  });
+
+  // ELRS TX Backpack (and other WiFi bridges) broadcast MAVLink to UDP 14550
+  // until a GCS answers. Listening briefly is enough to detect one - this is
+  // the only path for internal TX modules, which have no USB serial at all.
+  ipcMain.handle(IPC_CHANNELS.LINKDOCTOR_PROBE_UDP, async (_e, port: number) => {
+    if (currentTransport?.isOpen && connectionState.connectionType === 'udp') {
+      throw new Error('A UDP connection is already active. Disconnect first.');
+    }
+    const dgram = await import('node:dgram');
+    return await new Promise<{ diagnosis: ReturnType<typeof classifyStream>; sender: string | null }>(
+      (resolve, reject) => {
+        const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+        const chunks: Uint8Array[] = [];
+        let total = 0;
+        let sender: string | null = null;
+        let done = false;
+        const finish = (): void => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          try { socket.close(); } catch { /* already closed */ }
+          // Datagram-aware classification: video streams (RTP/MPEG-TS) are
+          // only recognisable with packet boundaries intact.
+          resolve({ diagnosis: classifyDatagrams(chunks), sender });
+        };
+        const timer = setTimeout(finish, 2500);
+        socket.on('message', (msg, rinfo) => {
+          if (total < 8192) {
+            chunks.push(new Uint8Array(msg));
+            total += msg.length;
+          }
+          sender = `${rinfo.address}:${rinfo.port}`;
+          if (total >= 2048) finish(); // plenty to classify - return early
+        });
+        socket.on('error', (err) => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          try { socket.close(); } catch { /* already closed */ }
+          reject(err);
+        });
+        socket.bind(port);
+      },
+    );
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ELRS_DETECT, async (_e, port: string) => {
+    assertPortFree(port);
+    sendLog(mainWindow, 'info', `Looking for an ELRS module on ${port}...`);
+    const info = await detectElrsModule(port);
+    if (info) {
+      sendLog(mainWindow, 'info', `ELRS module found: ${info.name} (${info.firmware ?? 'unknown firmware'}), Link Mode: ${info.linkMode?.value ?? 'n/a'}`);
+    }
+    return info;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ELRS_SET_LINK_MODE, async (_e, port: string, targetMode: string) => {
+    assertPortFree(port);
+    sendLog(mainWindow, 'info', `Changing ELRS Link Mode to ${targetMode} on ${port}...`);
+    const result = await setElrsLinkMode(port, targetMode, 120_000, (progress) => {
+      safeSend(mainWindow, IPC_CHANNELS.ELRS_PROGRESS, progress);
+    });
+    sendLog(
+      mainWindow,
+      result.status === 'confirmed' || result.status === 'probable' ? 'info' : 'warn',
+      `ELRS Link Mode change: ${result.status}`,
+    );
+    return result;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ELRS_CANCEL, async () => {
+    cancelElrsOperation();
+  });
+
+  // ── wfb-ng dongle receiver (WiFiLink / OpenIPC direct reception) ────────
+  wfbngReceiver.setLogSink((level, line) => sendLog(mainWindow, level, line));
+
+  ipcMain.handle(IPC_CHANNELS.WFBNG_STATUS, async () => wfbngReceiver.getStatus());
+
+  ipcMain.handle(IPC_CHANNELS.WFBNG_INSTALL, async () =>
+    wfbngReceiver.download((line) => sendLog(mainWindow, 'info', line)));
+
+  ipcMain.handle(IPC_CHANNELS.WFBNG_LOCAL_IPS, async (): Promise<string[]> => {
+    const nets = networkInterfaces();
+    const ips: string[] = [];
+    for (const addrs of Object.values(nets)) {
+      for (const a of addrs ?? []) {
+        if (a.family === 'IPv4' && !a.internal) ips.push(a.address);
+      }
+    }
+    // Prefer common LAN ranges first (192.168.x, 10.x, 172.16-31.x).
+    return ips.sort((x, y) => (x.startsWith('192.168') ? -1 : y.startsWith('192.168') ? 1 : 0));
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WFBNG_IMPORT_KEY, async () => {
+    const result = await dialog.showOpenDialog({
+      title: 'Import wfb-ng pairing key',
+      filters: [{ name: 'gs.key', extensions: ['key'] }, { name: 'All files', extensions: ['*'] }],
+      properties: ['openFile'],
+    });
+    const file = result.filePaths[0];
+    if (result.canceled || !file) return { imported: false };
+    wfbngReceiver.importGsKey(file);
+    sendLog(mainWindow, 'info', 'wfb-ng pairing key imported');
+    return { imported: true };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.WFBNG_SET_OPTIONS, async (_e, opts: { channel?: number; bandwidth?: 20 | 40 }) => {
+    wfbngReceiver.setOptions(opts);
   });
 
   // Disconnect
@@ -5846,21 +6064,22 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
   ipcMain.handle(IPC_CHANNELS.PARAM_READ_BATCH, async (_, paramIds: string[]): Promise<{
     success: boolean;
     values: Record<string, number>;
+    types: Record<string, number>;
     missing: string[];
     error?: string;
   }> => {
     if (!currentTransport?.isOpen || !connectionState.isConnected) {
-      return { success: false, values: {}, missing: paramIds, error: 'Not connected' };
+      return { success: false, values: {}, types: {}, missing: paramIds, error: 'Not connected' };
     }
     if (!Array.isArray(paramIds) || paramIds.length === 0) {
-      return { success: true, values: {}, missing: [] };
+      return { success: true, values: {}, types: {}, missing: [] };
     }
 
     const targetSystem = connectionState.systemId ?? 1;
     const targetComponent = 1;
     const PER_PARAM_TIMEOUT_MS = 1500;
 
-    const readOne = (paramId: string): Promise<number | null> => new Promise((resolve) => {
+    const readOne = (paramId: string): Promise<{ value: number; type: number } | null> => new Promise((resolve) => {
       const timer = setTimeout(() => {
         if (pendingParamReads.get(paramId)) {
           pendingParamReads.delete(paramId);
@@ -5868,9 +6087,9 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
         resolve(null); // missing — treat as "param not on this FC"
       }, PER_PARAM_TIMEOUT_MS);
 
-      pendingParamReads.set(paramId, (value) => {
+      pendingParamReads.set(paramId, (value, type) => {
         clearTimeout(timer);
-        resolve(value);
+        resolve({ value, type });
       });
 
       // Fire the PARAM_REQUEST_READ. Errors during send fall through to
@@ -5896,17 +6115,19 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
 
     const results = await Promise.all(paramIds.map(readOne));
     const values: Record<string, number> = {};
+    const types: Record<string, number> = {};
     const missing: string[] = [];
     paramIds.forEach((id, i) => {
       const v = results[i];
       if (v === null || v === undefined) {
         missing.push(id);
       } else {
-        values[id] = v;
+        values[id] = v.value;
+        types[id] = v.type;
       }
     });
 
-    return { success: true, values, missing };
+    return { success: true, values, types, missing };
   });
 
   // Fetch parameter metadata from ArduPilot
@@ -8908,6 +9129,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const parser: any = new MAVLinkParser();
+      parser.registerMessages(getAllMessageInfos());
       let targetSystem = 1;
       let targetComponent = 1;
       let mavlinkVersion: 1 | 2 = 1;
@@ -8929,13 +9151,13 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
               const vehicleType = payload.length > 4 ? payload[4] : 0;
               const vTypeName = VEHICLE_NAMES[vehicleType] || `Type ${vehicleType}`;
 
-              // Skip non-vehicle heartbeats (companion computers, cameras, etc.)
-              if (NON_VEHICLE_TYPES.has(vehicleType)) {
+              const autopilotType = payload.length > 5 ? payload[5]! : 0;
+
+              // Skip non-vehicle heartbeats (companion computers, cameras, radios, etc.)
+              if (!isVehicleHeartbeat(vehicleType ?? 0, autopilotType, packet.compid)) {
                 sendLog(mainWindow, 'debug', `Skipping non-vehicle heartbeat: ${vTypeName}`);
                 return;
               }
-
-              const autopilotType = payload.length > 5 ? payload[5] : 0;
               const autopilotName = AUTOPILOT_NAMES[autopilotType] || `Autopilot ${autopilotType}`;
 
               sendLog(mainWindow, 'info', `Heartbeat received: ${autopilotName}, ${vTypeName}`);
@@ -9154,6 +9376,7 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const parser: any = new MAVLinkParser();
+      parser.registerMessages(getAllMessageInfos());
       let gotHeartbeat = false;
 
       // Quick heartbeat check (1.5s timeout)
@@ -9165,8 +9388,9 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
             while ((pkt = parser.parseNext()) !== null) {
               if (pkt.msgid === 0) { // HEARTBEAT
                 const vType = pkt.payload.length > 4 ? pkt.payload[4]! : 0;
-                // Skip non-vehicle heartbeats (companion computers, cameras, etc.)
-                if (NON_VEHICLE_TYPES.has(vType)) continue;
+                const vAutopilot = pkt.payload.length > 5 ? pkt.payload[5]! : 0;
+                // Skip non-vehicle heartbeats (companion computers, cameras, radios, etc.)
+                if (!isVehicleHeartbeat(vType, vAutopilot, pkt.compid)) continue;
                 gotHeartbeat = true;
                 transport.off('data', handler);
                 resolve({

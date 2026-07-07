@@ -10,7 +10,7 @@ import { app } from 'electron';
 import Store from 'electron-store';
 import { parseModuleManifest } from '@ardudeck/module-sdk';
 import { verifyLicenseKey, verifyBundleSignature } from './license-validator.js';
-import * as marketplace from './marketplace-client.js';
+import * as hangar from './hangar-client.js';
 import { extractBundle } from './module-extract.js';
 import type {
   InstalledModule,
@@ -95,7 +95,7 @@ export async function activateLicense(
 
   let activateResult;
   try {
-    activateResult = await marketplace.activate(key, deviceId, deviceName);
+    activateResult = await hangar.activate(key, deviceId, deviceName);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     onProgress({ stage: 'error', message: `Activation failed: ${msg}` });
@@ -144,7 +144,7 @@ export async function activateLicense(
 
     try {
       // Download the latest version
-      const { filePath, hash, localHash, sig } = await marketplace.downloadBundle(
+      const { filePath, hash, localHash, sig } = await hangar.downloadBundle(
         slug,
         'latest',
         key,
@@ -167,7 +167,7 @@ export async function activateLicense(
 
       // Integrity: the locally-computed SHA256 must match the server's
       // declared hash, and when the server returns an Ed25519 bundle
-      // signature it must verify against the embedded marketplace key.
+      // signature it must verify against the embedded Hangar key.
       // Absent headers only warn - servers predating them still install.
       if (hash && localHash !== hash) {
         await rm(filePath, { force: true });
@@ -271,7 +271,7 @@ export async function removeLicense(key: string): Promise<{ success: boolean; er
 
   // Deactivate on server (best-effort)
   try {
-    await marketplace.deactivate(key, deviceId);
+    await hangar.deactivate(key, deviceId);
   } catch (err) {
     console.warn('[ModuleManager] Server deactivation failed (continuing with local removal):', err);
   }
@@ -310,7 +310,7 @@ export async function checkForUpdates(): Promise<UpdateAvailable[]> {
   const installed = modules.map((m) => ({ slug: m.slug, version: m.version }));
 
   try {
-    const result = await marketplace.checkUpdates(installed);
+    const result = await hangar.checkUpdates(installed);
     return result.updates;
   } catch (err) {
     console.error('[ModuleManager] Update check failed:', err);
@@ -328,7 +328,7 @@ export async function heartbeatAll(): Promise<void> {
 
   for (const key of keys) {
     try {
-      const result = await marketplace.heartbeat(key, deviceId);
+      const result = await hangar.heartbeat(key, deviceId);
       if (!result.valid) {
         console.warn(`[ModuleManager] License ${key.slice(0, 20)}... is no longer valid (revoked=${result.revoked})`);
         // Remove the license and its modules

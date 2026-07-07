@@ -229,3 +229,180 @@ export function routeScanSegments(
 
   return result;
 }
+
+// ── Hole-aware transit legs ──────────────────────────────────────────────────
+
+/** Strict point-in-ring test (ray cast); boundary points count as outside. */
+function pointStrictlyInRing(p: Point2D, ring: Point2D[]): boolean {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const a = ring[i]!;
+    const b = ring[j]!;
+    if (a.y > p.y !== b.y > p.y && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+/** Monotone-chain convex hull. Returns CCW ring without repeated last point. */
+function convexHull(points: Point2D[]): Point2D[] {
+  const pts = [...points].sort((a, b) => a.x - b.x || a.y - b.y);
+  if (pts.length <= 3) return pts;
+  const cross = (o: Point2D, a: Point2D, b: Point2D) =>
+    (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lower: Point2D[] = [];
+  for (const p of pts) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2]!, lower[lower.length - 1]!, p) <= 0) lower.pop();
+    lower.push(p);
+  }
+  const upper: Point2D[] = [];
+  for (let i = pts.length - 1; i >= 0; i--) {
+    const p = pts[i]!;
+    while (upper.length >= 2 && cross(upper[upper.length - 2]!, upper[upper.length - 1]!, p) <= 0) upper.pop();
+    upper.push(p);
+  }
+  lower.pop();
+  upper.pop();
+  return [...lower, ...upper];
+}
+
+/**
+ * Whether the leg a->b passes through the ring's interior. Touching the
+ * boundary (scan-line ends sit exactly on hole edges) does not count - only
+ * actual incursion does.
+ */
+export function legEntersRing(a: Point2D, b: Point2D, ring: Point2D[]): boolean {
+  // Test against a ring shrunk by ~1 cm: legs hugging the hole boundary
+  // (detours along hull edges, scan ends on hole edges) are legal, and the
+  // ray-cast ambiguity of exactly-on-edge points disappears. Sampling instead
+  // of edge-sign tests stays robust when endpoints lie on the ring.
+  const cx = ring.reduce((acc, p) => acc + p.x, 0) / ring.length;
+  const cy = ring.reduce((acc, p) => acc + p.y, 0) / ring.length;
+  const EPS_M = 0.01;
+  const shrunk = ring.map((p) => {
+    const dx = p.x - cx;
+    const dy = p.y - cy;
+    const r = Math.hypot(dx, dy);
+    const f = r > EPS_M ? (r - EPS_M) / r : 0;
+    return { x: cx + dx * f, y: cy + dy * f };
+  });
+  const STEPS = 16;
+  for (let s = 1; s < STEPS; s++) {
+    const t = s / STEPS;
+    const p = { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+    if (pointStrictlyInRing(p, shrunk)) return true;
+  }
+  return false;
+}
+
+/**
+ * Cyrus-Beck style clip of the leg a->b against a convex CCW hull. Returns
+ * the hull edge indices where the leg enters and exits, or null when the leg
+ * misses the interior.
+ */
+function clipLegAgainstHull(
+  a: Point2D,
+  b: Point2D,
+  hull: Point2D[],
+): { entryEdge: number; exitEdge: number } | null {
+  const d = { x: b.x - a.x, y: b.y - a.y };
+  // Epsilon-open bounds: transit endpoints routinely sit exactly ON hull
+  // edges (scan-line ends at hole boundaries give t = 0 / t = 1), and those
+  // must still assign an entry/exit edge.
+  let tEnter = -1e-9;
+  let tExit = 1 + 1e-9;
+  let entryEdge = -1;
+  let exitEdge = -1;
+  for (let i = 0; i < hull.length; i++) {
+    const p0 = hull[i]!;
+    const p1 = hull[(i + 1) % hull.length]!;
+    // Outward normal of a CCW edge.
+    const nx = p1.y - p0.y;
+    const ny = p0.x - p1.x;
+    const denom = nx * d.x + ny * d.y;
+    const num = nx * (p0.x - a.x) + ny * (p0.y - a.y);
+    if (Math.abs(denom) < 1e-12) {
+      if (num < 0) return null; // parallel and fully outside this edge
+      continue;
+    }
+    const t = num / denom;
+    if (denom < 0) {
+      // entering
+      if (t > tEnter) {
+        tEnter = t;
+        entryEdge = i;
+      }
+    } else if (t < tExit) {
+      tExit = t;
+      exitEdge = i;
+    }
+  }
+  if (tEnter >= tExit || entryEdge < 0 || exitEdge < 0) return null;
+  return { entryEdge, exitEdge };
+}
+
+/**
+ * Detour points that take the leg a->b around no-fly holes instead of over
+ * them. Routes along the convex hull of each crossed hole (shorter side),
+ * iterating until every sub-leg is clear. Returns intermediate points only;
+ * empty when the direct leg is already legal.
+ */
+export function routeTransitAroundHoles(
+  a: Point2D,
+  b: Point2D,
+  holes: Point2D[][],
+): Point2D[] {
+  const hulls = holes.filter((h) => h.length >= 3).map(convexHull);
+  if (hulls.length === 0) return [];
+
+  const path: Point2D[] = [a, b];
+  let i = 0;
+  let guard = 0;
+  while (i + 1 < path.length && guard++ < 128) {
+    const p = path[i]!;
+    const q = path[i + 1]!;
+    const hull = hulls.find((h) => legEntersRing(p, q, h));
+    if (!hull) {
+      i++;
+      continue;
+    }
+    const clip = clipLegAgainstHull(p, q, hull);
+    if (!clip) {
+      i++; // numerically ambiguous corner graze - accept the leg
+      continue;
+    }
+    const n = hull.length;
+    // Forward chain: vertices after the entry edge up to the exit edge.
+    const forward: Point2D[] = [];
+    for (let k = (clip.entryEdge + 1) % n; ; k = (k + 1) % n) {
+      forward.push(hull[k]!);
+      if (k === clip.exitEdge) break;
+      if (forward.length > n) break;
+    }
+    // Backward chain: entry-edge start walking the other way round.
+    const backward: Point2D[] = [];
+    for (let k = clip.entryEdge; ; k = (k - 1 + n) % n) {
+      backward.push(hull[k]!);
+      if (k === (clip.exitEdge + 1) % n) break;
+      if (backward.length > n) break;
+    }
+    const len = (chain: Point2D[]) => {
+      let total = 0;
+      let prev = p;
+      for (const v of [...chain, q]) {
+        total += Math.hypot(v.x - prev.x, v.y - prev.y);
+        prev = v;
+      }
+      return total;
+    };
+    const chain = len(forward) <= len(backward) ? forward : backward;
+    if (chain.length === 0) {
+      i++;
+      continue;
+    }
+    path.splice(i + 1, 0, ...chain);
+    // Re-check from the same index: the first sub-leg may cross another hole.
+  }
+  return path.slice(1, -1);
+}

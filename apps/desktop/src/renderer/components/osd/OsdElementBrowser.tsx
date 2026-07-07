@@ -6,15 +6,27 @@
  * and element enable/select controls.
  */
 
-import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
-import { useOsdStore, type OsdElementId, type OsdElementPosition } from '../../stores/osd-store';
+import { useState, useMemo, useRef, useEffect, useCallback, useSyncExternalStore } from 'react';
+import { useOsdStore, type OsdElementId, type OsdElementKey, type OsdElementPosition } from '../../stores/osd-store';
 import { ELEMENT_CATEGORIES, type OsdElementCategory } from '../../utils/osd/element-categories';
-import { ELEMENT_REGISTRY, getElementsByCategory, type OsdElementDefinition } from '../../utils/osd/element-registry';
+import { getAllOsdElements, type AnyOsdElementDef } from '../../utils/osd/element-registry';
+import {
+  subscribeModuleOsdElements,
+  getModuleOsdElement,
+} from '../../modules/module-osd-registry';
 import { OSD_CHAR_WIDTH, OSD_CHAR_HEIGHT, getCharacterDataUrl } from '../../utils/osd/font-renderer';
 
 interface Props {
-  selectedElement: OsdElementId | null;
-  onSelect: (id: OsdElementId) => void;
+  selectedElement: OsdElementKey | null;
+  onSelect: (id: OsdElementKey) => void;
+}
+
+/** Snapshot count so useSyncExternalStore re-renders when the module set changes. */
+function useModuleOsdRevision(): number {
+  return useSyncExternalStore(
+    subscribeModuleOsdElements,
+    () => getAllOsdElements().length,
+  );
 }
 
 export function OsdElementBrowser({ selectedElement, onSelect }: Props) {
@@ -24,27 +36,40 @@ export function OsdElementBrowser({ selectedElement, onSelect }: Props) {
   const supportedElements = useOsdStore((s) => s.supportedElements);
   const target = useOsdStore((s) => s.target);
 
+  // Re-read (built-in + module) elements whenever the module set changes.
+  const moduleRev = useModuleOsdRevision();
+  const allElements = useMemo(() => getAllOsdElements(), [moduleRev]);
+
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedCategories, setExpandedCategories] = useState<Set<OsdElementCategory>>(() => {
     // Start with categories that have enabled elements expanded
     const expanded = new Set<OsdElementCategory>();
-    for (const def of ELEMENT_REGISTRY) {
+    for (const def of getAllOsdElements()) {
       if (elementPositions[def.id]?.enabled) {
-        expanded.add(def.category);
+        expanded.add(def.category as OsdElementCategory);
       }
     }
     return expanded;
   });
 
-  // Group elements by category
-  const groupedElements = useMemo(() => getElementsByCategory(), []);
+  // Group elements by category (built-ins + module contributions)
+  const groupedElements = useMemo(() => {
+    const map = new Map<OsdElementCategory, AnyOsdElementDef[]>();
+    for (const def of allElements) {
+      const cat = def.category as OsdElementCategory;
+      const list = map.get(cat) ?? [];
+      list.push(def);
+      map.set(cat, list);
+    }
+    return map;
+  }, [allElements]);
 
   // Filter elements by search
   const filteredGroups = useMemo(() => {
     if (!searchQuery.trim()) return groupedElements;
 
     const query = searchQuery.toLowerCase();
-    const filtered = new Map<OsdElementCategory, OsdElementDefinition[]>();
+    const filtered = new Map<OsdElementCategory, AnyOsdElementDef[]>();
 
     for (const [cat, elements] of groupedElements) {
       const matching = elements.filter(
@@ -80,8 +105,8 @@ export function OsdElementBrowser({ selectedElement, onSelect }: Props) {
   // Count enabled elements per category
   const enabledCounts = useMemo(() => {
     const counts = new Map<OsdElementCategory, number>();
-    for (const def of ELEMENT_REGISTRY) {
-      const cat = def.category;
+    for (const def of allElements) {
+      const cat = def.category as OsdElementCategory;
       const count = counts.get(cat) || 0;
       if (elementPositions[def.id]?.enabled) {
         counts.set(cat, count + 1);
@@ -90,7 +115,7 @@ export function OsdElementBrowser({ selectedElement, onSelect }: Props) {
       }
     }
     return counts;
-  }, [elementPositions]);
+  }, [elementPositions, allElements]);
 
   const totalEnabled = useMemo(
     () => Object.values(elementPositions).filter((p) => p.enabled).length,
@@ -109,7 +134,7 @@ export function OsdElementBrowser({ selectedElement, onSelect }: Props) {
           className="w-full bg-surface-raised text-content text-xs rounded px-2.5 py-1.5 border border-subtle focus:border-blue-500 focus:outline-none placeholder-content-tertiary"
         />
         <div className="mt-1.5 text-[10px] text-content-secondary">
-          {totalEnabled} of {ELEMENT_REGISTRY.length} enabled
+          {totalEnabled} of {allElements.length} enabled
         </div>
       </div>
 
@@ -153,8 +178,14 @@ export function OsdElementBrowser({ selectedElement, onSelect }: Props) {
                     const pos = elementPositions[def.id];
                     if (!pos) return null;
                     const isSelected = selectedElement === def.id;
+                    // Module elements render ground-side, so the ArduPilot FC
+                    // support gate never applies to them.
+                    const isModule = getModuleOsdElement(def.id) != null;
                     const unsupported =
-                      target === 'ardupilot' && supportedElements != null && !supportedElements.has(def.id);
+                      !isModule &&
+                      target === 'ardupilot' &&
+                      supportedElements != null &&
+                      !supportedElements.has(def.id as OsdElementId);
 
                     return (
                       <ElementRow
@@ -191,13 +222,13 @@ function ElementRow({
   onSelect,
   onToggle,
 }: {
-  def: OsdElementDefinition;
+  def: AnyOsdElementDef;
   position: OsdElementPosition;
   isSelected: boolean;
   unsupported: boolean;
   currentFont: ReturnType<typeof useOsdStore.getState>['currentFont'];
-  onSelect: (id: OsdElementId) => void;
-  onToggle: (id: OsdElementId) => void;
+  onSelect: (id: OsdElementKey) => void;
+  onToggle: (id: OsdElementKey) => void;
 }) {
   // Get font preview data URL
   const previewSrc = useMemo(() => {

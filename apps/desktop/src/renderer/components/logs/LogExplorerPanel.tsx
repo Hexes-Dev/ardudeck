@@ -21,6 +21,17 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 maplibregl.setWorkerUrl(new URL('maplibre-worker.js', document.baseURI).href);
 import { createFlightPathThreeJsLayer } from './flight-threejs-layer';
 import { useLogStore } from '../../stores/log-store';
+import { lowerBoundIdx, upperBoundIdx, columnStats, fmtStat, padRange, chartCsv, SERIES_COLORS, type FieldStats } from './log-chart-stats';
+import { getModeName, MODE_COLORS } from './log-events';
+import { publishHoverTime, subscribeHoverTime, subscribeTimeJump } from './log-hover-bus';
+import { EventsPanel } from './EventsPanel';
+import { LogParamsPanel } from './LogParamsPanel';
+import { SpectrumPanel } from './SpectrumPanel';
+
+// All chart panels share one uPlot cursor-sync group, keyed by x VALUE (time
+// in seconds), so moving the mouse over any chart draws the crosshair at the
+// same instant on every other chart - even when their zoom windows differ.
+const X_CURSOR_SYNC_KEY = 'log-explorer-x';
 
 // Style uPlot - uses CSS variables for theme support
 const uplotStyle = document.createElement('style');
@@ -35,34 +46,12 @@ uplotStyle.textContent = `
 `;
 document.head.appendChild(uplotStyle);
 
-const SERIES_COLORS = [
-  '#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6',
-  '#ec4899', '#06b6d4', '#84cc16', '#f97316', '#6366f1',
-];
-
-const MODE_COLORS: Record<string, string> = {
-  STABILIZE: '#6b7280', ALT_HOLD: '#3b82f6', LOITER: '#10b981', AUTO: '#8b5cf6',
-  RTL: '#f59e0b', LAND: '#ef4444', GUIDED: '#ec4899', POSHOLD: '#06b6d4',
-  ACRO: '#f97316', CIRCLE: '#84cc16', BRAKE: '#6366f1', SMART_RTL: '#fbbf24',
-};
-
 /** Color per event-marker type, used by the chart draw hook. */
 const EVENT_TYPE_COLORS: Record<string, string> = {
   MODE: '#a855f7',
   MSG: '#10b981',
   CMD: '#f59e0b',
 };
-
-const COPTER_MODES: Record<number, string> = {
-  0: 'STABILIZE', 1: 'ACRO', 2: 'ALT_HOLD', 3: 'AUTO', 4: 'GUIDED',
-  5: 'LOITER', 6: 'RTL', 7: 'CIRCLE', 9: 'LAND', 11: 'DRIFT',
-  13: 'SPORT', 14: 'FLIP', 15: 'AUTOTUNE', 16: 'POSHOLD', 17: 'BRAKE',
-  18: 'THROW', 21: 'SMART_RTL', 22: 'FLOWHOLD', 23: 'FOLLOW', 24: 'ZIGZAG', 27: 'AUTO_RTL',
-};
-
-function getModeName(modeNum: number): string {
-  return COPTER_MODES[modeNum] ?? `MODE_${modeNum}`;
-}
 
 const QUICK_PRESETS = [
   { label: 'Attitude', desc: 'DesRoll vs Roll, DesPitch vs Pitch', types: ['ATT'], fields: { ATT: ['DesRoll', 'Roll', 'DesPitch', 'Pitch'] } },
@@ -131,6 +120,27 @@ function getFlightPath(log: ReturnType<typeof useLogStore.getState>['currentLog'
   return path;
 }
 
+/**
+ * Timestamps (seconds) index-aligned with getFlightPath's points - MUST apply
+ * the identical validity filter so chart-hover time lookups land on the right
+ * path vertex. Separate function (not a tuple return) to leave the many
+ * existing flightPath consumers untouched.
+ */
+function getFlightPathTimesS(log: ReturnType<typeof useLogStore.getState>['currentLog']): number[] {
+  if (!log) return [];
+  const gps = log.messages['GPS'];
+  if (!gps) return [];
+  const times: number[] = [];
+  for (const msg of gps) {
+    const lat = msg.fields['Lat'];
+    const lng = msg.fields['Lng'];
+    if (typeof lat === 'number' && typeof lng === 'number' && lat !== 0 && lng !== 0) {
+      times.push(msg.timeUs / 1_000_000);
+    }
+  }
+  return times;
+}
+
 // ============================================================================
 // Chart Panel
 // ============================================================================
@@ -180,6 +190,7 @@ function ChartPanel({ chartId }: { chartId: string }) {
   const syncZoomEnabled = useLogStore((s) => s.syncZoomEnabled);
   const setSyncedXRange = useLogStore((s) => s.setSyncedXRange);
   const setSyncZoomEnabled = useLogStore((s) => s.setSyncZoomEnabled);
+  const explorerTool = useLogStore((s) => s.explorerTool);
   const xRange = syncZoomEnabled ? syncedXRange : localXRange;
   const isZoomed = xRange !== null;
   // Stable broadcaster used inside uPlot hooks; avoids re-creating the chart
@@ -194,6 +205,16 @@ function ChartPanel({ chartId }: { chartId: string }) {
   // Legend defaults to collapsed once it would exceed the inline-summary
   // threshold; user can pin it open per-chart.
   const [legendExpanded, setLegendExpanded] = useState(false);
+
+  // Y-axis behaviour is PER-CHART local state (only the X window is synced
+  // across charts). 'fit' = one shared Y auto-fitted to the visible X window;
+  // 'independent' = every series on its own auto-scaled axis so signals of
+  // wildly different magnitude (e.g. altitude vs voltage) are both readable.
+  const [yMode, setYMode] = useState<'fit' | 'independent'>('fit');
+  // True once the user manually zoomed/panned Y (shift-scroll or right-drag),
+  // which locks Y so the auto-refit-on-X-change stops fighting the manual view.
+  const yPinnedRef = useRef(false);
+  const [yZoomed, setYZoomed] = useState(false);
 
   const messageTypes = currentLog?.messageTypes ?? [];
   const modeTimeline = useMemo(() => getModeTimeline(currentLog), [currentLog]);
@@ -392,6 +413,21 @@ function ChartPanel({ chartId }: { chartId: string }) {
     };
   }, [currentLog, selectedFields]);
 
+  // Per-series min/avg/max/last over the CURRENTLY VISIBLE x window. Recomputes
+  // as the user zooms/pans so the numbers always describe what is on screen -
+  // this is the Mission Planner "min/max/avg" readout, but live and windowed.
+  const seriesStats = useMemo<(FieldStats | null)[]>(() => {
+    if (!chartData) return [];
+    const xCol = chartData.data[0] as ArrayLike<number>;
+    const n = xCol.length;
+    if (n === 0) return chartData.series.map(() => null);
+    const lo = xRange ? Math.max(0, upperBoundIdx(xCol, xRange.min)) : 0;
+    const hi = xRange ? Math.min(n - 1, lowerBoundIdx(xCol, xRange.max)) : n - 1;
+    if (hi < lo) return chartData.series.map(() => null);
+    return chartData.series.map((_, i) => columnStats(chartData.data[i + 1] as ArrayLike<number>, lo, hi));
+    // xRange is intentionally a dep: stats track the visible window.
+  }, [chartData, xRange]);
+
   useEffect(() => {
     if (!chartRef.current || !chartData) {
       if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null; }
@@ -401,22 +437,133 @@ function ChartPanel({ chartId }: { chartId: string }) {
     const container = chartRef.current;
     const { width, height } = container.getBoundingClientRect();
 
+    // A fresh uPlot auto-ranges Y from the data, so any prior manual Y pin no
+    // longer applies - clear it so auto-fit-to-visible-window resumes.
+    yPinnedRef.current = false;
+    setYZoomed(false);
+
     // Snapshot mode + event data into closure-stable refs so the draw hooks
     // don't have to re-read the React store on every paint (the chart
     // re-creates itself when chartData changes anyway, picking up new data).
     const modeSegments = modeTimeline;
     const markers = chartData.eventMarkers ?? [];
 
+    const seriesCount = chartData.series.length;
+    const xData0 = chartData.data[0] as ArrayLike<number>;
+    const seriesColor = (i: number) => SERIES_COLORS[i % SERIES_COLORS.length]!;
+    const independent = yMode === 'independent';
+    const panTool = explorerTool === 'pan';
+
+    // Auto-fit Y to the DATA WITHIN THE VISIBLE X WINDOW. Runs whenever X
+    // changes (via the setScale hook below) so panning/zooming time keeps the
+    // trace filling the panel - the single biggest readability win over MP,
+    // whose Y stays fixed while you scrub X. Skipped once the user takes manual
+    // control of Y (shift-scroll / right-drag / vertical box), which pins it.
+    let refitting = false;
+    const refitY = (u: uPlot) => {
+      if (yPinnedRef.current || refitting) return;
+      const xn = xData0.length;
+      if (xn === 0) return;
+      const xmin = u.scales.x?.min ?? xData0[0]!;
+      const xmax = u.scales.x?.max ?? xData0[xn - 1]!;
+      const lo = Math.max(0, upperBoundIdx(xData0, xmin));
+      const hi = Math.min(xn - 1, lowerBoundIdx(xData0, xmax));
+      if (hi < lo) return;
+      refitting = true;
+      u.batch(() => {
+        if (independent) {
+          for (let i = 0; i < seriesCount; i++) {
+            const [mn, mx] = padRange(columnStats(u.data[i + 1] as ArrayLike<number>, lo, hi));
+            u.setScale(`y${i}`, { min: mn, max: mx });
+          }
+        } else {
+          let mn = Infinity;
+          let mx = -Infinity;
+          for (let i = 0; i < seriesCount; i++) {
+            const st = columnStats(u.data[i + 1] as ArrayLike<number>, lo, hi);
+            if (st) { if (st.min < mn) mn = st.min; if (st.max > mx) mx = st.max; }
+          }
+          if (mn <= mx) { const [a, b] = padRange({ min: mn, max: mx, avg: 0, last: 0, count: 1 }); u.setScale('y', { min: a, max: b }); }
+        }
+      });
+      refitting = false;
+    };
+
+    const axisTheme = {
+      stroke: isLight ? '#4b5563' : '#9ca3af',
+      grid: { stroke: isLight ? '#e5e7eb' : '#1f2937', width: 1 },
+      ticks: { stroke: isLight ? '#d1d5db' : '#374151', width: 1 },
+      font: '11px system-ui',
+    };
+    const xAxis: uPlot.Axis = { label: 'Time (s)', ...axisTheme };
+
+    // In independent mode each series rides its own scale (y0..yN) so a signal
+    // at 0-1 and one at 0-1000 are both full-height. Only the first two get a
+    // drawn axis gutter (left = series 0, right = series 1), colour-matched to
+    // their line; the remaining scales stay live (values in the legend) without
+    // cluttering the plot with a wall of axes.
+    const scales: uPlot.Scales = { x: { time: false } };
+    let axes: uPlot.Axis[];
+    let seriesOpts: uPlot.Series[];
+    if (independent) {
+      for (let i = 0; i < seriesCount; i++) scales[`y${i}`] = { auto: true };
+      axes = [xAxis];
+      if (seriesCount > 0) axes.push({ ...axisTheme, scale: 'y0', side: 3, stroke: seriesColor(0) });
+      if (seriesCount > 1) axes.push({ ...axisTheme, scale: 'y1', side: 1, stroke: seriesColor(1), grid: { show: false, stroke: 'transparent', width: 0 } });
+      seriesOpts = [
+        { label: 'Time' },
+        ...chartData.series.map((s, i) => ({ label: s.label, stroke: seriesColor(i), width: 1.5, scale: `y${i}`, points: { show: false } })),
+      ];
+    } else {
+      scales.y = { auto: true };
+      axes = [xAxis, { ...axisTheme, scale: 'y', side: 3 }];
+      seriesOpts = [
+        { label: 'Time' },
+        ...chartData.series.map((s, i) => ({ label: s.label, stroke: seriesColor(i), width: 1.5, points: { show: false } })),
+      ];
+    }
+
     const opts: uPlot.Options = {
       width: Math.max(width, 300),
       height: Math.max(height, 200),
       cursor: {
-        drag: { x: true, y: false, uni: 50 },
+        // uni: a mostly-horizontal drag zooms X, a mostly-vertical drag zooms Y
+        // (fit mode only), a big diagonal drag box-zooms both. Independent mode
+        // keeps drag X-only since a single Y box is ambiguous across scales.
+        // setScale:false — we apply the zoom ourselves in the setSelect hook so
+        // we can broadcast the X window to sibling charts and pin Y correctly;
+        // letting uPlot also auto-zoom would double-apply and race the hook.
+        // Pan tool: left-drag pans instead (handled below), so box-select is off.
+        drag: panTool
+          ? { x: false, y: false, setScale: false }
+          : independent ? { x: true, y: false, uni: 50, setScale: false } : { x: true, y: true, uni: 40, setScale: false },
+        // Crosshair follows the same time value on every chart panel.
+        sync: { key: X_CURSOR_SYNC_KEY, setSeries: false, scales: ['x', null] },
       },
       select: { show: true, left: 0, top: 0, width: 0, height: 0 },
       hooks: {
+        setScale: [(u, key) => { if (key === 'x') refitY(u); }],
+        // Broadcast the hovered time so the flight-path map can walk a marker
+        // along the trajectory. Only the chart actually under the mouse
+        // publishes - synced charts re-fire this hook and must stay silent.
+        setCursor: [(u) => {
+          if (!u.over.matches(':hover')) return;
+          const l = u.cursor.left;
+          publishHoverTime(l == null || l < 0 ? null : u.posToVal(l, 'x'));
+        }],
         setSelect: [(u) => {
-          if (u.select.width > 10) {
+          const zoomX = u.select.width > 10;
+          const zoomY = u.select.height > 10 && !independent;
+          if (zoomY) {
+            // Pin Y BEFORE touching X so the X setScale hook's auto-refit does
+            // not clobber the box we are about to set.
+            yPinnedRef.current = true;
+            setYZoomed(true);
+            const a = u.posToVal(u.select.top, 'y');
+            const b = u.posToVal(u.select.top + u.select.height, 'y');
+            u.setScale('y', { min: Math.min(a, b), max: Math.max(a, b) });
+          }
+          if (zoomX) {
             const minX = u.posToVal(u.select.left, 'x');
             const maxX = u.posToVal(u.select.left + u.select.width, 'x');
             u.setScale('x', { min: minX, max: maxX });
@@ -483,68 +630,187 @@ function ChartPanel({ chartId }: { chartId: string }) {
           ctx.restore();
         }],
       },
-      scales: { x: { time: false }, y: { auto: true } },
+      scales,
       legend: { show: true },
-      axes: [
-        {
-          label: 'Time (s)',
-          stroke: isLight ? '#4b5563' : '#9ca3af',
-          grid: { stroke: isLight ? '#e5e7eb' : '#1f2937', width: 1 },
-          ticks: { stroke: isLight ? '#d1d5db' : '#374151', width: 1 },
-          font: '11px system-ui',
-        },
-        {
-          stroke: isLight ? '#4b5563' : '#9ca3af',
-          grid: { stroke: isLight ? '#e5e7eb' : '#1f2937', width: 1 },
-          ticks: { stroke: isLight ? '#d1d5db' : '#374151', width: 1 },
-          font: '11px system-ui',
-        },
-      ],
-      series: [
-        { label: 'Time' },
-        ...chartData.series.map((s, i) => ({
-          label: s.label,
-          stroke: SERIES_COLORS[i % SERIES_COLORS.length]!,
-          width: 1.5,
-          points: { show: false },
-        })),
-      ],
+      axes,
+      series: seriesOpts,
     };
 
     if (plotRef.current) plotRef.current.destroy();
     const plot = new uPlot(opts, chartData.data, container);
     plotRef.current = plot;
 
+    // A rebuild (Y-mode switch, theme change, new fields) resets the plot to
+    // the full time range. Re-apply the active zoom window so the user's view
+    // survives; the setScale('x') hook then auto-fits Y to that window.
+    if (xRange && xRange.max > xRange.min) {
+      plot.setScale('x', { min: xRange.min, max: xRange.max });
+    }
+
+    const yScaleKeys = independent
+      ? chartData.series.map((_, i) => `y${i}`)
+      : ['y'];
+
+    const xExtent = (): [number, number] => {
+      const xd = chartData.data[0] as Float64Array;
+      return [xd[0]!, xd[xd.length - 1]!];
+    };
+
+    // Apply an X window clamped to the data extent, so zoom-out/pan can never
+    // overshoot into empty space. Landing on the full extent clears the zoom
+    // state entirely (Reset button hides, stats read "full log").
+    const setXWindow = (min: number, max: number) => {
+      const [x0, x1] = xExtent();
+      let nMin = Math.max(min, x0);
+      let nMax = Math.min(max, x1);
+      if (nMax <= nMin) { nMin = x0; nMax = x1; }
+      plot.setScale('x', { min: nMin, max: nMax });
+      applyZoom(nMin <= x0 && nMax >= x1 ? null : { min: nMin, max: nMax });
+    };
+
     const handleWheel = (e: WheelEvent) => {
       e.preventDefault();
+      const rect = plot.over.getBoundingClientRect();
+      // Normalize deltaMode: 1 = lines (~16px each), 2 = pages.
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 100 : 1;
+      // macOS reroutes deltaY to deltaX while shift is held; take whichever moved.
+      const rawDy = (Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX) * unit;
+      const dx = e.deltaX * unit;
+
+      // Zoom proportional to scroll delta, exponential so it composes smoothly.
+      // A notchy mouse wheel sends ~100/event (=~1.2x steps); a touchpad sends
+      // a stream of 2-10px deltas (=~1.01x each) - the old fixed 1.3x per event
+      // made touchpads rocket past the target. Pinch (ctrl+wheel) gets extra
+      // gain because pinch deltas are small.
+      const gain = e.ctrlKey ? 0.006 : 0.002;
+      const zoomFactor = Math.exp(Math.min(Math.max(rawDy, -240), 240) * gain);
+
+      // Shift+scroll zooms Y (anchored under the cursor), leaving the time
+      // window untouched - MP has no equivalent quick vertical zoom.
+      if (e.shiftKey) {
+        const pctTop = rect.height > 0 ? Math.min(Math.max((e.clientY - rect.top) / rect.height, 0), 1) : 0.5;
+        plot.batch(() => {
+          for (const k of yScaleKeys) {
+            const s = plot.scales[k];
+            if (!s || s.min == null || s.max == null) continue;
+            const r = s.max - s.min;
+            const anchor = s.max - pctTop * r; // value currently under the cursor (top = max)
+            const nr = r * zoomFactor;
+            const nMax = anchor + pctTop * nr;
+            plot.setScale(k, { min: nMax - nr, max: nMax });
+          }
+        });
+        yPinnedRef.current = true;
+        setYZoomed(true);
+        return;
+      }
+
       const xMin = plot.scales.x?.min ?? 0;
       const xMax = plot.scales.x?.max ?? 1;
       const range = xMax - xMin;
-      const cursor = plot.cursor.left ?? 0;
-      const pctLeft = cursor / (plot.bbox.width / devicePixelRatio);
-      const zoomFactor = e.deltaY > 0 ? 1.3 : 0.7;
-      const newRange = range * zoomFactor;
+
+      // Two-finger horizontal scroll pans time - the natural touchpad gesture.
+      if (!e.ctrlKey && Math.abs(dx) > Math.abs(e.deltaY) * unit && rect.width > 0) {
+        const shift = (dx / rect.width) * range;
+        setXWindow(xMin + shift, xMax + shift);
+        return;
+      }
+
+      // Keep a zoom-in floor so a runaway gesture can't collapse the window
+      // below ~1ms and strand the user in a degenerate scale.
+      const pctLeft = rect.width > 0 ? Math.min(Math.max((e.clientX - rect.left) / rect.width, 0), 1) : 0.5;
+      const newRange = Math.max(range * zoomFactor, 0.001);
       const newMin = xMin + (range - newRange) * pctLeft;
-      const newMax = newMin + newRange;
-      plot.setScale('x', { min: newMin, max: newMax });
-      applyZoom({ min: newMin, max: newMax });
+      setXWindow(newMin, newMin + newRange);
     };
 
+    // Right-drag pans both axes (grab-and-drag). Left-drag stays box-zoom, so
+    // pan needs its own button; we swallow the context menu while over the plot.
+    let pan: { cx: number; cy: number; xMin: number; xMax: number; y: Record<string, { min: number; max: number }> } | null = null;
+    const onPanMove = (e: MouseEvent) => {
+      if (!pan) return;
+      const rect = plot.over.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+      const dx = e.clientX - pan.cx;
+      const dy = e.clientY - pan.cy;
+      const xr = pan.xMax - pan.xMin;
+      // Clamp the shift so the window stops at the data edges instead of
+      // sailing off into empty space.
+      const [x0, x1] = xExtent();
+      const xShift = Math.min(Math.max(-(dx / rect.width) * xr, x0 - pan.xMin), x1 - pan.xMax);
+      const nxMin = pan.xMin + xShift;
+      const nxMax = pan.xMax + xShift;
+      yPinnedRef.current = true; // hold Y while panning so the X hook won't refit
+      plot.batch(() => {
+        plot.setScale('x', { min: nxMin, max: nxMax });
+        for (const k of Object.keys(pan!.y)) {
+          const r = pan!.y[k]!;
+          const yShift = (dy / rect.height) * (r.max - r.min);
+          plot.setScale(k, { min: r.min + yShift, max: r.max + yShift });
+        }
+      });
+      setYZoomed(true);
+      applyZoom({ min: nxMin, max: nxMax });
+    };
+    const onPanUp = () => {
+      pan = null;
+      plot.over.style.cursor = panTool ? 'grab' : '';
+      window.removeEventListener('mousemove', onPanMove);
+      window.removeEventListener('mouseup', onPanUp);
+    };
+    const onPanDown = (e: MouseEvent) => {
+      // Right-drag always pans; left-drag pans too when the Pan tool is
+      // active (touchpads have no comfortable right-button drag).
+      if (e.button !== 2 && !(panTool && e.button === 0)) return;
+      e.preventDefault();
+      plot.over.style.cursor = 'grabbing';
+      const y: Record<string, { min: number; max: number }> = {};
+      for (const k of yScaleKeys) {
+        const s = plot.scales[k];
+        if (s && s.min != null && s.max != null) y[k] = { min: s.min, max: s.max };
+      }
+      pan = { cx: e.clientX, cy: e.clientY, xMin: plot.scales.x?.min ?? 0, xMax: plot.scales.x?.max ?? 1, y };
+      window.addEventListener('mousemove', onPanMove);
+      window.addEventListener('mouseup', onPanUp);
+    };
+    const onContextMenu = (e: Event) => e.preventDefault();
+
     const handleDblClick = () => {
+      // Reset both axes: release the Y pin, restore full time range; the X
+      // setScale hook then auto-refits Y to the whole log.
+      yPinnedRef.current = false;
+      setYZoomed(false);
       const xData = chartData.data[0] as Float64Array;
       plot.setScale('x', { min: xData[0]!, max: xData[xData.length - 1]! });
       applyZoom(null);
     };
 
+    // The setCursor hook can't see the mouse leave (uPlot parks the cursor at
+    // -10 without :hover matching), so clear the map hover marker explicitly.
+    const onLeave = () => publishHoverTime(null);
+    plot.over.addEventListener('mouseleave', onLeave);
+    if (panTool) plot.over.style.cursor = 'grab';
+
     container.addEventListener('wheel', handleWheel, { passive: false });
+    container.addEventListener('mousedown', onPanDown);
+    container.addEventListener('contextmenu', onContextMenu);
     container.addEventListener('dblclick', handleDblClick);
 
     return () => {
       container.removeEventListener('wheel', handleWheel);
+      container.removeEventListener('mousedown', onPanDown);
+      container.removeEventListener('contextmenu', onContextMenu);
       container.removeEventListener('dblclick', handleDblClick);
+      plot.over.removeEventListener('mouseleave', onLeave);
+      window.removeEventListener('mousemove', onPanMove);
+      window.removeEventListener('mouseup', onPanUp);
       if (plotRef.current) { plotRef.current.destroy(); plotRef.current = null; }
     };
-  }, [chartData, isLight, modeTimeline, applyZoom]);
+    // xRange is read from the closure at rebuild time only (to restore the view);
+    // it is deliberately NOT a dep - listing it would recreate the chart on every
+    // zoom tick. The synced-range effect below drives live zoom updates instead.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chartData, isLight, modeTimeline, applyZoom, yMode, explorerTool]);
 
   // Apply the synchronized zoom range to this chart's plot whenever the
   // store value changes (i.e. another chart drove the zoom). Local zoom is
@@ -578,13 +844,47 @@ function ChartPanel({ chartId }: { chartId: string }) {
     return () => observer.disconnect();
   }, [chartData]);
 
+  // Jump requests from the events/params panels ("show me this moment"):
+  // apply to this chart regardless of sync mode - applyZoom routes to the
+  // shared store or local state as configured.
+  useEffect(() => subscribeTimeJump((range) => {
+    const plot = plotRef.current;
+    if (!plot) return;
+    plot.setScale('x', range);
+    applyZoom(range);
+  }), [applyZoom]);
+
   const resetZoom = useCallback(() => {
     if (plotRef.current && chartData) {
+      yPinnedRef.current = false;
+      setYZoomed(false);
       const xData = chartData.data[0] as Float64Array;
+      // Clears the X window; the setScale('x') hook auto-refits Y to full log.
       plotRef.current.setScale('x', { min: xData[0]!, max: xData[xData.length - 1]! });
       applyZoom(null);
     }
   }, [chartData, applyZoom]);
+
+  // CSV of the visible window (or whole log when not zoomed) - the "hand the
+  // slice to a spreadsheet / script" escape hatch MP users keep asking for.
+  const exportCsv = useCallback(() => {
+    if (!chartData) return;
+    const xCol = chartData.data[0] as ArrayLike<number>;
+    const n = xCol.length;
+    if (n === 0) return;
+    const lo = xRange ? Math.max(0, upperBoundIdx(xCol, xRange.min)) : 0;
+    const hi = xRange ? Math.min(n - 1, lowerBoundIdx(xCol, xRange.max)) : n - 1;
+    if (hi < lo) return;
+    const csv = chartCsv(chartData.data as unknown as ArrayLike<number>[], chartData.series.map((s) => s.label), lo, hi);
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = xRange
+      ? `chart-${chartIndex + 1}-${xRange.min.toFixed(1)}s-${xRange.max.toFixed(1)}s.csv`
+      : `chart-${chartIndex + 1}-full.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [chartData, xRange, chartIndex]);
 
   const applyPreset = useCallback((preset: typeof QUICK_PRESETS[number]) => {
     const validTypes = preset.types.filter((t) => messageTypes.includes(t));
@@ -633,7 +933,7 @@ function ChartPanel({ chartId }: { chartId: string }) {
             </button>
           ))}
         </div>
-        <p className="text-[10px] text-content-tertiary mt-1">Drag to select range &middot; Scroll to zoom &middot; Double-click to reset</p>
+        <p className="text-[10px] text-content-tertiary mt-1">Drag = box zoom &middot; Scroll = zoom time &middot; Shift+scroll = zoom Y &middot; Right-drag = pan &middot; Double-click = reset</p>
       </div>
     );
   }
@@ -653,7 +953,7 @@ function ChartPanel({ chartId }: { chartId: string }) {
         // table rather than a flat run-on list. With many series this is
         // dramatically denser — 26 items become 8 type rows, and the user
         // can still see every field name and its line color.
-        type SeriesEntry = { label: string; field: string; color: string };
+        type SeriesEntry = { label: string; field: string; color: string; stats: FieldStats | null };
         const groups = new Map<string, SeriesEntry[]>();
         chartData.series.forEach((s, i) => {
           const color = SERIES_COLORS[i % SERIES_COLORS.length]!;
@@ -666,7 +966,7 @@ function ChartPanel({ chartId }: { chartId: string }) {
           const field = m?.[3] ?? s.label;
           const display = inst ? `${field}${inst}` : field;
           if (!groups.has(type)) groups.set(type, []);
-          groups.get(type)!.push({ label: s.label, field: display, color });
+          groups.get(type)!.push({ label: s.label, field: display, color, stats: seriesStats[i] ?? null });
         });
         const groupCount = groups.size;
         const seriesCount = chartData.series.length;
@@ -719,38 +1019,113 @@ function ChartPanel({ chartId }: { chartId: string }) {
                   )}
                 </>
               )}
-              {shouldAutoCollapse && (
+              {/* Right-side action cluster lives IN the header row - floating
+                  it over the panel corner collided with the stats columns. */}
+              <div className="ml-auto flex items-center gap-1 shrink-0">
+                {shouldAutoCollapse && (
+                  <button
+                    onClick={() => setLegendExpanded(!legendExpanded)}
+                    className="text-[10px] px-1.5 py-0.5 rounded text-content-secondary hover:text-content hover:bg-surface-raised transition-colors flex items-center gap-1"
+                    data-tip={legendExpanded ? 'Collapse legend' : 'Show all field names'}
+                  >
+                    {legendExpanded ? 'Collapse' : 'Expand'}
+                    <svg className={`w-2.5 h-2.5 transition-transform ${legendExpanded ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </button>
+                )}
                 <button
-                  onClick={() => setLegendExpanded(!legendExpanded)}
-                  className="ml-auto text-[10px] px-1.5 py-0.5 rounded text-content-secondary hover:text-content hover:bg-surface-raised transition-colors flex items-center gap-1 shrink-0"
-                  title={legendExpanded ? 'Collapse legend' : 'Show all field names'}
+                  onClick={exportCsv}
+                  className="px-1.5 py-0.5 rounded border bg-surface hover:bg-surface-raised text-content-secondary hover:text-content border-subtle transition-colors"
+                  data-tip="Export the visible window as CSV"
                 >
-                  {legendExpanded ? 'Collapse' : 'Expand'}
-                  <svg className={`w-2.5 h-2.5 transition-transform ${legendExpanded ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M12 4v12m0 0l-4-4m4 4l4-4" />
                   </svg>
                 </button>
-              )}
+                <button
+                  onClick={() => setYMode(yMode === 'fit' ? 'independent' : 'fit')}
+                  className={`text-[10px] px-1.5 py-0.5 rounded border transition-colors flex items-center gap-1 ${
+                    yMode === 'independent'
+                      ? 'bg-blue-500/15 hover:bg-blue-500/25 text-blue-400 border-blue-500/40'
+                      : 'bg-surface hover:bg-surface-raised text-content-secondary hover:text-content border-subtle'
+                  }`}
+                  data-tip={yMode === 'independent'
+                    ? 'Independent Y axes: every field auto-scaled on its own axis'
+                    : 'Shared Y axis, auto-fit to the visible time window'}
+                >
+                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v16M4 20h16M8 16l3-6 3 4 4-8" />
+                  </svg>
+                  <span>{yMode === 'independent' ? 'Y: Indep' : 'Y: Fit'}</span>
+                </button>
+                {chartIds.length > 1 && (
+                  <button
+                    onClick={() => setSyncZoomEnabled(!syncZoomEnabled)}
+                    className={`text-[10px] px-1.5 py-0.5 rounded border transition-colors flex items-center gap-1 ${
+                      syncZoomEnabled
+                        ? 'bg-blue-500/15 hover:bg-blue-500/25 text-blue-400 border-blue-500/40'
+                        : 'bg-surface hover:bg-surface-raised text-content-secondary hover:text-content border-subtle'
+                    }`}
+                    data-tip={syncZoomEnabled ? 'Sync zoom across all charts (on)' : 'Sync zoom across all charts (off)'}
+                  >
+                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      {syncZoomEnabled ? (
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                      ) : (
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101M3 3l18 18" />
+                      )}
+                    </svg>
+                    <span>{syncZoomEnabled ? 'Synced' : 'Unsynced'}</span>
+                  </button>
+                )}
+                {(isZoomed || yZoomed) && (
+                  <button
+                    onClick={resetZoom}
+                    className="text-[10px] px-1.5 py-0.5 rounded border bg-surface hover:bg-surface-raised text-content border-subtle transition-colors"
+                    data-tip="Reset both axes (or double-click the chart)"
+                  >
+                    Reset Zoom
+                  </button>
+                )}
+              </div>
             </div>
 
             {/* Detail rows — only when expanded OR when few enough series fit
-                inline. Each row is a TYPE group with its field chips. */}
+                inline. A compact per-field stats table (min / avg / max over
+                the visible time window), grouped by message type. This is the
+                Mission Planner legend readout, but the numbers track whatever
+                slice of time is currently on screen. */}
             {(!shouldAutoCollapse || legendExpanded) && seriesCount > 0 && (
-              <div className="px-3 pb-1.5 grid gap-y-0.5 max-h-[120px] overflow-y-auto"
-                   style={{ gridTemplateColumns: 'min-content 1fr' }}>
+              <div className="px-3 pb-1.5 max-h-[160px] overflow-y-auto">
+                <div
+                  className="grid items-center text-[9px] uppercase tracking-wider text-content-tertiary pb-0.5 sticky top-0 bg-surface-overlay-subtle"
+                  style={{ gridTemplateColumns: '1fr 3.4rem 3.4rem 3.4rem' }}
+                >
+                  <span>{xRange ? 'field · visible window' : 'field · full log'}</span>
+                  <span className="text-right">min</span>
+                  <span className="text-right">avg</span>
+                  <span className="text-right">max</span>
+                </div>
                 {[...groups.entries()].map(([type, items]) => (
-                  <div key={type} className="contents">
-                    <span className="text-[10px] font-semibold text-content pr-3 tabular-nums whitespace-nowrap self-start py-0.5">
-                      {type}
-                    </span>
-                    <div className="flex flex-wrap gap-x-2 gap-y-0.5 min-w-0">
-                      {items.map((it) => (
-                        <span key={it.label} className="inline-flex items-center gap-1 text-[10px] whitespace-nowrap" title={it.label}>
+                  <div key={type}>
+                    <div className="text-[9px] font-semibold text-content-tertiary uppercase tracking-wider pt-0.5">{type}</div>
+                    {items.map((it) => (
+                      <div
+                        key={it.label}
+                        className="grid items-center gap-x-1 text-[10px] leading-tight py-[1px]"
+                        style={{ gridTemplateColumns: '1fr 3.4rem 3.4rem 3.4rem' }}
+                        title={it.label}
+                      >
+                        <span className="inline-flex items-center gap-1.5 min-w-0">
                           <span className="w-3 h-[3px] rounded-full shrink-0" style={{ backgroundColor: it.color }} />
-                          <span className="text-content-secondary tabular-nums">{it.field}</span>
+                          <span className="text-content-secondary truncate">{it.field}</span>
                         </span>
-                      ))}
-                    </div>
+                        <span className="text-right tabular-nums text-content-tertiary">{it.stats ? fmtStat(it.stats.min) : '—'}</span>
+                        <span className="text-right tabular-nums text-content">{it.stats ? fmtStat(it.stats.avg) : '—'}</span>
+                        <span className="text-right tabular-nums text-content-tertiary">{it.stats ? fmtStat(it.stats.max) : '—'}</span>
+                      </div>
+                    ))}
                   </div>
                 ))}
               </div>
@@ -789,37 +1164,6 @@ function ChartPanel({ chartId }: { chartId: string }) {
 
       {/* Chart */}
       <div ref={chartRef} className="flex-1 min-h-0" />
-
-      <div className="absolute top-1 right-2 z-10 flex items-center gap-1.5">
-        {chartIds.length > 1 && (
-          <button
-            onClick={() => setSyncZoomEnabled(!syncZoomEnabled)}
-            className={`text-[10px] px-2 py-1 rounded border transition-colors backdrop-blur-sm flex items-center gap-1 ${
-              syncZoomEnabled
-                ? 'bg-blue-500/15 hover:bg-blue-500/25 text-blue-300 border-blue-500/40'
-                : 'bg-surface-overlay hover:bg-surface-raised text-content-secondary hover:text-content border-subtle'
-            }`}
-            title={syncZoomEnabled ? 'Sync zoom across all charts (on)' : 'Sync zoom across all charts (off)'}
-          >
-            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              {syncZoomEnabled ? (
-                <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-              ) : (
-                <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101M3 3l18 18" />
-              )}
-            </svg>
-            <span>{syncZoomEnabled ? 'Synced' : 'Unsynced'}</span>
-          </button>
-        )}
-        {isZoomed && (
-          <button
-            onClick={resetZoom}
-            className="text-[10px] px-2 py-1 bg-surface-overlay hover:bg-surface-raised text-content hover:text-content rounded border border-subtle transition-colors backdrop-blur-sm"
-          >
-            Reset Zoom
-          </button>
-        )}
-      </div>
     </div>
   );
 }
@@ -840,6 +1184,7 @@ type PathColorMode = 'solid' | 'mode' | 'altitude' | 'speed';
 function FlightPathPanel() {
   const currentLog = useLogStore((s) => s.currentLog);
   const flightPath = useMemo(() => getFlightPath(currentLog), [currentLog]);
+  const flightTimes = useMemo(() => getFlightPathTimesS(currentLog), [currentLog]);
   const modeTimeline = useMemo(() => getModeTimeline(currentLog), [currentLog]);
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -1035,14 +1380,40 @@ function FlightPathPanel() {
       });
     });
 
+    // Chart-hover position marker: hovering any chart walks this dot along
+    // the trajectory at the hovered instant, tying "what happened at t" to
+    // "where the aircraft was". DOM mutations only - no React state per move.
+    const hoverEl = document.createElement('div');
+    hoverEl.style.cssText = [
+      'width:14px', 'height:14px', 'border-radius:50%',
+      'background:#3b82f6', 'border:2.5px solid #fff',
+      'box-shadow:0 0 8px rgba(59,130,246,0.9)',
+      'pointer-events:none',
+    ].join(';');
+    const hoverMarker = new maplibregl.Marker({ element: hoverEl });
+    let hoverShown = false;
+    const unsubHover = subscribeHoverTime((timeS) => {
+      if (timeS == null || flightTimes.length === 0) {
+        if (hoverShown) { hoverMarker.remove(); hoverShown = false; }
+        return;
+      }
+      const idx = Math.min(Math.max(lowerBoundIdx(flightTimes, timeS), 0), flightPath.length - 1);
+      const p = flightPath[idx];
+      if (!p) return;
+      hoverMarker.setLngLat([p[1], p[0]]);
+      if (!hoverShown) { hoverMarker.addTo(map); hoverShown = true; }
+    });
+
     mapRef.current = map;
     return () => {
+      unsubHover();
+      hoverMarker.remove();
       threeLayerRef.current?.dispose();
       threeLayerRef.current = null;
       map.remove();
       mapRef.current = null;
     };
-  }, [flightPath, activeLayer, mapCenter]);
+  }, [flightPath, flightTimes, activeLayer, mapCenter]);
 
   // Update colors without rebuilding the map
   useEffect(() => {
@@ -1530,6 +1901,9 @@ const dockviewComponents: Record<string, React.FC<IDockviewPanelProps>> = {
   },
   FlightPathPanel: () => <FlightPathPanel />,
   FieldPickerPanel: () => <FieldPickerPanel />,
+  EventsPanel: () => <EventsPanel />,
+  LogParamsPanel: () => <LogParamsPanel />,
+  SpectrumPanel: () => <SpectrumPanel />,
 };
 
 const DEFAULT_LAYOUT: SerializedDockview = {
@@ -1573,7 +1947,26 @@ const PANEL_DEFS = [
   { id: 'chart', component: 'ChartPanel', title: 'Chart' },
   { id: 'map', component: 'FlightPathPanel', title: 'Flight Path' },
   { id: 'fields', component: 'FieldPickerPanel', title: 'Fields' },
+  { id: 'events', component: 'EventsPanel', title: 'Events' },
+  { id: 'params', component: 'LogParamsPanel', title: 'Params' },
+  { id: 'spectrum', component: 'SpectrumPanel', title: 'Spectrum' },
 ];
+
+// Session-scoped layout memory: leaving the Flight Logs tab unmounts the
+// whole explorer, and reopening it used to slam the user back to the default
+// layout - infuriating after arranging panels. Module scope survives tab
+// switches; a fresh app start intentionally begins from the default.
+let savedLayout: SerializedDockview | null = null;
+
+/** openPanels derived from what the dockview actually contains. */
+function panelIdsFromApi(api: DockviewApi): Set<string> {
+  const open = new Set<string>();
+  for (const p of api.panels) {
+    const def = PANEL_DEFS.find((d) => p.id.startsWith(d.id));
+    if (def) open.add(def.id);
+  }
+  return open;
+}
 
 export function LogExplorerPanel() {
   const resolvedTheme = useResolvedTheme();
@@ -1582,10 +1975,31 @@ export function LogExplorerPanel() {
   const setActiveChartId = useLogStore((s) => s.setActiveChartId);
   const removeChart = useLogStore((s) => s.removeChart);
   const addChart = useLogStore((s) => s.addChart);
+  const explorerTool = useLogStore((s) => s.explorerTool);
+  const setExplorerTool = useLogStore((s) => s.setExplorerTool);
+  const [helpOpen, setHelpOpen] = useState(false);
 
   const onReady = useCallback((event: DockviewReadyEvent) => {
     apiRef.current = event.api;
-    event.api.fromJSON(DEFAULT_LAYOUT);
+    // Restore the user's arrangement from earlier in this session; if their
+    // saved layout fails to load (e.g. a stale panel id), fall back cleanly.
+    try {
+      event.api.fromJSON(savedLayout ?? DEFAULT_LAYOUT);
+    } catch {
+      savedLayout = null;
+      event.api.fromJSON(DEFAULT_LAYOUT);
+    }
+    setOpenPanels(panelIdsFromApi(event.api));
+    // Restored chart panels need their store slots back (e.g. after a store
+    // reset while the layout memory survived).
+    for (const p of event.api.panels) {
+      const cid = (p.params as { chartId?: string } | undefined)?.chartId;
+      if (cid) useLogStore.getState().ensureChart(cid);
+    }
+    // Persist every subsequent arrangement change for the next mount.
+    event.api.onDidLayoutChange(() => {
+      savedLayout = event.api.toJSON();
+    });
 
     // Track panel open/close
     event.api.onDidRemovePanel((e) => {
@@ -1640,6 +2054,7 @@ export function LogExplorerPanel() {
 
   const handleResetLayout = useCallback(() => {
     if (!apiRef.current) return;
+    savedLayout = null;
     apiRef.current.fromJSON(DEFAULT_LAYOUT);
     setOpenPanels(new Set(['chart', 'map', 'fields']));
   }, []);
@@ -1648,24 +2063,80 @@ export function LogExplorerPanel() {
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
-      {/* Toolbar: re-add panels + add comparison chart + reset */}
-      <div className="flex items-center gap-2 px-4 pt-2 pb-1 flex-shrink-0">
+      {/* Toolbar: pointer tool + panels + reset */}
+      <div className="flex items-center gap-2 px-4 pt-2.5 pb-2 flex-shrink-0">
+        {/* Pointer tool for all charts: mouse users live in Zoom (right-drag
+            still pans); touchpad users flip to Pan for one-finger dragging. */}
+        <div className="flex rounded-md border border-subtle overflow-hidden">
+          <button
+            onClick={() => setExplorerTool('zoom')}
+            className={`text-[10px] px-2 py-1 transition-colors flex items-center gap-1 ${
+              explorerTool === 'zoom' ? 'bg-blue-500/20 text-blue-400' : 'bg-surface text-content-secondary hover:text-content'
+            }`}
+            data-tip="Drag selects a region to zoom into"
+          >
+            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <circle cx="11" cy="11" r="7" /><path strokeLinecap="round" d="M21 21l-4.35-4.35M8 11h6M11 8v6" />
+            </svg>
+            Zoom
+          </button>
+          <button
+            onClick={() => setExplorerTool('pan')}
+            className={`text-[10px] px-2 py-1 transition-colors flex items-center gap-1 border-l border-subtle ${
+              explorerTool === 'pan' ? 'bg-blue-500/20 text-blue-400' : 'bg-surface text-content-secondary hover:text-content'
+            }`}
+            data-tip="Drag moves the view - best for touchpads"
+          >
+            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 2v20M2 12h20M12 2l-3 3m3-3l3 3M12 22l-3-3m3 3l3-3M2 12l3-3m-3 3l3 3M22 12l-3-3m3 3l-3 3" />
+            </svg>
+            Pan
+          </button>
+        </div>
+        <div className="relative">
+          <button
+            onClick={() => setHelpOpen(!helpOpen)}
+            className={`text-[10px] w-6 h-6 rounded-md border transition-colors ${
+              helpOpen ? 'bg-blue-500/20 text-blue-400 border-blue-500/30' : 'bg-surface text-content-secondary hover:text-content border-subtle'
+            }`}
+            data-tip="Chart gestures"
+          >
+            ?
+          </button>
+          {helpOpen && (
+            <div className="absolute left-0 top-8 z-30 w-72 rounded-lg bg-surface-overlay backdrop-blur-md border border-subtle shadow-xl p-3">
+              <div className="text-[10px] uppercase tracking-wider text-content-tertiary mb-2">Chart gestures</div>
+              <div className="grid gap-y-1 text-[11px]" style={{ gridTemplateColumns: 'max-content 1fr', columnGap: '12px' }}>
+                <span className="text-content font-medium">Scroll / pinch</span><span className="text-content-secondary">zoom time, anchored at cursor</span>
+                <span className="text-content font-medium">Two-finger swipe</span><span className="text-content-secondary">pan time (horizontal)</span>
+                <span className="text-content font-medium">Shift + scroll</span><span className="text-content-secondary">zoom values (Y)</span>
+                <span className="text-content font-medium">Drag</span><span className="text-content-secondary">{explorerTool === 'zoom' ? 'box zoom (Zoom tool)' : 'pan the view (Pan tool)'}</span>
+                <span className="text-content font-medium">Right-drag</span><span className="text-content-secondary">pan (mouse)</span>
+                <span className="text-content font-medium">Double-click</span><span className="text-content-secondary">reset both axes</span>
+              </div>
+              <div className="text-[10px] text-content-tertiary mt-2 pt-2 border-t border-subtle">
+                Hover a chart to see the same instant on every chart and on the flight-path map.
+              </div>
+            </div>
+          )}
+        </div>
+        <span className="w-px h-4 bg-subtle" />
         <button
           onClick={handleAddChart}
-          className="text-[10px] px-2 py-0.5 rounded bg-blue-500/15 hover:bg-blue-500/25 text-blue-400 border border-blue-500/30 transition-colors flex items-center gap-1"
-          title="Add a comparison chart with its own field selection"
+          className="text-[10px] px-2 py-1 rounded-md bg-blue-500/15 hover:bg-blue-500/25 text-blue-400 border border-blue-500/30 transition-colors flex items-center gap-1"
+          data-tip="Add a comparison chart with its own field selection"
         >
           <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" /></svg>
           Add Chart
         </button>
         {closedPanels.length > 0 && (
           <>
-            <span className="text-[10px] text-content-secondary ml-2">Add panel:</span>
+            <span className="text-[10px] text-content-tertiary ml-1">Panels:</span>
             {closedPanels.map((def) => (
               <button
                 key={def.id}
                 onClick={() => handleAddPanel(def.id, def.component, def.title)}
-                className="text-[10px] px-2 py-0.5 rounded bg-surface hover:bg-blue-500/20 hover:text-blue-400 text-content-secondary border border-subtle transition-colors"
+                className="text-[10px] px-2 py-1 rounded-md bg-surface hover:bg-blue-500/20 hover:text-blue-400 text-content-secondary border border-subtle transition-colors"
               >
                 {def.title}
               </button>
@@ -1674,8 +2145,8 @@ export function LogExplorerPanel() {
         )}
         <button
           onClick={handleResetLayout}
-          className="text-[10px] px-2 py-0.5 rounded bg-surface hover:bg-surface-raised text-content-secondary hover:text-content border border-subtle transition-colors ml-auto"
-          title="Reset panel layout"
+          className="text-[10px] px-2 py-1 rounded-md bg-surface hover:bg-surface-raised text-content-secondary hover:text-content border border-subtle transition-colors ml-auto"
+          data-tip="Restore the default panel arrangement"
         >
           Reset Layout
         </button>

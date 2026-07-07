@@ -12,7 +12,7 @@
  * mission builder emits the correct height for each leg.
  */
 import type { SurveyConfig, SurveyResult } from '../survey-types';
-import { generateGrid } from './grid-generator';
+import { generateGrid, routeTransitLatLng } from './grid-generator';
 import { computeSurveyStats } from '../survey-stats';
 
 export function generateCrosshatch(config: SurveyConfig): SurveyResult {
@@ -30,8 +30,17 @@ export function generateCrosshatch(config: SurveyConfig): SurveyResult {
   };
   const pass2 = generateGrid(pass2Config);
 
-  // Combine results
-  const waypoints = [...pass1.waypoints, ...pass2.waypoints];
+  // Combine results. The junction leg between the passes is a transit like
+  // any other - route it around no-fly holes.
+  const junction =
+    pass1.waypoints.length > 0 && pass2.waypoints.length > 0
+      ? routeTransitLatLng(
+          pass1.waypoints[pass1.waypoints.length - 1]!,
+          pass2.waypoints[0]!,
+          config.holes ?? [],
+        )
+      : [];
+  const waypoints = [...pass1.waypoints, ...junction, ...pass2.waypoints];
   const photoPositions = [...pass1.photoPositions, ...pass2.photoPositions];
   const footprints = [...pass1.footprints, ...pass2.footprints];
   const lineCount = pass1.stats.lineCount + pass2.stats.lineCount;
@@ -45,6 +54,7 @@ export function generateCrosshatch(config: SurveyConfig): SurveyResult {
   if (offsetPct !== 0) {
     result.altitudes = [
       ...pass1.waypoints.map(() => config.altitude),
+      ...junction.map(() => config.altitude),
       ...pass2.waypoints.map(() => pass2Altitude),
     ];
   }

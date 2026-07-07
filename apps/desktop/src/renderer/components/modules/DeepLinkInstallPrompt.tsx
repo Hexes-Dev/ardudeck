@@ -49,7 +49,7 @@ export function DeepLinkInstallPrompt() {
         <div className="px-6 py-5">
           <p className="text-sm text-content">
             Install <span className="font-semibold">{pending.name}</span> from the ArduDeck
-            marketplace?
+            Hangar?
           </p>
           <p className="text-sm text-content-secondary mt-2">
             ArduDeck will restart to load it.

@@ -6,27 +6,27 @@
  */
 
 import { useOsdDrag } from '../../hooks/useOsdDrag';
-import type { OsdElementId } from '../../stores/osd-store';
+import type { OsdElementKey } from '../../stores/osd-store';
 import type { OsdElementPosition } from '../../stores/osd-store';
 import type { ElementSize } from '../../utils/osd/element-registry';
 import { type VideoType, getOsdCols, getOsdRows } from '../../utils/osd/font-renderer';
 
 interface Props {
-  elementId: OsdElementId;
+  elementId: OsdElementKey;
   position: OsdElementPosition;
   size: ElementSize;
   scale: number;
   videoType: VideoType;
   isSelected: boolean;
   showLabels: boolean;
-  onSelect: (id: OsdElementId) => void;
-  onPositionChange: (id: OsdElementId, x: number, y: number) => void;
+  onSelect: (id: OsdElementKey) => void;
+  onPositionChange: (id: OsdElementKey, x: number, y: number) => void;
 }
 
 const CHAR_WIDTH = 12;
 const CHAR_HEIGHT = 18;
 
-function formatElementName(id: OsdElementId): string {
+function formatElementName(id: OsdElementKey): string {
   return id
     .split('_')
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1))

@@ -65,6 +65,10 @@ export function DebugConsole() {
   const messagesScrollRef = useRef<HTMLDivElement>(null);
   const [activeTab, setActiveTab] = useState<Tab>('console');
   const [expandedMessages, setExpandedMessages] = useState<Set<string>>(new Set());
+  // Stick to the bottom only while the user is already there; the moment they
+  // scroll up to read, hold position. A pinned=false state surfaces a
+  // "jump to latest" affordance.
+  const [pinned, setPinned] = useState(true);
 
   const isMavlink = protocol === 'mavlink';
 
@@ -77,12 +81,28 @@ export function DebugConsole() {
     });
   };
 
-  // Auto-scroll to bottom when new logs arrive
+  // Auto-scroll to bottom when new logs arrive - but only while pinned, so a
+  // user reading scrollback is never yanked back down.
   useEffect(() => {
-    if (scrollRef.current && isExpanded && activeTab === 'console') {
+    if (scrollRef.current && isExpanded && activeTab === 'console' && pinned) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [logs, isExpanded, activeTab]);
+  }, [logs, isExpanded, activeTab, pinned]);
+
+  // Re-pin when the user scrolls back to (near) the bottom; unpin when they
+  // scroll away.
+  const onConsoleScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    setPinned(atBottom);
+  };
+
+  const jumpToLatest = () => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+    setPinned(true);
+  };
 
   // Auto-scroll messages to top when new messages arrive (they're prepended)
   useEffect(() => {
@@ -147,7 +167,7 @@ export function DebugConsole() {
 
       {/* Expanded panel */}
       {isExpanded && (
-        <div className="flex flex-col" style={{ height: '35vh' }}>
+        <div className="relative flex flex-col" style={{ height: '35vh' }}>
           {/* Toolbar */}
           <div className="flex items-center gap-2 px-3 py-1.5 border-b border-subtle bg-surface-overlay-subtle">
             {/* Tab buttons */}
@@ -218,7 +238,7 @@ export function DebugConsole() {
 
           {/* Console tab content */}
           {activeTab === 'console' && (
-            <div ref={scrollRef} className="flex-1 overflow-y-auto font-mono text-xs p-2 space-y-0.5">
+            <div ref={scrollRef} onScroll={onConsoleScroll} className="relative flex-1 overflow-y-auto font-mono text-xs p-2 space-y-0.5">
               {filteredLogs.length === 0 ? (
                 <div className="text-content-tertiary text-center py-4">No log entries</div>
               ) : (
@@ -243,6 +263,14 @@ export function DebugConsole() {
                 ))
               )}
             </div>
+          )}
+          {activeTab === 'console' && !pinned && (
+            <button
+              onClick={jumpToLatest}
+              className="absolute bottom-3 right-4 z-10 rounded-full bg-blue-600 px-3 py-1 text-xs font-medium text-white shadow-lg hover:bg-blue-500"
+            >
+              ↓ Jump to latest (paused)
+            </button>
           )}
 
           {/* Messages tab content */}

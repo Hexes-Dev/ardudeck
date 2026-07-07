@@ -1,4 +1,4 @@
-export type MountPointName = 'floatingOverlay';
+export type MountPointName = 'floatingOverlay' | 'cameraOverlay';
 export type ModulePermission = 'pty' | 'filesystem' | 'network';
 
 export interface ModuleManifest {
@@ -14,7 +14,7 @@ export interface ModuleManifest {
 
 const SEMVER_RE = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
 const SLUG_RE = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9-]*)+$/;
-const VALID_MOUNT_POINTS: MountPointName[] = ['floatingOverlay'];
+const VALID_MOUNT_POINTS: MountPointName[] = ['floatingOverlay', 'cameraOverlay'];
 const VALID_PERMISSIONS: ModulePermission[] = ['pty', 'filesystem', 'network'];
 
 export type ParseResult =

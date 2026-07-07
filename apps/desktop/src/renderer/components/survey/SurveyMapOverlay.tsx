@@ -5,6 +5,7 @@
 import { useMemo, useCallback, useState, useEffect, memo, Fragment } from 'react';
 import { Polygon, Polyline, CircleMarker, Marker, Tooltip, Pane, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
+import { extractGeneratorOverlays } from './generator-overlays';
 import { useSurveyStore } from '../../stores/survey-store';
 import { useSettingsStore } from '../../stores/settings-store';
 import type { LatLng } from './survey-types';
@@ -181,11 +182,43 @@ export function SurveyMapOverlay() {
     removeVertex(index);
   }, [removeVertex]);
 
+  // Engine-contributed decorations (e.g. TOPAS decomposition cells + the true
+  // smoothed curve) belong to the DRAFT too - the persistent overlay only
+  // draws committed, non-editing groups, which made them invisible in the
+  // state the user actually works in.
+  const generatorOverlays = useMemo(
+    () => extractGeneratorOverlays(result?.generatorResult),
+    [result],
+  );
+
   return (
     <>
       {/* Dedicated high-z pane for vertex tooltips so they sit above the survey
           grid/flight lines and the boundary (which live in lower panes). */}
       <Pane name="vertexTooltipPane" style={{ zIndex: 680 }} />
+
+      {generatorOverlays.map((ov, oi) => {
+        const pts = ov.points.map((p) => [p.lat, p.lng] as [number, number]);
+        const pathOptions = {
+          color: ov.color ?? '#2dd4bf',
+          weight: ov.type === 'polyline' ? 2.5 : 2,
+          opacity: 0.9,
+          ...(ov.dashed ? { dashArray: '6, 5' } : {}),
+        };
+        // Labeled overlays stay interactive just enough for a hover tooltip.
+        return ov.type === 'polygon' ? (
+          <Polygon
+            key={`gen-ov-${oi}`}
+            positions={pts}
+            interactive={!!ov.label}
+            pathOptions={{ ...pathOptions, fillColor: ov.color ?? '#2dd4bf', fillOpacity: 0.16 }}
+          >
+            {ov.label && <Tooltip sticky>{ov.label}</Tooltip>}
+          </Polygon>
+        ) : (
+          <Polyline key={`gen-ov-${oi}`} positions={pts} interactive={false} pathOptions={pathOptions} />
+        );
+      })}
 
       {/* Drawing preview (polygon outline or a corridor branch centerline) */}
       {(drawMode === 'polygon' || drawMode === 'branch') && drawingPositions.length > 0 && (

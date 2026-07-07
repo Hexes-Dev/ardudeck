@@ -11,6 +11,9 @@ import { RecentConnectionsButton } from './RecentConnectionsButton';
 import type { SavedConnection } from '../../stores/settings-store';
 import { MessagesPanel } from '../panels/MessagesPanel';
 import { MultiVehiclePanel } from './MultiVehiclePanel';
+import { RadioSetupWizard } from './RadioSetupWizard';
+import { RadioPreflightCard } from './RadioPreflightCard';
+import type { StreamDiagnosis } from '../../../shared/link-doctor-types';
 
 const BAUD_RATES = [1500000, 921600, 460800, 230400, 115200, 57600, 38400, 19200, 9600];
 
@@ -34,6 +37,8 @@ export function ConnectionPanel() {
   const [tcpProtocol, setTcpProtocol] = useState<'mavlink' | 'msp'>('mavlink');
   const [udpProtocol, setUdpProtocol] = useState<'mavlink' | 'msp'>('mavlink');
   const [showDriverHelp, setShowDriverHelp] = useState(false);
+  const [diagnosis, setDiagnosis] = useState<StreamDiagnosis | null>(null);
+  const [showRadioWizard, setShowRadioWizard] = useState(false);
   const [showSigning, setShowSigning] = useState(false);
   const [showSigningPassphrase, setShowSigningPassphrase] = useState(false);
   const [signingInputHasValue, setSigningInputHasValue] = useState(false);
@@ -261,9 +266,15 @@ export function ConnectionPanel() {
         setError(errorMsg);
       });
 
+      // Link Doctor: what the port was speaking when a connect attempt failed
+      const unsubscribeDiagnosis = window.electronAPI.onConnectionDiagnosis((d) => {
+        setDiagnosis(d);
+      });
+
       return () => {
         unsubscribePortChange();
         unsubscribeError();
+        unsubscribeDiagnosis();
         window.electronAPI.stopPortWatch();
       };
     }
@@ -298,6 +309,41 @@ export function ConnectionPanel() {
     }
   };
 
+  // Connect on a specific serial port and baud rate (used by the Radio Setup
+  // wizard, which finds the radio's port and knows the module runs 460800).
+  const connectSerial = async (port: string, baud: number): Promise<boolean> => {
+    setSelectedPort(port);
+    setBaudRate(baud);
+    setDiagnosis(null);
+    setError(null);
+    const success = await connect({ type: 'serial', port, baudRate: baud });
+    if (success) {
+      updateConnectionMemory({
+        lastSerialPort: port,
+        lastBaudRate: baud,
+        lastConnectionType: 'serial',
+      });
+    }
+    return success;
+  };
+
+  // Connect as a UDP listener (used by the Radio Setup wizard for the WiFi
+  // TX Backpack path - the backpack broadcasts MAVLink to UDP 14550).
+  const connectUdpListen = async (port: number): Promise<boolean> => {
+    setDiagnosis(null);
+    setError(null);
+    const success = await connect({ type: 'udp', udpPort: port, udpMode: 'listen', protocol: 'mavlink' });
+    if (success) {
+      updateConnectionMemory({
+        lastUdpPort: port,
+        lastUdpMode: 'listen',
+        lastUdpProtocol: 'mavlink',
+        lastConnectionType: 'udp',
+      });
+    }
+    return success;
+  };
+
   // Apply a recent connection entry to the form fields. Switching modes is
   // allowed (e.g. clicking a listen recent while in client mode switches to
   // listen) so the popover always surfaces every recent for the tab.
@@ -330,6 +376,7 @@ export function ConnectionPanel() {
 
   const handleConnect = async () => {
     let success = false;
+    setDiagnosis(null);
 
     if (connectionType === 'serial') {
       success = await connect({ type: 'serial', port: selectedPort, baudRate });
@@ -605,6 +652,28 @@ export function ConnectionPanel() {
               </select>
             </div>
 
+            {!connectionState.isConnected && (
+              <button
+                onClick={() => setShowRadioWizard(true)}
+                className="w-full flex items-center justify-between px-3 py-2.5 rounded-lg bg-surface-raised hover:bg-surface transition-colors text-left"
+                data-tip="Guided setup for an ExpressLRS module as your telemetry radio"
+              >
+                <div>
+                  <p className="text-sm text-content">Using an ELRS radio?</p>
+                  <p className="text-xs text-content-secondary">Guided setup - finds and configures it for you</p>
+                </div>
+                <svg className="w-4 h-4 text-content-secondary shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+              </button>
+            )}
+
+            <RadioSetupWizard
+              open={showRadioWizard}
+              onClose={() => setShowRadioWizard(false)}
+              connectSerial={connectSerial}
+              connectUdpListen={connectUdpListen}
+            />
           </div>
         )}
 
@@ -915,6 +984,21 @@ export function ConnectionPanel() {
               </svg>
               <p className="text-sm text-red-300">{error}</p>
             </div>
+            {/* Link Doctor: explain what the port was speaking and what to do */}
+            {diagnosis?.suggestion && (
+              <div className="p-3 bg-sky-500/10 border border-sky-500/20 rounded-lg space-y-2">
+                <p className="text-xs font-medium text-sky-300">Link Doctor</p>
+                <p className="text-xs text-content-secondary">{diagnosis.suggestion}</p>
+                {diagnosis.elrsNormalMode && connectionType === 'serial' && (
+                  <button
+                    onClick={() => setShowRadioWizard(true)}
+                    className="btn btn-secondary w-full text-xs"
+                  >
+                    Open Radio Setup - it fixes this for you
+                  </button>
+                )}
+              </div>
+            )}
             {/* Show driver help after scan failure or connection error on serial */}
             {connectionType === 'serial' && (
               <DriverAssistant />
@@ -964,6 +1048,15 @@ export function ConnectionPanel() {
             </div>
           </div>
         )}
+
+        {/* Radio link preflight: vehicle-side checks when connected through a
+            MAVLink radio (ELRS USB modem runs at 460800) */}
+        {connectionState.isConnected &&
+          connectionState.protocol === 'mavlink' &&
+          connectionState.connectionType === 'serial' &&
+          (connectionState.transport?.includes('460800') ?? false) && (
+            <RadioPreflightCard />
+          )}
 
         {/* Connection info card */}
         {connectionState.isConnected && (

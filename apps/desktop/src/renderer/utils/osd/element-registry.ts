@@ -8,6 +8,7 @@
 
 import { SYM } from './osd-symbols';
 import type { OsdElementCategory } from './element-categories';
+import { listModuleOsdElements, getModuleOsdElement } from '../../modules/module-osd-registry';
 
 /** Size of an OSD element in character units */
 export interface ElementSize {
@@ -643,6 +644,43 @@ export const ELEMENT_REGISTRY: OsdElementDefinition[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Module-contributed elements
+// ---------------------------------------------------------------------------
+
+/** Broadened element key: built-in union OR a module-contributed string id. */
+export type OsdElementKey = OsdElementId | string;
+
+/**
+ * Element definition broadened to also describe module-contributed elements,
+ * whose `id`/`category` are free strings. Every built-in `OsdElementDefinition`
+ * already satisfies this shape.
+ */
+export interface AnyOsdElementDef extends Omit<OsdElementDefinition, 'id' | 'category'> {
+  id: OsdElementKey;
+  category: OsdElementCategory | string;
+}
+
+/**
+ * Built-in elements plus every module-contributed element, all mapped to the
+ * common element-def shape the Designer palette consumes. Module registrations
+ * carry fewer fields, so absent ones fall back to palette-safe defaults
+ * (previewSymbol 0 -> no inline glyph, disabled default placement).
+ */
+export function getAllOsdElements(): AnyOsdElementDef[] {
+  const moduleDefs: AnyOsdElementDef[] = listModuleOsdElements().map((reg) => ({
+    id: reg.id,
+    name: reg.name,
+    category: reg.category,
+    description: reg.description ?? '',
+    previewSymbol: 0,
+    previewText: reg.previewText ?? '',
+    size: { width: reg.size.width, height: reg.size.height },
+    defaultPosition: reg.defaultPosition ?? { x: 1, y: 1, enabled: false },
+  }));
+  return [...ELEMENT_REGISTRY, ...moduleDefs];
+}
+
+// ---------------------------------------------------------------------------
 // Lookup helpers
 // ---------------------------------------------------------------------------
 
@@ -692,8 +730,11 @@ export function buildBfIndexMap(): Record<number, OsdElementId> {
   return map;
 }
 
-/** Get element size from registry with fallback */
-export function getElementSizeFromRegistry(id: OsdElementId): ElementSize {
-  const def = _registryMap.get(id);
-  return def?.size ?? { width: 4, height: 1 };
+/** Get element size from registry with fallback (built-in or module element) */
+export function getElementSizeFromRegistry(id: OsdElementKey): ElementSize {
+  const def = _registryMap.get(id as OsdElementId);
+  if (def) return def.size;
+  const mod = getModuleOsdElement(id);
+  if (mod) return { width: mod.size.width, height: mod.size.height };
+  return { width: 4, height: 1 };
 }

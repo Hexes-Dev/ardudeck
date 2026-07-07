@@ -58,6 +58,16 @@ export interface WindData {
   speedZ: number;      // m/s vertical
 }
 
+/** NAV_CONTROLLER_OUTPUT (62) - the autopilot's live navigation solution. */
+export interface NavControllerData {
+  navBearing: number;    // degrees - bearing the nav controller is steering toward
+  targetBearing: number; // degrees - bearing to the active waypoint/target
+  wpDist: number;        // meters - distance to the active waypoint
+  xtrackError: number;   // meters - crosstrack error (signed, + right of track)
+  altError: number;      // meters
+  aspdError: number;     // m/s
+}
+
 export interface FlightState {
   mode: string;
   modeNum: number;
@@ -120,6 +130,8 @@ export interface TelemetryState {
   escTelemetry: EscTelemetryData | null;
   servoOutput: ServoOutputData | null;
   sensorHealth: SensorHealth | null;
+  /** null until the vehicle is navigating (NAV_CONTROLLER_OUTPUT received). */
+  navController: NavControllerData | null;
 }
 
 // Flight modes for ArduPilot Copter

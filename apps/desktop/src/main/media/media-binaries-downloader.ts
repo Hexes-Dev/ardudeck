@@ -23,8 +23,9 @@ import AdmZip from 'adm-zip';
 
 const FFMPEG_TAG = 'b6.1.1';
 const MEDIAMTX_TAG = 'v1.19.1';
+const WFB_RX_TAG = 'wfb-rx-v0.1.0';
 
-export type DownloadName = 'ffmpeg' | 'mediamtx';
+export type DownloadName = 'ffmpeg' | 'mediamtx' | 'ardudeck-wfb-rx';
 
 /** ffmpeg-static asset arch token. */
 function archToken(): 'arm64' | 'x64' {
@@ -74,6 +75,30 @@ export class MediaBinariesDownloader {
     } catch (e) {
       const error = e instanceof Error ? e.message : 'Download failed';
       onLog?.(`Media engine download failed: ${error}`);
+      return { ok: false, error };
+    }
+  }
+
+  /**
+   * Fetch the wfb-ng dongle receiver (built by the wfb-rx CI workflow and
+   * attached to an ArduDeck release). Separate from ensure(): only wanted by
+   * users with an OpenIPC/WiFiLink dongle, not every camera user.
+   */
+  async ensureWfbRx(onLog?: (line: string) => void): Promise<{ ok: boolean; error?: string }> {
+    if (this.isPresent('ardudeck-wfb-rx')) return { ok: true };
+    try {
+      onLog?.('Downloading the wfb-ng receiver…');
+      const ext = process.platform === 'win32' ? '.exe' : '';
+      const url = `https://github.com/rubenCodeforges/ardudeck/releases/download/${WFB_RX_TAG}/ardudeck-wfb-rx-${process.platform}-${archToken()}${ext}`;
+      const bin = await downloadBuffer(url);
+      const out = this.binaryPath('ardudeck-wfb-rx');
+      writeFileSync(out, bin);
+      if (process.platform !== 'win32') chmodSync(out, 0o755);
+      onLog?.('wfb-ng receiver ready.');
+      return { ok: true };
+    } catch (e) {
+      const error = e instanceof Error ? e.message : 'Download failed';
+      onLog?.(`wfb-ng receiver download failed: ${error}`);
       return { ok: false, error };
     }
   }

@@ -73,6 +73,11 @@ interface LogStore {
   syncedXRange: { min: number; max: number } | null;
   syncZoomEnabled: boolean;
 
+  // Active pointer tool for ALL chart panels. 'zoom' = left-drag box zoom
+  // (mouse-first), 'pan' = left-drag pans both axes (touchpad-first, no
+  // right button needed). One shared mode so charts never feel inconsistent.
+  explorerTool: 'zoom' | 'pan';
+
   // Tab
   activeTab: 'list' | 'report' | 'explorer' | 'ai' | 'fleet';
 
@@ -97,8 +102,11 @@ interface LogStore {
   setActiveChartId: (id: string) => void;
   addChart: () => string;
   removeChart: (id: string) => void;
+  /** Registers a chart slot for a restored layout without making it active. */
+  ensureChart: (id: string) => void;
   setSyncedXRange: (range: { min: number; max: number } | null) => void;
   setSyncZoomEnabled: (enabled: boolean) => void;
+  setExplorerTool: (tool: 'zoom' | 'pan') => void;
   setActiveTab: (tab: 'list' | 'report' | 'explorer' | 'ai' | 'fleet') => void;
   reset: () => void;
 }
@@ -127,6 +135,7 @@ export const useLogStore = create<LogStore>()(subscribeWithSelector((set) => ({
   selectedFieldsByChart: { chart: new Map() },
   syncedXRange: null,
   syncZoomEnabled: true,
+  explorerTool: 'zoom',
   activeTab: 'list',
 
   setAvailableLogs: (logs) => set({ availableLogs: logs }),
@@ -194,6 +203,15 @@ export const useLogStore = create<LogStore>()(subscribeWithSelector((set) => ({
     }));
     return newId;
   },
+  ensureChart: (id) => set((state) => {
+    if (state.chartIds.includes(id)) return state;
+    return {
+      chartIds: [...state.chartIds, id],
+      selectedTypesByChart: { ...state.selectedTypesByChart, [id]: [] },
+      selectedFieldsByChart: { ...state.selectedFieldsByChart, [id]: new Map() },
+    };
+  }),
+  setExplorerTool: (tool) => set({ explorerTool: tool }),
   removeChart: (id) => set((state) => {
     // Refuse to remove the last chart - the picker has nowhere to write to
     // and the explorer would render an empty pane forever.

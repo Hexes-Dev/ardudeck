@@ -12,6 +12,35 @@ export const IPC_CHANNELS = {
   COMMS_START_PORT_WATCH: 'comms:start-port-watch',
   COMMS_STOP_PORT_WATCH: 'comms:stop-port-watch',
 
+  // Link Doctor: identify what a serial port is actually speaking, and
+  // configure ELRS TX modules over USB (CRSF parameter protocol).
+  /** Renderer → main: sample a port at a baud rate and classify the stream. */
+  LINKDOCTOR_PROBE: 'linkdoctor:probe',
+  /** Renderer → main: listen briefly on a UDP port for a broadcasting radio (ELRS TX Backpack). */
+  LINKDOCTOR_PROBE_UDP: 'linkdoctor:probe-udp',
+  /** Main → renderer: stream diagnosis attached to a failed connect. */
+  CONNECTION_DIAGNOSIS: 'connection:diagnosis',
+  /** Renderer → main: detect an ELRS TX module on a port. */
+  ELRS_DETECT: 'elrs:detect',
+  /** Renderer → main: change the module's Link Mode (retries until it sticks). */
+  ELRS_SET_LINK_MODE: 'elrs:set-link-mode',
+  /** Renderer → main: cancel an in-flight link mode change. */
+  ELRS_CANCEL: 'elrs:cancel',
+  /** Main → renderer: progress events while changing link mode. */
+  ELRS_PROGRESS: 'elrs:progress',
+
+  // wfb-ng dongle receiver (OpenIPC / RunCam WiFiLink direct reception)
+  /** Renderer → main: dongle / receiver / gs.key / running status snapshot. */
+  WFBNG_STATUS: 'wfbng:status',
+  /** Renderer → main: pick a gs.key file via dialog and import it. */
+  WFBNG_IMPORT_KEY: 'wfbng:import-key',
+  /** Renderer → main: set receiver channel / bandwidth. */
+  WFBNG_SET_OPTIONS: 'wfbng:set-options',
+  /** Renderer → main: download the receiver component from release assets. */
+  WFBNG_INSTALL: 'wfbng:install',
+  /** Renderer → main: this machine's LAN IPs (for the PC-forward instructions). */
+  WFBNG_LOCAL_IPS: 'wfbng:local-ips',
+
   // Multi-vehicle connection registry (transports x vehicles)
   COMMS_LIST_TRANSPORTS: 'comms:list-transports',
   COMMS_LIST_VEHICLES: 'comms:list-vehicles',

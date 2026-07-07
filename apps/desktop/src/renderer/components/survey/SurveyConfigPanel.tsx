@@ -112,6 +112,7 @@ export function SurveyConfigPanel() {
   const setPattern = useSurveyStore((s) => s.setPattern);
   const setGeneratorId = useSurveyStore((s) => s.setGeneratorId);
   const setEngineParam = useSurveyStore((s) => s.setEngineParam);
+  const requestRecompute = useSurveyStore((s) => s.requestRecompute);
   const setAltitude = useSurveyStore((s) => s.setAltitude);
   const setSpeed = useSurveyStore((s) => s.setSpeed);
   const setFrontOverlap = useSurveyStore((s) => s.setFrontOverlap);
@@ -515,6 +516,180 @@ export function SurveyConfigPanel() {
 
       <div className="p-3 space-y-3 overflow-y-auto flex-1 min-h-0">
         {/* Camera Section */}
+        {/* Remote engine status - pinned at the top so a failed plan is
+            impossible to miss, with an explicit retry. */}
+        {generating && (
+          <div className="flex items-center gap-2 text-[11px] text-content-secondary">
+            <span className="w-3 h-3 rounded-full border-2 border-teal-400/30 border-t-teal-400 animate-spin" />
+            Computing coverage plan{activeGenerator ? ` (${activeGenerator.displayName})` : ''}...
+          </div>
+        )}
+        {generatorError && !generating && (
+          <div className="px-2.5 py-2 rounded-lg bg-red-500/10 border border-red-500/30 space-y-1.5">
+            <p className="text-[11px] text-red-300 leading-snug">{generatorError}</p>
+            <button
+              onClick={() => requestRecompute({ immediate: true })}
+              className="px-2.5 py-1 rounded-md text-[11px] font-medium bg-red-500/20 text-red-200 hover:bg-red-500/30 transition-colors"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+        {!generating && result?.warnings && result.warnings.length > 0 && (
+          <div className="px-2.5 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-300 leading-snug space-y-1">
+            {result.warnings.map((w, i) => (
+              <div key={i}>{w}</div>
+            ))}
+          </div>
+        )}
+
+        {/* Pattern — filtered by mode so the user only sees patterns that
+            make sense (mower hides Circular which generates wedge-leaving
+            circles regardless of polygon shape; camera mode hides Spiral and
+            Perimeter+Fill which are mowing-specific). */}
+        <Section title="Pattern">
+          {(() => {
+            const mode = isManualCamera ? 'mower' : 'camera';
+            const visible = ALL_PATTERN_OPTIONS.filter((o) => o.modes.includes(mode));
+            return (
+              <div className="grid grid-cols-2 gap-1">
+                {visible.map((opt) => (
+                  <button
+                    key={opt.id}
+                    onClick={() => setPattern(opt.id)}
+                    className={`px-2 py-1.5 text-xs rounded-lg transition-colors ${
+                      config.pattern === opt.id && !config.generatorId
+                        ? 'bg-purple-600/80 text-white'
+                        : 'bg-surface-raised text-content-secondary hover:text-content hover:bg-surface-raised'
+                    }`}
+                    title={opt.description}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            );
+          })()}
+
+          {/* Module-supplied engines (registered via host.survey, e.g. TOPAS).
+              Mutually exclusive with the built-in patterns above. */}
+          {moduleGenerators.length > 0 && (
+            <div className="mt-1 grid grid-cols-1 gap-1">
+              {moduleGenerators.map((gen) => (
+                <button
+                  key={gen.id}
+                  onClick={() => setGeneratorId(config.generatorId === gen.id ? null : gen.id)}
+                  className={`px-2 py-1.5 text-xs rounded-lg text-left transition-colors ${
+                    config.generatorId === gen.id
+                      ? 'bg-teal-600/80 text-white'
+                      : 'bg-surface-raised text-content-secondary hover:text-content'
+                  }`}
+                  title={gen.description}
+                >
+                  <span className="flex items-center gap-1.5">
+                    {gen.displayName}
+                    {gen.capabilities.isRemote && (
+                      <span
+                        className={`px-1 py-px text-[9px] font-semibold uppercase tracking-wide rounded border ${
+                          config.generatorId === gen.id
+                            ? 'bg-white/15 text-white border-white/40'
+                            : 'bg-teal-500/20 text-teal-300 border-teal-500/30'
+                        }`}
+                      >
+                        Remote
+                      </span>
+                    )}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Spiral direction sub-control — only when spiral pattern is active. */}
+          {config.pattern === 'spiral' && (
+            <div className="mt-2 flex items-center gap-2">
+              <span className="text-xs text-content-secondary w-14 flex-shrink-0">Direction</span>
+              <div className="flex gap-1 flex-1">
+                {(['inward', 'outward'] as const).map((dir) => {
+                  const active = (config.spiralDirection ?? 'inward') === dir;
+                  return (
+                    <button
+                      key={dir}
+                      onClick={() => setSpiralDirection(dir)}
+                      className={`flex-1 px-2 py-1 text-[11px] rounded-md transition-colors ${
+                        active
+                          ? 'bg-purple-600/80 text-white'
+                          : 'bg-surface-raised text-content-secondary hover:text-content'
+                      }`}
+                      title={dir === 'inward' ? 'Start at perimeter, end at center' : 'Start at center, end at perimeter'}
+                    >
+                      {dir === 'inward' ? 'In' : 'Out'}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Perimeter+Fill passes — only when that pattern is active. */}
+          {config.pattern === 'perimeter-fill' && (
+            <div className="mt-2 flex items-center gap-2">
+              <span className="text-xs text-content-secondary w-14 flex-shrink-0">Passes</span>
+              <input
+                type="range"
+                value={config.perimeterPasses ?? 2}
+                onChange={(e) => setPerimeterPasses(Number(e.target.value))}
+                min={1}
+                max={5}
+                step={1}
+                className="flex-1 h-1 bg-surface-inset rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-purple-400 [&::-webkit-slider-thumb]:cursor-grab"
+              />
+              <span className="text-xs text-content w-14 text-right tabular-nums font-medium">
+                {config.perimeterPasses ?? 2}×
+              </span>
+            </div>
+          )}
+
+          {/* Crosshatch second-pass altitude offset — camera mode only. Flying
+              the two perpendicular passes at two heights improves 3D
+              reconstruction. 0% = classic same-altitude crosshatch. */}
+          {config.pattern === 'crosshatch' && !isManualCamera && (
+            <div className="mt-2">
+              <SliderInput
+                label="2nd alt"
+                value={config.crossGridAltitudeOffset ?? 0}
+                onChange={setCrossGridAltitudeOffset}
+                min={0}
+                max={100}
+                step={5}
+                unit="%"
+              />
+              <p className="mt-1 text-[10px] text-content-tertiary leading-snug">
+                {(config.crossGridAltitudeOffset ?? 0) > 0
+                  ? `Perpendicular pass flies ${Math.round(config.altitude * (1 + (config.crossGridAltitudeOffset ?? 0) / 100))} m (+${config.crossGridAltitudeOffset}%) for better photogrammetry.`
+                  : 'Both passes at the same altitude. Raise to fly the second pass higher.'}
+              </p>
+            </div>
+          )}
+        </Section>
+
+        {/* Engine parameters - declared by the active module generator via
+            its configFields schema. Only shown while that engine is selected. */}
+        {engineFields.length > 0 && (
+          <Section title="Engine parameters">
+            <div className="space-y-2">
+              {engineFields.map((field) => (
+                <EngineParamControl
+                  key={field.id}
+                  field={field}
+                  value={config.engineParams?.[field.id]}
+                  onChange={(v) => setEngineParam(field.id, v)}
+                />
+              ))}
+            </div>
+          </Section>
+        )}
+
         <Section title={isManualCamera ? 'Corridor' : 'Camera'}>
           <CameraPresetSelector value={config.camera} onChange={handleCameraChange} />
           {isCustomCamera && (
@@ -672,153 +847,6 @@ export function SurveyConfigPanel() {
             </p>
           </div>
         </Section>
-
-        {/* Pattern — filtered by mode so the user only sees patterns that
-            make sense (mower hides Circular which generates wedge-leaving
-            circles regardless of polygon shape; camera mode hides Spiral and
-            Perimeter+Fill which are mowing-specific). */}
-        <Section title="Pattern">
-          {(() => {
-            const mode = isManualCamera ? 'mower' : 'camera';
-            const visible = ALL_PATTERN_OPTIONS.filter((o) => o.modes.includes(mode));
-            return (
-              <div className="grid grid-cols-2 gap-1">
-                {visible.map((opt) => (
-                  <button
-                    key={opt.id}
-                    onClick={() => setPattern(opt.id)}
-                    className={`px-2 py-1.5 text-xs rounded-lg transition-colors ${
-                      config.pattern === opt.id && !config.generatorId
-                        ? 'bg-purple-600/80 text-white'
-                        : 'bg-surface-raised text-content-secondary hover:text-content hover:bg-surface-raised'
-                    }`}
-                    title={opt.description}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
-            );
-          })()}
-
-          {/* Module-supplied engines (registered via host.survey, e.g. TOPAS).
-              Mutually exclusive with the built-in patterns above. */}
-          {moduleGenerators.length > 0 && (
-            <div className="mt-1 grid grid-cols-1 gap-1">
-              {moduleGenerators.map((gen) => (
-                <button
-                  key={gen.id}
-                  onClick={() => setGeneratorId(config.generatorId === gen.id ? null : gen.id)}
-                  className={`px-2 py-1.5 text-xs rounded-lg text-left transition-colors ${
-                    config.generatorId === gen.id
-                      ? 'bg-teal-600/80 text-white'
-                      : 'bg-surface-raised text-content-secondary hover:text-content'
-                  }`}
-                  title={gen.description}
-                >
-                  <span className="flex items-center gap-1.5">
-                    {gen.displayName}
-                    {gen.capabilities.isRemote && (
-                      <span
-                        className={`px-1 py-px text-[9px] font-semibold uppercase tracking-wide rounded border ${
-                          config.generatorId === gen.id
-                            ? 'bg-white/15 text-white border-white/40'
-                            : 'bg-teal-500/20 text-teal-300 border-teal-500/30'
-                        }`}
-                      >
-                        Remote
-                      </span>
-                    )}
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
-
-          {/* Spiral direction sub-control — only when spiral pattern is active. */}
-          {config.pattern === 'spiral' && (
-            <div className="mt-2 flex items-center gap-2">
-              <span className="text-xs text-content-secondary w-14 flex-shrink-0">Direction</span>
-              <div className="flex gap-1 flex-1">
-                {(['inward', 'outward'] as const).map((dir) => {
-                  const active = (config.spiralDirection ?? 'inward') === dir;
-                  return (
-                    <button
-                      key={dir}
-                      onClick={() => setSpiralDirection(dir)}
-                      className={`flex-1 px-2 py-1 text-[11px] rounded-md transition-colors ${
-                        active
-                          ? 'bg-purple-600/80 text-white'
-                          : 'bg-surface-raised text-content-secondary hover:text-content'
-                      }`}
-                      title={dir === 'inward' ? 'Start at perimeter, end at center' : 'Start at center, end at perimeter'}
-                    >
-                      {dir === 'inward' ? 'In' : 'Out'}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {/* Perimeter+Fill passes — only when that pattern is active. */}
-          {config.pattern === 'perimeter-fill' && (
-            <div className="mt-2 flex items-center gap-2">
-              <span className="text-xs text-content-secondary w-14 flex-shrink-0">Passes</span>
-              <input
-                type="range"
-                value={config.perimeterPasses ?? 2}
-                onChange={(e) => setPerimeterPasses(Number(e.target.value))}
-                min={1}
-                max={5}
-                step={1}
-                className="flex-1 h-1 bg-surface-inset rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-purple-400 [&::-webkit-slider-thumb]:cursor-grab"
-              />
-              <span className="text-xs text-content w-14 text-right tabular-nums font-medium">
-                {config.perimeterPasses ?? 2}×
-              </span>
-            </div>
-          )}
-
-          {/* Crosshatch second-pass altitude offset — camera mode only. Flying
-              the two perpendicular passes at two heights improves 3D
-              reconstruction. 0% = classic same-altitude crosshatch. */}
-          {config.pattern === 'crosshatch' && !isManualCamera && (
-            <div className="mt-2">
-              <SliderInput
-                label="2nd alt"
-                value={config.crossGridAltitudeOffset ?? 0}
-                onChange={setCrossGridAltitudeOffset}
-                min={0}
-                max={100}
-                step={5}
-                unit="%"
-              />
-              <p className="mt-1 text-[10px] text-content-tertiary leading-snug">
-                {(config.crossGridAltitudeOffset ?? 0) > 0
-                  ? `Perpendicular pass flies ${Math.round(config.altitude * (1 + (config.crossGridAltitudeOffset ?? 0) / 100))} m (+${config.crossGridAltitudeOffset}%) for better photogrammetry.`
-                  : 'Both passes at the same altitude. Raise to fly the second pass higher.'}
-              </p>
-            </div>
-          )}
-        </Section>
-
-        {/* Engine parameters - declared by the active module generator via
-            its configFields schema. Only shown while that engine is selected. */}
-        {engineFields.length > 0 && (
-          <Section title="Engine parameters">
-            <div className="space-y-2">
-              {engineFields.map((field) => (
-                <EngineParamControl
-                  key={field.id}
-                  field={field}
-                  value={config.engineParams?.[field.id]}
-                  onChange={(v) => setEngineParam(field.id, v)}
-                />
-              ))}
-            </div>
-          </Section>
-        )}
 
         {/* Corridor settings — only when the corridor pattern is active. The
             drawn polygon is treated as a centerline, not an area. */}
@@ -1100,26 +1128,6 @@ export function SurveyConfigPanel() {
             </div>
           )}
         </div>
-
-        {/* Async (remote) engine status: busy indicator, failures, advisories. */}
-        {generating && (
-          <div className="pt-3 flex items-center gap-2 text-[11px] text-content-secondary">
-            <span className="w-3 h-3 rounded-full border-2 border-teal-400/30 border-t-teal-400 animate-spin" />
-            Computing coverage plan{activeGenerator ? ` (${activeGenerator.displayName})` : ''}...
-          </div>
-        )}
-        {generatorError && !generating && (
-          <div className="mt-3 px-2.5 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-[11px] text-red-300 leading-snug">
-            {generatorError}
-          </div>
-        )}
-        {!generating && result?.warnings && result.warnings.length > 0 && (
-          <div className="mt-3 px-2.5 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-300 leading-snug space-y-1">
-            {result.warnings.map((w, i) => (
-              <div key={i}>{w}</div>
-            ))}
-          </div>
-        )}
 
         {/* Stats — show whenever we have a generated result. */}
         {result && result.waypoints.length > 0 && (

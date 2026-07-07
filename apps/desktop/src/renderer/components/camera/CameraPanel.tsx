@@ -256,8 +256,12 @@ function FollowBody({ renderMode, syntheticFallback, targetVehicle, targetKey, a
   }
 
   // Synthetic mode always; Live mode only falls back to synthetic when the
-  // configured feed actually errored (and fallback is enabled).
-  const showSynthetic = renderMode === 'synthetic' || (syntheticFallback && !!source && erroredId === source.id);
+  // configured feed actually errored AND the vehicle has a position fix -
+  // otherwise synthetic just shows a "needs GPS" dead end that hides the real
+  // camera error, so keep the CameraView's own error state instead.
+  const feedErrored = !!source && erroredId === source.id;
+  const showSynthetic =
+    renderMode === 'synthetic' || (syntheticFallback && feedErrored && !!targetVehicle?.position);
   if (showSynthetic) {
     return <SyntheticVisionView vehicle={targetVehicle} isPrimary={isPrimary} osd={osd} />;
   }
@@ -316,7 +320,9 @@ function GridTile({ renderMode, syntheticFallback, vehicle, isActive, osd, onAct
   // Live tile with no feed: render nothing rather than silently swapping to synthetic.
   if (renderMode === 'live' && !source) return null;
 
-  const showSynthetic = renderMode === 'synthetic' || (syntheticFallback && errored);
+  // Same GPS-fix guard as the follow view: don't swap a failed feed for a
+  // GPS-less synthetic tile.
+  const showSynthetic = renderMode === 'synthetic' || (syntheticFallback && errored && !!vehicle.position);
   return (
     <div className={`relative overflow-hidden rounded ${isActive ? 'ring-2 ring-blue-500' : 'ring-1 ring-white/10'}`}>
       {showSynthetic ? (

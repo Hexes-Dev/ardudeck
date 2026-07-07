@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeHudConfig, unitProfile, DEFAULT_HUD_CONFIG, DEFAULT_POSITIONS } from './hud-config';
+import { normalizeHudConfig, unitProfile, resolveHudProfile, DEFAULT_HUD_CONFIG, DEFAULT_POSITIONS, DEFAULT_GROUND_WIDGETS } from './hud-config';
 
 describe('normalizeHudConfig', () => {
   it('fills defaults from an empty/partial config', () => {
@@ -16,6 +16,42 @@ describe('normalizeHudConfig', () => {
     expect(c.widgets.horizon).toBe(DEFAULT_HUD_CONFIG.widgets.horizon); // untouched key kept
     expect(c.positions.home).toEqual({ x: 1, y: 2 });
     expect(c.positions.battery).toEqual(DEFAULT_POSITIONS.battery);
+  });
+});
+
+describe('ground profile', () => {
+  it('auto resolves rovers and boats to ground, everything else to air', () => {
+    expect(resolveHudProfile('auto', 10)).toBe('ground'); // rover
+    expect(resolveHudProfile('auto', 11)).toBe('ground'); // surface boat
+    expect(resolveHudProfile('auto', 2)).toBe('air'); // quad
+    expect(resolveHudProfile('auto', 1)).toBe('air'); // plane
+    expect(resolveHudProfile('auto', undefined)).toBe('air');
+  });
+
+  it('forced profiles ignore the vehicle type', () => {
+    expect(resolveHudProfile('ground', 2)).toBe('ground');
+    expect(resolveHudProfile('air', 10)).toBe('air');
+  });
+
+  it('ground defaults drop aviation instruments and enable rover readouts', () => {
+    expect(DEFAULT_GROUND_WIDGETS.pitchLadder).toBe(false);
+    expect(DEFAULT_GROUND_WIDGETS.airspeedTape).toBe(false);
+    expect(DEFAULT_GROUND_WIDGETS.altitudeTape).toBe(false);
+    expect(DEFAULT_GROUND_WIDGETS.vsi).toBe(false);
+    expect(DEFAULT_GROUND_WIDGETS.fpm).toBe(false);
+    expect(DEFAULT_GROUND_WIDGETS.groundSpeed).toBe(true);
+    expect(DEFAULT_GROUND_WIDGETS.headingTape).toBe(true);
+    expect(DEFAULT_GROUND_WIDGETS.steer).toBe(true);
+    expect(DEFAULT_GROUND_WIDGETS.tilt).toBe(true);
+    expect(DEFAULT_GROUND_WIDGETS.wpDist).toBe(true);
+  });
+
+  it('normalize fills widgetsGround for legacy persisted configs', () => {
+    const legacy = { widgets: { fpm: false } } as Parameters<typeof normalizeHudConfig>[0];
+    const c = normalizeHudConfig(legacy);
+    expect(c.widgetsGround).toEqual(DEFAULT_GROUND_WIDGETS);
+    expect(c.profile).toBe('auto');
+    expect(c.widgets.fpm).toBe(false);
   });
 });
 

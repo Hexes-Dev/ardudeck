@@ -14,6 +14,8 @@ export interface GeneratorOverlay {
   /** CSS color. Defaults to the group color at the render site. */
   color?: string;
   dashed?: boolean;
+  /** Short hover label, e.g. "Cell 3 - flown 2nd". */
+  label?: string;
 }
 
 // Rendering hundreds of decorations would drown the map and the React tree;
@@ -48,11 +50,13 @@ export function extractGeneratorOverlays(generatorResult: unknown): GeneratorOve
     const points = parsePoints(o.points);
     if (!points) continue;
     if (o.type === 'polygon' && points.length < 3) continue;
+    const label = (o as { label?: unknown }).label;
     overlays.push({
       type: o.type,
       points,
       ...(typeof o.color === 'string' && o.color.length <= 32 ? { color: o.color } : {}),
       ...(o.dashed === true ? { dashed: true } : {}),
+      ...(typeof label === 'string' && label.length <= 80 ? { label } : {}),
     });
   }
   return overlays;

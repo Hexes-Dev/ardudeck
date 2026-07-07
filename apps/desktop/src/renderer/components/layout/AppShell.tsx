@@ -9,6 +9,7 @@ import { UpdateBanner } from './UpdateBanner';
 import { ArmDisarmButton } from './ArmDisarmButton';
 import { ScriptHealthBadge } from '../script-installer/ScriptHealthBadge';
 import { QuickLaunchMenu } from './QuickLaunchMenu';
+import { betaLabel } from '../../utils/version-label';
 import iconImage from '../../assets/icon.png';
 
 interface AppShellProps {
@@ -63,7 +64,7 @@ export function AppShell({ children }: AppShellProps) {
               className="flex items-center gap-1.5 text-content-tertiary hover:text-content-secondary transition-colors"
               title="About ArduDeck"
             >
-              <span className="text-xs">v{currentVersion}</span>
+              <span className="text-xs">{betaLabel(currentVersion)}</span>
               {(status === 'available' || status === 'downloaded') && (
                 <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
               )}

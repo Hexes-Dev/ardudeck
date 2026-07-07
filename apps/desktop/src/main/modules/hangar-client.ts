@@ -1,5 +1,5 @@
 /**
- * HTTP client for the ArduDeck Marketplace API.
+ * HTTP client for the ArduDeck Hangar API.
  * Handles activation, heartbeat, update checks, and bundle downloads.
  */
 
@@ -19,12 +19,15 @@ import type {
 const DEFAULT_BASE_URL = 'https://ardudeckapi-production.up.railway.app';
 // 127.0.0.1, not localhost: the local API binds IPv4-only (0.0.0.0) and
 // Node's fetch resolves localhost to ::1 first on macOS without falling
-// back, which surfaces as "could not reach the marketplace".
+// back, which surfaces as "could not reach the Hangar".
 const DEV_BASE_URL = 'http://127.0.0.1:3012';
 
 function getBaseUrl(): string {
-  if (process.env['MARKETPLACE_URL']) return process.env['MARKETPLACE_URL'];
-  // In dev, talk to the local marketplace by default instead of production.
+  // HANGAR_URL is the current name; MARKETPLACE_URL stays as a fallback so
+  // existing launch commands keep working.
+  const override = process.env['HANGAR_URL'] ?? process.env['MARKETPLACE_URL'];
+  if (override) return override;
+  // In dev, talk to the local Hangar by default instead of production.
   if (!app.isPackaged) return DEV_BASE_URL;
   return DEFAULT_BASE_URL;
 }
@@ -39,10 +42,10 @@ async function jsonPost<T>(path: string, body: Record<string, unknown>): Promise
       body: JSON.stringify(body),
     });
   } catch {
-    throw new Error(`Could not reach the marketplace at ${getBaseUrl()}. Check your connection and try again.`);
+    throw new Error(`Could not reach the Hangar at ${getBaseUrl()}. Check your connection and try again.`);
   }
   if (!res.ok) {
-    throw new Error(await marketplaceError(res));
+    throw new Error(await hangarError(res));
   }
   return res.json() as Promise<T>;
 }
@@ -50,18 +53,18 @@ async function jsonPost<T>(path: string, body: Record<string, unknown>): Promise
 /**
  * Build a clean error message from a failed response. The API returns JSON
  * errors ({ message }); a non-JSON body (e.g. an HTML gateway/"no such app"
- * page) means the marketplace itself is down or misconfigured, so we never
+ * page) means the Hangar itself is down or misconfigured, so we never
  * surface raw HTML to the UI.
  */
-async function marketplaceError(res: Response): Promise<string> {
+async function hangarError(res: Response): Promise<string> {
   const text = await res.text().catch(() => '');
   try {
     const json = JSON.parse(text);
-    if (json?.message) return `Marketplace error (${res.status}): ${json.message}`;
+    if (json?.message) return `Hangar error (${res.status}): ${json.message}`;
   } catch {
     // body is not JSON — fall through to the generic message
   }
-  return `Marketplace unavailable (${res.status}). The service may be down or MARKETPLACE_URL is misconfigured.`;
+  return `Hangar unavailable (${res.status}). The service may be down or HANGAR_URL is misconfigured.`;
 }
 
 /**
@@ -124,11 +127,11 @@ export async function downloadBundle(
       headers: { 'x-license-key': licenseKey },
     });
   } catch {
-    throw new Error(`Could not reach the marketplace at ${getBaseUrl()}. Check your connection and try again.`);
+    throw new Error(`Could not reach the Hangar at ${getBaseUrl()}. Check your connection and try again.`);
   }
 
   if (!res.ok) {
-    throw new Error(await marketplaceError(res));
+    throw new Error(await hangarError(res));
   }
 
   const hash = res.headers.get('x-bundle-hash') || '';

@@ -389,6 +389,9 @@ interface SettingsStore {
   /** Imported boundary guides shown on the mission map (guide-store owns the shape). */
   mapGuides: Record<string, unknown>[];
   setMapGuides: (guides: Record<string, unknown>[]) => void;
+  /** Last mission-map camera, restored across sessions so the map opens where you work. */
+  missionMapViewport: { lat: number; lng: number; zoom: number } | null;
+  setMissionMapViewport: (v: { lat: number; lng: number; zoom: number }) => void;
 
   // User-saved camera presets (added to the camera dropdown). Built-in cameras
   // live in code (camera-presets.ts); this is the user slice, keyed by name.
@@ -811,6 +814,7 @@ export const useSettingsStore = create<SettingsStore>()(
   lastSurveyPresetId: null as string | null,
   surveySavedConfig: null as Record<string, unknown> | null,
   mapGuides: [] as Record<string, unknown>[],
+  missionMapViewport: null as { lat: number; lng: number; zoom: number } | null,
   saveSurveyPreset: (preset: PersistedSurveyPreset) => {
     set((s) => {
       const others = s.surveyPresets.filter((p) => p.id !== preset.id);
@@ -845,6 +849,9 @@ export const useSettingsStore = create<SettingsStore>()(
   },
   setMapGuides: (guides) => {
     set({ mapGuides: guides });
+  },
+  setMissionMapViewport: (v) => {
+    set({ missionMapViewport: v });
   },
 
   // Computed
@@ -934,6 +941,7 @@ export const useSettingsStore = create<SettingsStore>()(
           lastSurveyPresetId: settings.lastSurveyPresetId ?? null,
           surveySavedConfig: (settings.surveySavedConfig as Record<string, unknown> | undefined) ?? null,
           mapGuides: ((settings as unknown as Record<string, unknown>).mapGuides as Record<string, unknown>[] | undefined) ?? [],
+          missionMapViewport: ((settings as unknown as Record<string, unknown>).missionMapViewport as { lat: number; lng: number; zoom: number } | undefined) ?? null,
           userCameraPresets: ((settings as unknown as Record<string, unknown>).userCameraPresets as CameraPreset[] | undefined) ?? [],
           _isInitialized: true,
         });
@@ -980,6 +988,8 @@ export const useSettingsStore = create<SettingsStore>()(
         ...(state.surveySavedConfig ? { surveySavedConfig: state.surveySavedConfig } : {}),
         userCameraPresets: state.userCameraPresets,
         mapGuides: state.mapGuides,
+    missionMapViewport: state.missionMapViewport,
+        ...(state.missionMapViewport ? { missionMapViewport: state.missionMapViewport } : {}),
       };
       await window.electronAPI?.saveSettings(payload);
     } catch (error) {

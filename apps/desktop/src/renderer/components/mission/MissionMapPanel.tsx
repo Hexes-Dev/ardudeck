@@ -31,6 +31,7 @@ import { SurveyMapOverlay } from '../survey/SurveyMapOverlay';
 import { SurveyStartButton } from '../survey/SurveyStartButton';
 import { PersistentSurveyOverlay } from '../survey/PersistentSurveyOverlay';
 import { GuidesOverlay } from './GuidesOverlay';
+import { PlanReplayOverlay } from './PlanReplayOverlay';
 import { useSurveyStore } from '../../stores/survey-store';
 import { isSurveyGroup } from '../../../shared/mission-group-types';
 
@@ -212,6 +213,8 @@ function buildSegmentedPath(allItems: MissionItem[], groupColorOf?: (groupId: st
 
 // Shared map layer definitions (centralized)
 import { MAP_LAYERS, type LayerKey, type MapLayer } from '../../../shared/map-layers';
+import { MapSearchControl } from '../map/MapSearchControl';
+import { EnginePlanLegend } from '../survey/EnginePlanLegend';
 
 // Default center fallback (London) - will be overridden by IP geolocation
 const FALLBACK_CENTER: [number, number] = [51.505, -0.09];
@@ -622,6 +625,29 @@ function FocusController({ waypoints }: { waypoints: MissionItem[] }) {
   return null;
 }
 
+// IP geolocation resolves after mount; recenter once when it arrives, but
+// only if the map is still sitting on the untouched London fallback (a user
+// pan or a GPS fix means somebody better already decided the view).
+function CenterOnIpOnce({ location, enabled }: { location: { lat: number; lon: number } | null; enabled: boolean }) {
+  const map = useMap();
+  const doneRef = useRef(false);
+
+  useEffect(() => {
+    if (!enabled || doneRef.current || !location) return;
+    const c = map.getCenter();
+    const stillOnFallback =
+      Math.abs(c.lat - FALLBACK_CENTER[0]) < 0.01 && Math.abs(c.lng - FALLBACK_CENTER[1]) < 0.01;
+    if (!stillOnFallback) {
+      doneRef.current = true;
+      return;
+    }
+    doneRef.current = true;
+    map.setView([location.lat, location.lon], map.getZoom(), { animate: true });
+  }, [enabled, location, map]);
+
+  return null;
+}
+
 // Center map on vehicle GPS position once when it becomes available
 // Uses interval polling to avoid React re-renders that break marker drag
 function CenterOnGps() {
@@ -691,6 +717,8 @@ function ViewportSync() {
         pitch: 0,
         bearing: 0,
       });
+      // Cross-session memory: next launch opens here instead of the fallback.
+      useSettingsStore.getState().setMissionMapViewport({ lat: c.lat, lng: c.lng, zoom });
       // Report to main so the Area Editor opens on the same location.
       window.electronAPI?.reportMapViewport?.({ lat: c.lat, lng: c.lng, zoom });
     };
@@ -924,14 +952,22 @@ function MissionMapPanel2D({ readOnly = false }: MissionMapPanelProps) {
 
   // Restore viewport from previous panel (read once on mount, not reactive)
   const storedViewport = useMemo(() => useEditModeStore.getState().mapViewport, []);
+  // Cross-session memory (settings). Session viewport wins when both exist.
+  const persistedViewport = useMemo(() => useSettingsStore.getState().missionMapViewport, []);
 
-  // Dynamic default center - stored viewport > IP location > fallback
+  // Dynamic default center - session viewport > persisted viewport > IP > fallback
   const defaultCenter: [number, number] = storedViewport
     ? [storedViewport.center[1]!, storedViewport.center[0]!] // [lat, lng] for Leaflet
-    : ipLocation
-      ? [ipLocation.lat, ipLocation.lon]
-      : FALLBACK_CENTER;
-  const effectiveZoom = storedViewport?.zoom ?? defaultZoom;
+    : persistedViewport
+      ? [persistedViewport.lat, persistedViewport.lng]
+      : ipLocation
+        ? [ipLocation.lat, ipLocation.lon]
+        : FALLBACK_CENTER;
+  const effectiveZoom = storedViewport?.zoom ?? persistedViewport?.zoom ?? defaultZoom;
+  // IP geolocation resolves async, usually AFTER the map mounts - and Leaflet
+  // only reads `center` at mount, which is how "always opens on London"
+  // happened. When we mounted on the bare fallback, fly to the IP fix once.
+  const mountedOnFallback = !storedViewport && !persistedViewport;
 
   const {
     missionItems,
@@ -1272,6 +1308,9 @@ function MissionMapPanel2D({ readOnly = false }: MissionMapPanelProps) {
         <FocusOnSelected waypoints={waypoints} selectedSeq={selectedSeq} />
         <FocusController waypoints={waypoints} />
         <CenterOnGps />
+        <CenterOnIpOnce location={ipLocation} enabled={mountedOnFallback} />
+        <MapSearchControl />
+        <EnginePlanLegend />
         <CenterOnVehicle trigger={centerOnVehicleTrigger} />
 
         <TileLayer
@@ -1465,6 +1504,7 @@ function MissionMapPanel2D({ readOnly = false }: MissionMapPanelProps) {
             overlay below is conditional on the survey panel being active. */}
         <PersistentSurveyOverlay />
         <GuidesOverlay />
+        <PlanReplayOverlay />
 
         {/* Survey grid overlay */}
         {surveyIsActive && (

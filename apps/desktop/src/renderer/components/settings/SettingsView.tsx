@@ -7,6 +7,7 @@ import { useNavigationStore } from '../../stores/navigation-store';
 import { useTelemetryStore } from '../../stores/telemetry-store';
 import { useConnectionStore } from '../../stores/connection-store';
 import { useUpdateStore } from '../../stores/update-store';
+import { betaLabel } from '../../utils/version-label';
 import { ScriptInstallModal } from '../script-installer/ScriptInstallModal';
 import { VehicleTemplatePicker } from './vehicle-profile/VehicleTemplatePicker';
 import { ApplyProfileButton } from './vehicle-profile/ApplyProfileButton';
@@ -2143,7 +2144,7 @@ function AboutSection() {
           <div>
             <h3 className="text-lg font-semibold text-content">ArduDeck</h3>
             <p className="text-sm text-content-secondary mt-0.5">
-              v{currentVersion || '...'}
+              {currentVersion ? betaLabel(currentVersion) : '...'}
             </p>
           </div>
 

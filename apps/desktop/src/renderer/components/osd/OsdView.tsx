@@ -14,7 +14,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { MonitorPlay, Cpu, Radio, type LucideIcon } from 'lucide-react';
 import { OsdVideoBackdrop } from './OsdVideoBackdrop';
-import { useOsdStore, BUNDLED_FONT_NAMES, type OsdElementId, type OsdDataSource } from '../../stores/osd-store';
+import { useOsdStore, BUNDLED_FONT_NAMES, type OsdElementKey, type OsdElementPosition, type OsdDataSource } from '../../stores/osd-store';
 import { useTelemetryStore } from '../../stores/telemetry-store';
 import { useConnectionStore } from '../../stores/connection-store';
 import { OsdCanvas } from './OsdCanvas';
@@ -139,7 +139,7 @@ export function OsdView() {
     target,
   } = useOsdStore();
 
-  const [selectedElement, setSelectedElement] = useState<OsdElementId | null>(null);
+  const [selectedElement, setSelectedElement] = useState<OsdElementKey | null>(null);
   const [showLabels, setShowLabels] = useState(false);
   const [osdKind, setOsdKind] = useState<OsdKind>('hud');
   const [leftW, setLeftW] = useState(() => loadRailWidth('ardudeck.osd.leftW', 224));
@@ -148,7 +148,9 @@ export function OsdView() {
   useEffect(() => { try { localStorage.setItem('ardudeck.osd.rightW', String(rightW)); } catch { /* ignore */ } }, [rightW]);
   const hudConfig = useHudStore((s) => s.config);
   const setHudPosition = useHudStore((s) => s.setPosition);
-  const liveLink = useLinkHistory(osdKind === 'hud' && dataSource === 'live' && hudConfig.widgets.linkGraph);
+  const hudDesignGround = useHudStore((s) => s.designGround);
+  const hudDesignWidgets = hudDesignGround ? hudConfig.widgetsGround : hudConfig.widgets;
+  const liveLink = useLinkHistory(osdKind === 'hud' && dataSource === 'live' && hudDesignWidgets.linkGraph);
 
   const connectionState = useConnectionStore((s) => s.connectionState);
 
@@ -353,7 +355,7 @@ export function OsdView() {
               >
                 <OsdVideoBackdrop backgroundColor={backgroundColor} className="absolute inset-0" />
                 <div className="absolute inset-0 z-10">
-                  <FighterHud v={hudValues} config={hudConfig} editable onMovePosition={(id, x, y) => setHudPosition(id, { x, y })} />
+                  <FighterHud v={hudValues} config={hudConfig} profile={hudDesignGround ? 'ground' : 'air'} editable onMovePosition={(id, x, y) => setHudPosition(id, { x, y })} />
                 </div>
                 <div className="absolute -top-px right-1 -translate-y-full text-[10px] text-content-tertiary font-mono pb-1">
                   HUD · drag the dashed widgets
@@ -380,7 +382,7 @@ export function OsdView() {
                   <OsdCanvas scale={effectiveScale} transparent />
                 </div>
                 <div className="absolute inset-0 z-20">
-                  {(Object.entries(elementPositions) as [OsdElementId, typeof elementPositions[OsdElementId]][]).map(
+                  {(Object.entries(elementPositions) as [OsdElementKey, OsdElementPosition][]).map(
                     ([id, pos]) => (
                       <OsdElementOverlay
                         key={id}

@@ -256,7 +256,7 @@ function EmptyState() {
       <h3 className="text-lg font-medium text-content mb-2">No modules installed</h3>
       <p className="text-sm text-content-secondary max-w-sm leading-relaxed">
         Enter a license key above to activate and download your modules.
-        License keys are provided when you purchase modules from the ArduDeck marketplace.
+        License keys are provided when you purchase modules from the ArduDeck Hangar.
       </p>
     </div>
   );

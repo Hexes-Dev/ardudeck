@@ -5,12 +5,13 @@
  * Shows position editor with alignment buttons and nudge controls.
  */
 
-import { useOsdStore, DEFAULT_ELEMENT_POSITIONS, type OsdElementId } from '../../stores/osd-store';
+import { useOsdStore, DEFAULT_ELEMENT_POSITIONS, type OsdElementId, type OsdElementKey } from '../../stores/osd-store';
 import { getElementSize } from '../../utils/osd/element-sizes';
+import { getModuleOsdElement } from '../../modules/module-osd-registry';
 import { getOsdRows, getOsdCols } from '../../utils/osd/font-renderer';
 
 interface Props {
-  selectedElement: OsdElementId | null;
+  selectedElement: OsdElementKey | null;
   onDone?: () => void;
 }
 
@@ -33,8 +34,23 @@ export function OsdEditPanel({ selectedElement, onDone }: Props) {
   }
 
   const pos = elementPositions[selectedElement];
+  if (!pos) {
+    return (
+      <div className="flex-1 flex items-center justify-center p-4">
+        <p className="text-xs text-content-secondary text-center">
+          Select an element to edit its position.
+        </p>
+      </div>
+    );
+  }
+  // Module elements render ground-side, so the ArduPilot FC support gate never
+  // applies to them.
+  const isModule = getModuleOsdElement(selectedElement) != null;
   const unsupported =
-    target === 'ardupilot' && supportedElements != null && !supportedElements.has(selectedElement);
+    !isModule &&
+    target === 'ardupilot' &&
+    supportedElements != null &&
+    !supportedElements.has(selectedElement as OsdElementId);
   const size = getElementSize(selectedElement);
   const rows = getOsdRows(videoType);
   const cols = getOsdCols(videoType);
@@ -55,7 +71,9 @@ export function OsdEditPanel({ selectedElement, onDone }: Props) {
   const centerV = () => setPos(pos.x, Math.round((rows - size.height) / 2));
 
   const handleReset = () => {
-    const def = DEFAULT_ELEMENT_POSITIONS[selectedElement];
+    const def =
+      DEFAULT_ELEMENT_POSITIONS[selectedElement as OsdElementId] ??
+      getModuleOsdElement(selectedElement)?.defaultPosition;
     if (def) setElementPosition(selectedElement, { x: def.x, y: def.y });
   };
 

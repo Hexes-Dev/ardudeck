@@ -103,3 +103,29 @@ describe('formatReadout - values and units', () => {
     expect(empty).toContain('--');
   });
 });
+
+describe('formatReadout - ground vehicle readouts', () => {
+  it('steer shows side and magnitude, CTR when centred', () => {
+    expect(formatReadout('steer', { ...V, steer: -42 }, metric).value).toBe('L 42%');
+    expect(formatReadout('steer', { ...V, steer: 17.4 }, metric).value).toBe('R 17%');
+    expect(formatReadout('steer', { ...V, steer: 0.3 }, metric).value).toBe('CTR');
+    expect(formatReadout('steer', V, metric).value).toBe('--');
+  });
+
+  it('tilt shows roll and pitch degrees', () => {
+    expect(formatReadout('tilt', { ...V, roll: -11.6, pitch: 4.2 }, metric).value).toBe('R-12° P4°');
+    expect(formatReadout('tilt', V, metric).value).toBe('--');
+  });
+
+  it('waypoint distance follows the distance unit', () => {
+    expect(formatReadout('wpDist', { ...V, wpDistance: 250 }, metric).value).toBe('250 m');
+    expect(formatReadout('wpDist', { ...V, wpDistance: 100 }, imperial).value).toBe('328 ft');
+    expect(formatReadout('wpDist', V, metric).value).toBe('--');
+  });
+
+  it('crosstrack shows side and fine resolution under 10 units', () => {
+    expect(formatReadout('xtrack', { ...V, xtrackError: 2.34 }, metric).value).toBe('R 2.3 m');
+    expect(formatReadout('xtrack', { ...V, xtrackError: -31.7 }, metric).value).toBe('L 32 m');
+    expect(formatReadout('xtrack', V, metric).value).toBe('--');
+  });
+});

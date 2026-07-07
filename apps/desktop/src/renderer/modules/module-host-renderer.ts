@@ -1,16 +1,51 @@
 import type { ComponentType } from 'react';
-import type { RendererHostApi } from '@ardudeck/module-sdk';
+import type { RendererHostApi, MountPointName, HudProjection } from '@ardudeck/module-sdk';
 import { useTelemetryStore } from '../stores/telemetry-store';
 import { useConnectionStore } from '../stores/connection-store';
 import { useNavigationStore } from '../stores/navigation-store';
 import { useParameterStore } from '../stores/parameter-store';
+import { useMissionStore } from '../stores/mission-store';
+import { useCommandTargetStore, SELF_VEHICLE_ID } from '../stores/command-target-store';
+import { useHudStore } from '../stores/hud-store';
+import { useHudOverlayStore } from '../stores/hud-overlay-store';
+import { HUD_COLORS } from '../components/camera/hud/hud-config';
+import {
+  HUD_VIEWBOX_W,
+  HUD_VIEWBOX_H,
+  HUD_CENTER_X,
+  HUD_CENTER_Y,
+  HUD_PX_PER_DEG,
+} from '../components/camera/hud/hud-projection';
+import {
+  registerModuleOsdElement,
+  unregisterModuleOsdElement,
+} from './module-osd-registry';
+import {
+  registerModulePanel,
+  unregisterModulePanel,
+} from './module-panel-registry';
 import {
   registerSurveyGenerator,
   unregisterSurveyGenerator,
   type SurveyGeneratorRegistration,
 } from '../components/survey/generator-registry';
 
-type RegisterFn = (slug: string, name: 'floatingOverlay', component: ComponentType) => void;
+type RegisterFn = (slug: string, name: MountPointName, component: ComponentType) => void;
+
+function currentHudProjection(): HudProjection | null {
+  if (!useHudOverlayStore.getState().active) return null;
+  const config = useHudStore.getState().config;
+  return {
+    viewBoxW: HUD_VIEWBOX_W,
+    viewBoxH: HUD_VIEWBOX_H,
+    centerX: HUD_CENTER_X,
+    centerY: HUD_CENTER_Y,
+    pxPerDeg: HUD_PX_PER_DEG,
+    scale: config.scale,
+    color: HUD_COLORS[config.color],
+    lineWeight: config.lineWeight,
+  };
+}
 
 // Which generator ids each module registered, so a module can only remove its
 // own and a future module-unload path can sweep them all.
@@ -82,6 +117,44 @@ export function createRendererHostApi(
     },
 
     invoke: (channel, data) => window.electronAPI.moduleHostInvoke(slug, channel, data),
+
+    hud: {
+      getProjection: () => currentHudProjection(),
+      subscribe: (listener) => {
+        const notify = () => listener(currentHudProjection());
+        const unActive = useHudOverlayStore.subscribe(notify);
+        // Scale / colour / line-weight live in the HUD config store.
+        const unConfig = useHudStore.subscribe(notify);
+        return () => {
+          unActive();
+          unConfig();
+        };
+      },
+    },
+
+    osd: {
+      registerElement: (reg) => registerModuleOsdElement(slug, reg),
+      unregisterElement: (id) => unregisterModuleOsdElement(slug, id),
+    },
+
+    panels: {
+      register: (reg) => registerModulePanel(slug, reg),
+      unregister: (id) => unregisterModulePanel(slug, id),
+    },
+
+    mission: {
+      getWaypoints: () => useMissionStore.getState().missionItems as unknown[],
+      subscribe: (listener) =>
+        useMissionStore.subscribe((s) => listener(s.missionItems as unknown[])),
+    },
+
+    commandTarget: {
+      get: () => useCommandTargetStore.getState().targets[SELF_VEHICLE_ID] ?? null,
+      subscribe: (listener) =>
+        useCommandTargetStore.subscribe((s) =>
+          listener(s.targets[SELF_VEHICLE_ID] ?? null),
+        ),
+    },
 
     survey: {
       registerGenerator: (reg) => {

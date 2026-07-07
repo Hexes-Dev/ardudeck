@@ -187,11 +187,12 @@ export class MAVLinkParser {
         return;
       }
 
-      // Extract packet bytes (need a copy for parsePacket)
+      // Extract packet bytes (need a copy for parsePacket). Do NOT consume
+      // from the buffer yet: if validation fails, this "packet" was likely a
+      // false start byte inside another frame, and consuming its claimed
+      // length would swallow the real packets that follow. Validate first,
+      // then consume packetLength on success or a single byte on failure.
       const packetBytes = this.buffer.slice(0, packetLength);
-      // BSOD FIX: Shift remaining data in-place instead of reallocating
-      this.buffer.copyWithin(0, packetLength, this.bufferLength);
-      this.bufferLength -= packetLength;
 
       // Parse packet structure
       const packet = parsePacket(packetBytes);
@@ -204,15 +205,16 @@ export class MAVLinkParser {
         // This allows handling of unknown messages
         this.stats.packetsReceived++;
         this.packetQueue.push(packet);
+        this.consume(packetLength);
         continue;
       }
 
-      // Validate payload length
-      if (
-        packet.payloadLength < msgInfo.minLength ||
-        packet.payloadLength > msgInfo.maxLength
-      ) {
+      // Validate payload length. Only the upper bound is enforced: MAVLink v2
+      // trims trailing zero payload bytes, so valid frames may be shorter
+      // than the nominal message length. The CRC is the authoritative check.
+      if (packet.payloadLength > msgInfo.maxLength) {
         this.stats.badLength++;
+        this.consume(1);
         continue;
       }
 
@@ -229,12 +231,20 @@ export class MAVLinkParser {
 
       if (packet.crc16 !== expectedCrc) {
         this.stats.badCRC++;
+        this.consume(1);
         continue;
       }
 
       this.stats.packetsReceived++;
       this.packetQueue.push(packet);
+      this.consume(packetLength);
     }
+  }
+
+  /** Drop the first n bytes of the buffer (in-place shift, no reallocation). */
+  private consume(n: number): void {
+    this.buffer.copyWithin(0, n, this.bufferLength);
+    this.bufferLength -= n;
   }
 }
 

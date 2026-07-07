@@ -110,7 +110,7 @@ const navItems: NavItem[] = [
       </svg>
     ),
   },
-  // Modules: dev-only for now (marketplace still in private beta)
+  // Modules: dev-only for now (Hangar still in private beta)
   ...(import.meta.env.DEV
     ? [
         {

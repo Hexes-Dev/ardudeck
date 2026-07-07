@@ -19,12 +19,13 @@ export type CameraSourceKind =
   | 'rtp-udp'
   | 'srt'
   | 'rubyfpv'
+  | 'wfbng'
   | 'webrtc'
   | 'mavlink'
   | 'uvc';
 
 /** Kinds the main-process media engine must normalize (everything but uvc). */
-export const ENGINE_SOURCE_KINDS: CameraSourceKind[] = ['rtsp', 'rtp-udp', 'srt', 'rubyfpv', 'webrtc', 'mavlink'];
+export const ENGINE_SOURCE_KINDS: CameraSourceKind[] = ['rtsp', 'rtp-udp', 'srt', 'rubyfpv', 'wfbng', 'webrtc', 'mavlink'];
 
 export interface CameraSourceConfig {
   /** Stable uuid. */
@@ -49,8 +50,34 @@ export interface CameraSourceConfig {
    * or 'tcp' for reliability through firewalls / lossy links.
    */
   rtspTransport?: 'automatic' | 'tcp' | 'udp';
+  /**
+   * wfbng sources: codec the ground station forwards (WiFiLink 2 defaults to
+   * H.265) and whether to transcode to H.264 for WebRTC playback. Transcode
+   * defaults to on for H.265 - Electron's WebRTC cannot decode H.265.
+   */
+  wfbCodec?: 'h265' | 'h264';
+  wfbTranscode?: boolean;
+  /**
+   * 'dongle' (default): ArduDeck drives the plugged-in RTL8812AU receiver
+   * dongle itself. 'network': a separate ground station forwards the video
+   * to the udp url.
+   */
+  wfbMode?: 'dongle' | 'network';
   /** Provenance, when created from a preset (e.g. 'siyi-a8'). */
   preset?: string;
+}
+
+/** wfb-ng dongle receiver state, rendered as plain-language chips in the UI. */
+export interface WfbngStatus {
+  /** Detected RTL8812AU-family adapter name, or null when not plugged in. */
+  dongleName: string | null;
+  receiverInstalled: boolean;
+  gsKeyImported: boolean;
+  running: boolean;
+  channel: number;
+  bandwidth: 20 | 40;
+  /** Live counters while running (parsed from the receiver's stats lines). */
+  stats: { wifi: number; wfb: number; rtp: number } | null;
 }
 
 /** A built-in source preset (SIYI, Herelink, RunCam, RubyFPV, …). */

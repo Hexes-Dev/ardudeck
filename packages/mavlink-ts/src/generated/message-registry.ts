@@ -361,7 +361,7 @@ export const MESSAGE_REGISTRY: Map<number, MessageInfo> = new Map([
   [0, {
     msgid: 0,
     name: 'HEARTBEAT',
-    crcExtra: 239,
+    crcExtra: 50,
     minLength: 9,
     maxLength: 9,
     serialize: serializeHeartbeat as (msg: unknown) => Uint8Array,
@@ -577,7 +577,7 @@ export const MESSAGE_REGISTRY: Map<number, MessageInfo> = new Map([
   [36, {
     msgid: 36,
     name: 'SERVO_OUTPUT_RAW',
-    crcExtra: 175,
+    crcExtra: 222,
     minLength: 37,
     maxLength: 37,
     serialize: serializeServoOutputRaw as (msg: unknown) => Uint8Array,
@@ -820,7 +820,7 @@ export const MESSAGE_REGISTRY: Map<number, MessageInfo> = new Map([
   [70, {
     msgid: 70,
     name: 'RC_CHANNELS_OVERRIDE',
-    crcExtra: 140,
+    crcExtra: 124,
     minLength: 38,
     maxLength: 38,
     serialize: serializeRcChannelsOverride as (msg: unknown) => Uint8Array,
@@ -865,7 +865,7 @@ export const MESSAGE_REGISTRY: Map<number, MessageInfo> = new Map([
   [77, {
     msgid: 77,
     name: 'COMMAND_ACK',
-    crcExtra: 205,
+    crcExtra: 143,
     minLength: 3,
     maxLength: 10,
     serialize: serializeCommandAck as (msg: unknown) => Uint8Array,

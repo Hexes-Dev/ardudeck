@@ -8,10 +8,13 @@
  * avoid double-drawing; grid tiles get the lightweight CameraOsd only.
  */
 
+import { useEffect } from 'react';
 import type { OsdLayers } from '../../../shared/camera-types';
 import type { FleetVehicle } from '../../hooks/useFleet';
 import { CameraOsd } from './CameraOsd';
 import { LiveFighterHud } from './hud/LiveFighterHud';
+import { MountPoint } from '../../modules/MountPoint';
+import { useHudOverlayStore } from '../../stores/hud-overlay-store';
 
 interface CameraOverlaysProps {
   vehicle: FleetVehicle | null;
@@ -25,9 +28,22 @@ interface CameraOverlaysProps {
 
 export function CameraOverlays({ vehicle, isPrimary, osd, attitude = null, frameCenter = null }: CameraOverlaysProps) {
   const hudActive = isPrimary && osd.hud;
+  const setHudOverlayActive = useHudOverlayStore((s) => s.setActive);
+
+  // Tell the module host API when a HUD-aligned reticle should draw. Only the
+  // primary vehicle's HUD defines the projection, so gate on hudActive.
+  useEffect(() => {
+    if (!isPrimary) return;
+    setHudOverlayActive(hudActive);
+    return () => setHudOverlayActive(false);
+  }, [isPrimary, hudActive, setHudOverlayActive]);
+
   return (
     <>
       {hudActive && <LiveFighterHud />}
+      {/* Module-contributed camera/HUD overlays (e.g. a CCRP reticle). Drawn on
+          the same viewport as the fighter HUD; modules self-gate via host.hud. */}
+      {isPrimary && <MountPoint name="cameraOverlay" />}
       <CameraOsd
         layers={
           hudActive

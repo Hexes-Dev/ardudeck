@@ -35,7 +35,7 @@ export interface ModuleProgress {
   percent?: number;
 }
 
-/** API response types (mirror marketplace API) */
+/** API response types (mirror Hangar API) */
 export interface ActivateResponse {
   ok: boolean;
   modules: string[];

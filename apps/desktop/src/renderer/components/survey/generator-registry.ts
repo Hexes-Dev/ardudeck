@@ -2,7 +2,7 @@
  * Survey Generator Registry
  *
  * Pluggable registry for survey pattern generators. Built-in generators
- * (grid, crosshatch, etc.) self-register at module load. Marketplace
+ * (grid, crosshatch, etc.) self-register at module load. Hangar
  * modules (e.g. TOPAS Smart Survey) register from their renderer
  * entrypoint via `registerSurveyGenerator`. The mission file stores
  * `generatorId` on each survey group so a mission referencing a not-yet-

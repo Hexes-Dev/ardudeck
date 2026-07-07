@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import {
   Camera, Clock, Gauge, Crosshair, RotateCw, RotateCcw,
   Repeat, Wrench, Ruler, ArrowUpDown, ChevronRight, MoreHorizontal,
-  RefreshCw, Pencil, Upload, Save,
+  RefreshCw, Pencil, Upload, Save, Play,
   type LucideIcon,
 } from 'lucide-react';
 import { useMissionStore } from '../../stores/mission-store';
@@ -11,6 +11,8 @@ import { useSurveyStore } from '../../stores/survey-store';
 import { type Group, isSurveyGroup, type SurveyGroup, GROUP_COLOR_PALETTE } from '../../../shared/mission-group-types';
 import { isSurveyGroupStale } from '../survey/survey-group-signature';
 import { regenerateSurveyGroup } from '../survey/survey-regen';
+import { hasReplayData } from './plan-replay';
+import { useReplayStore } from '../../stores/replay-store';
 import { distanceLatLng } from '../survey/geo-math';
 import { calculateGSD } from '../survey/survey-stats';
 import { useTelemetryStore } from '../../stores/telemetry-store';
@@ -1001,6 +1003,7 @@ function GroupHeaderRow({
   onSetColor,
   onDelete,
   onRegenerate,
+  onReplay,
   onEdit,
   fleetVehicles,
   assignedVehicleKey,
@@ -1034,6 +1037,9 @@ function GroupHeaderRow({
   onSetColor: (color: string) => void;
   onDelete: () => void;
   onRegenerate?: () => void;
+  /** Animate the coverage-planning pipeline on the map. Survey groups whose
+      generatorResult carries replayable data only. Click again to stop. */
+  onReplay?: () => void;
   /** Re-open the survey panel and load this group's polygon + config back
       into the draft for live editing. Survey groups only. */
   onEdit?: () => void;
@@ -1311,6 +1317,18 @@ function GroupHeaderRow({
           Edit
         </button>
       )}
+      {!readOnly && onReplay && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onReplay();
+          }}
+          className="shrink-0 w-6 h-6 flex items-center justify-center text-sky-300 hover:text-sky-200 hover:bg-sky-500/15 rounded transition-colors"
+          data-tip="Replay the coverage plan"
+        >
+          <Play className="w-3.5 h-3.5" />
+        </button>
+      )}
       {!readOnly && isStaleSurvey && onRegenerate && (
         <button
           onClick={(e) => {
@@ -1579,6 +1597,17 @@ function WaypointListContent({ readOnly = false }: { readOnly?: boolean }) {
     }
     return m;
   }, [missionItems]);
+
+  // Survey groups whose generatorResult can drive the plan-replay animation.
+  // hasReplayData fully validates the opaque blob, so compute once per groups
+  // change instead of per header render.
+  const replayableGroupIds = useMemo(() => {
+    const s = new Set<string>();
+    for (const g of groups) {
+      if (isSurveyGroup(g) && hasReplayData(g.generatorResult)) s.add(g.id);
+    }
+    return s;
+  }, [groups]);
 
   const toggleCollapse = useCallback((parentSeq: number, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -1956,6 +1985,16 @@ function WaypointListContent({ readOnly = false }: { readOnly?: boolean }) {
                     onRegenerate={
                       isSurveyGroup(group)
                         ? () => regenerateSurveyGroup(group.id)
+                        : undefined
+                    }
+                    onReplay={
+                      replayableGroupIds.has(group.id)
+                        ? () => {
+                            // Toggle: replaying this group again stops it.
+                            const rs = useReplayStore.getState();
+                            if (rs.groupId === group.id) rs.stopReplay();
+                            else rs.startReplay(group.id);
+                          }
                         : undefined
                     }
                     onEdit={

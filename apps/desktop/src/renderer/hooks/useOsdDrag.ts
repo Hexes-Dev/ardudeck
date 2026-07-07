@@ -6,17 +6,17 @@
  */
 
 import { useState, useRef, useCallback } from 'react';
-import type { OsdElementId } from '../stores/osd-store';
+import type { OsdElementKey } from '../stores/osd-store';
 
 interface UseOsdDragOptions {
-  elementId: OsdElementId;
+  elementId: OsdElementKey;
   elementWidth: number; // Element width in characters
   elementHeight: number; // Element height in characters
   charWidth: number; // Pixels per character width (12 * scale)
   charHeight: number; // Pixels per character height (18 * scale)
   gridCols: number; // Total columns (30)
   gridRows: number; // Total rows (16 PAL, 13 NTSC)
-  onPositionChange: (id: OsdElementId, x: number, y: number) => void;
+  onPositionChange: (id: OsdElementKey, x: number, y: number) => void;
 }
 
 interface DragState {

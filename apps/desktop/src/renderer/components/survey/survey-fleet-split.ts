@@ -11,10 +11,18 @@
  * Pure and dependency-light so the split logic unit-tests in plain node.
  */
 
-import type { LatLng, SurveyConfig } from './survey-types';
+import type { LatLng, SurveyConfig, SurveyResult } from './survey-types';
 import type { MissionItem } from '../../../shared/mission-types';
 import { getSurveyGenerator, patternToGeneratorId } from './generator-registry';
 import { surveyToMissionItems } from './mission-builder';
+import {
+  extractSplitCells,
+  cellWorkloads,
+  partitionContiguous,
+  assignWaypointsToRuns,
+  sliceWaypointsByRuns,
+  cellGroupHull,
+} from './survey-cell-split';
 
 /** Meters-per-degree helpers (equirectangular, good enough for band sizing). */
 function spanMeters(polygon: LatLng[]): { latSpan: number; lngSpan: number; midLat: number } {
@@ -105,6 +113,13 @@ export interface FleetSurveyOptions {
    * vehicle i flies at baseAltitude + i * altitudeStepM. 0 = same altitude.
    */
   altitudeStepM?: number;
+  /**
+   * The already-generated plan, when available. If its generatorResult
+   * carries decomposition cells (TOPAS-class engines), the split cuts along
+   * whole cells - balanced by track workload, zero overlap, no re-generation
+   * and no extra engine calls. Without cells the geometric band split runs.
+   */
+  plan?: { waypoints: LatLng[]; generatorResult: unknown };
 }
 
 /**
@@ -112,12 +127,70 @@ export interface FleetSurveyOptions {
  * grid for each band. Sequential generation keeps it simple; generators may be
  * async. Vehicles whose band degenerates to a sliver are skipped.
  */
+/**
+ * Cell-aware split: partition the engine's decomposition cells into
+ * contiguous fly-order runs balanced by track length, slice the existing
+ * plan waypoints per run, and build one mission per vehicle.
+ */
+function buildCellFleetSurvey(
+  plan: { waypoints: LatLng[]; generatorResult: unknown },
+  baseConfig: Omit<SurveyConfig, 'polygon'>,
+  vehicleKeys: string[],
+  altitudeStepM: number,
+): FleetSurveyAssignment[] | null {
+  const extracted = extractSplitCells(plan.generatorResult);
+  if (!extracted || extracted.cells.length < 2 || plan.waypoints.length < 4) return null;
+  const { cells, cellOrder } = extracted;
+
+  const ranges = partitionContiguous(cellWorkloads(cells, cellOrder), vehicleKeys.length);
+  const runPerWp = assignWaypointsToRuns(plan.waypoints, cells, cellOrder);
+  const slices = sliceWaypointsByRuns(plan.waypoints, runPerWp, ranges);
+
+  const out: FleetSurveyAssignment[] = [];
+  for (let i = 0; i < ranges.length; i++) {
+    const vehicleKey = vehicleKeys[i];
+    const slice = slices[i];
+    if (!vehicleKey || !slice || slice.length < 2) continue;
+    const altitude = baseConfig.altitude + i * altitudeStepM;
+    const subPolygon = cellGroupHull(cells, cellOrder, ranges[i]!);
+    const config: SurveyConfig = { ...baseConfig, polygon: subPolygon, altitude };
+    // Minimal result shell: the mission builder consumes waypoints + config;
+    // photo/footprint data stays with the parent plan.
+    const result: SurveyResult = {
+      waypoints: slice,
+      photoPositions: [],
+      footprints: [],
+      stats: {
+        gsd: 0, flightDistance: 0, flightTime: 0, photoCount: 0,
+        lineCount: 0, areaCovered: 0, footprintWidth: 0, footprintHeight: 0,
+        lineSpacing: 0, photoSpacing: 0,
+      },
+    };
+    out.push({
+      vehicleKey,
+      subPolygon,
+      missionItems: surveyToMissionItems(result, config),
+      waypointCount: slice.length,
+      areaCovered: 0,
+      altitude,
+    });
+  }
+  return out.length > 0 ? out : null;
+}
+
 export async function buildFleetSurvey(
   polygon: LatLng[],
   baseConfig: Omit<SurveyConfig, 'polygon'>,
   vehicleKeys: string[],
   opts: FleetSurveyOptions = {},
 ): Promise<FleetSurveyAssignment[]> {
+  if (opts.plan) {
+    const byCells = buildCellFleetSurvey(
+      opts.plan, baseConfig, vehicleKeys, opts.altitudeStepM ?? 0,
+    );
+    if (byCells) return byCells;
+  }
+
   const bands = splitPolygonIntoBands(polygon, vehicleKeys.length);
   const step = opts.altitudeStepM ?? 0;
   const out: FleetSurveyAssignment[] = [];

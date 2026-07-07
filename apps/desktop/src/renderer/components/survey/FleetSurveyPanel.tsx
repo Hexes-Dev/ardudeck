@@ -16,6 +16,7 @@ import { buildFleetSurvey } from './survey-fleet-split';
 export function FleetSurveyPanel({ onClose }: { onClose: () => void }) {
   const polygon = useSurveyStore((s) => s.polygon);
   const config = useSurveyStore((s) => s.config);
+  const surveyResult = useSurveyStore((s) => s.result);
   const vehicles = useFleetVehicles();
 
   const building = useFleetSurveyStore((s) => s.building);
@@ -38,7 +39,12 @@ export function FleetSurveyPanel({ onClose }: { onClose: () => void }) {
     if (!polygon || selected.length === 0) return;
     setBuilding(true);
     try {
-      const result = await buildFleetSurvey(polygon, config, selected, { altitudeStepM: altStep });
+      // Pass the generated plan so decomposing engines (TOPAS) split along
+      // their cells instead of geometric bands.
+      const plan = surveyResult
+        ? { waypoints: surveyResult.waypoints, generatorResult: surveyResult.generatorResult }
+        : undefined;
+      const result = await buildFleetSurvey(polygon, config, selected, { altitudeStepM: altStep, plan });
       setAssignments(result);
     } finally {
       setBuilding(false);

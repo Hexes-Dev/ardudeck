@@ -42,10 +42,9 @@ export const CAMERA_PRESETS: CameraPreset[] = [
   },
   {
     id: 'runcam-wifilink',
-    label: 'RunCam WiFiLink',
-    kind: 'rtsp',
-    url: 'rtsp://192.168.1.10:8554/wifilink-01',
-    note: 'OpenIPC-based WiFiLink only. Action cams that record to microSD have no live IP stream.',
+    label: 'RunCam WiFiLink / OpenIPC (wfb-ng)',
+    kind: 'wfbng',
+    url: 'udp://0.0.0.0:5600',
   },
   {
     id: 'rubyfpv',

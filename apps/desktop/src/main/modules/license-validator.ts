@@ -1,6 +1,6 @@
 /**
  * Offline Ed25519 license key + bundle signature verification.
- * Embeds the marketplace public key so no file system dependency is needed.
+ * Embeds the Hangar public key so no file system dependency is needed.
  */
 
 import { verify, createPublicKey, createHash } from 'node:crypto';
@@ -8,9 +8,8 @@ import { readFileSync } from 'node:fs';
 import type { LicensePayload } from '../../shared/module-types.js';
 
 /**
- * Ed25519 public key in SPKI PEM format. This is the PRODUCTION marketplace
- * key (pair of ardudeck-marketplace/keys/private.pem, which signs licenses
- * via the keygen CLI). Rotating it invalidates every issued license.
+ * Ed25519 public key in SPKI PEM format - the production Hangar signing key.
+ * Rotating it invalidates every issued license.
  */
 const PUBLIC_KEY_PEM = `-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEA+JX7ieaqUzi1WMTzPrWb3vAeUJOj8cbmFaYuZT5rnZ0=

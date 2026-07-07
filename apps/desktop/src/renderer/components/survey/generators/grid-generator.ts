@@ -16,7 +16,7 @@
  */
 import type { LatLng, SurveyConfig, SurveyResult } from '../survey-types';
 import { latLngToLocal, localToLatLng, polygonCentroid, rotatePoint, offsetPolygon } from '../geo-math';
-import { clipScanLines, routeScanSegments } from '../polygon-clip';
+import { clipScanLines, routeScanSegments, routeTransitAroundHoles, legEntersRing } from '../polygon-clip';
 import { computeSurveyStats, getEffectiveFootprint, getEffectiveSpacing } from '../survey-stats';
 
 /**
@@ -120,11 +120,15 @@ export function generateGrid(config: SurveyConfig): SurveyResult {
     for (let i = 0; i + 1 < clippedLines.length; i++) {
       const a = clippedLines[i]!;
       const b = clippedLines[i + 1]!;
-      if (a.x2 >= a.x1) {
-        const outer = Math.max(a.x2, b.x1); // turn on the right — extend to the rightmost
-        a.x2 = outer; b.x1 = outer;
-      } else {
-        const outer = Math.min(a.x2, b.x1); // turn on the left — extend to the leftmost
+      const outer = a.x2 >= a.x1
+        ? Math.max(a.x2, b.x1) // turn on the right — extend to the rightmost
+        : Math.min(a.x2, b.x1); // turn on the left — extend to the leftmost
+      // The extension sweeps along each row; if either sweep would cut into a
+      // no-fly hole (hole-split line ends), keep the corner turn instead.
+      const sweepsHole = localHoles.some((h) =>
+        legEntersRing({ x: a.x2, y: a.y }, { x: outer, y: a.y }, h) ||
+        legEntersRing({ x: b.x1, y: b.y }, { x: outer, y: b.y }, h));
+      if (!sweepsHole) {
         a.x2 = outer; b.x1 = outer;
       }
     }
@@ -149,6 +153,16 @@ export function generateGrid(config: SurveyConfig): SurveyResult {
     const startX = line.x1;
     const endX = line.x2;
     const y = line.y;
+
+    // Transit from the previous line's exit: detour around any no-fly hole
+    // the direct hop would cut through (the coverage lines themselves are
+    // already hole-clipped; the connecting legs were not).
+    if (i > 0 && localHoles.length > 0) {
+      const prev = clippedLines[i - 1]!;
+      waypointsLocal.push(
+        ...routeTransitAroundHoles({ x: prev.x2, y: prev.y }, { x: startX, y }, localHoles),
+      );
+    }
 
     // Line start point
     waypointsLocal.push({ x: startX, y });
@@ -213,4 +227,19 @@ function emptyStats(config: SurveyConfig) {
     lineCount: 0, areaCovered: 0, footprintWidth: 0, footprintHeight: 0,
     lineSpacing: 0, photoSpacing: 0,
   };
+}
+
+/**
+ * Detour a lat/lng transit leg around no-fly holes. Used for legs OUTSIDE a
+ * single grid pass (e.g. the crosshatch pass1 -> pass2 junction), projected
+ * into a local frame around `from`. Returns intermediate points only.
+ */
+export function routeTransitLatLng(from: LatLng, to: LatLng, holes: LatLng[][]): LatLng[] {
+  const rings = (holes ?? []).filter((h) => h.length >= 3);
+  if (rings.length === 0) return [];
+  const origin = from;
+  const a = latLngToLocal(origin, from);
+  const b = latLngToLocal(origin, to);
+  const localHoles = rings.map((h) => h.map((v) => latLngToLocal(origin, v)));
+  return routeTransitAroundHoles(a, b, localHoles).map((p) => localToLatLng(origin, p.x, p.y));
 }

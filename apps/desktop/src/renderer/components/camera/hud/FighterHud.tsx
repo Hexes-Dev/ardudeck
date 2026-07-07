@@ -21,6 +21,13 @@ import {
   DEFAULT_POSITIONS,
 } from './hud-config';
 import { HUD_READOUTS, formatReadout } from './hud-readouts';
+import {
+  HUD_VIEWBOX_W,
+  HUD_VIEWBOX_H,
+  HUD_CENTER_X,
+  HUD_CENTER_Y,
+  HUD_PX_PER_DEG,
+} from './hud-projection';
 
 export interface FighterHudValues {
   roll: number;
@@ -53,17 +60,21 @@ export interface FighterHudValues {
   targetBearing?: number;
   targetRange?: number;
   targetLabel?: string;
+  /** Ground-vehicle values: steering output -100..100, autopilot nav solution. */
+  steer?: number;
+  wpDistance?: number;
+  xtrackError?: number;
 }
 
-const VB_W = 1600;
-const VB_H = 900;
-const CX = VB_W / 2;
-const CY = VB_H / 2;
+const VB_W = HUD_VIEWBOX_W;
+const VB_H = HUD_VIEWBOX_H;
+const CX = HUD_CENTER_X;
+const CY = HUD_CENTER_Y;
 const WARN = '#ff5a5a';
 
 const PITCH_HALF_SPAN = 18;
 const PITCH_BAND = 250;
-const PX_PER_DEG = PITCH_BAND / PITCH_HALF_SPAN;
+const PX_PER_DEG = HUD_PX_PER_DEG;
 const HDG_HALF = 45;
 const HDG_BAND = 360;
 const TAPE_BAND = 200;
@@ -72,16 +83,18 @@ const DEG = Math.PI / 180;
 interface HudProps {
   v: FighterHudValues;
   config: HudConfig;
+  /** Instrument arrangement: 'ground' uses config.widgetsGround. Default air. */
+  profile?: 'air' | 'ground';
   editable?: boolean;
   onMovePosition?: (id: string, x: number, y: number) => void;
 }
 
-export const FighterHud = memo(function FighterHud({ v, config, editable, onMovePosition }: HudProps) {
+export const FighterHud = memo(function FighterHud({ v, config, profile = 'air', editable, onMovePosition }: HudProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const C = HUD_COLORS[config.color];
   const lw = config.lineWeight;
   const u = unitProfile(config.units);
-  const w = config.widgets;
+  const w = profile === 'ground' ? config.widgetsGround : config.widgets;
   const pos = (id: string) => config.positions[id] ?? DEFAULT_POSITIONS[id] ?? { x: 0, y: 0 };
 
   const ladder = pitchLadderRungs(v.pitch, PITCH_HALF_SPAN, 5);
@@ -309,6 +322,22 @@ export const FighterHud = memo(function FighterHud({ v, config, editable, onMove
           {w.airspeedTape && <VTape x={300} ticks={spd} value={spdDisp} label={`AS ${u.speedUnit}`} side="left" c={C} lw={lw} />}
           {w.altitudeTape && <VTape x={VB_W - 300} ticks={alt} value={altDisp} label={`ALT ${u.distUnit}`} side="right" c={C} lw={lw} />}
           {w.vsi && <VertSpeed climb={v.vario} c={C} lw={lw} />}
+
+          {/* Big ground-speed box (the rover's primary instrument): km/h in
+              metric because nobody drives in m/s; imperial already reads mph. */}
+          {w.groundSpeed && (() => {
+            const spdVal = config.units === 'imperial' ? u.speed(v.groundspeed) : v.groundspeed * 3.6;
+            const spdUnit = config.units === 'imperial' ? 'mph' : 'km/h';
+            return (
+              <g transform={`translate(${VB_W - 300} ${CY})`}>
+                <rect x={-130} y={-52} width={210} height={104} fill="rgba(0,0,0,0.35)" strokeWidth={2.5 * lw} />
+                <g stroke="none" fill={C}>
+                  <text x={30} y={18} fontSize={64} fontWeight="bold" textAnchor="end">{Math.round(spdVal)}</text>
+                  <text x={42} y={16} fontSize={22} opacity={0.75}>{spdUnit}</text>
+                </g>
+              </g>
+            );
+          })()}
         </g>
 
         {/* movable corner widgets */}

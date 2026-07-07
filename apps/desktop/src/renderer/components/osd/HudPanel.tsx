@@ -9,10 +9,11 @@ import { useState } from 'react';
 import {
   Minus, Rows3, LocateFixed, Crosshair, RotateCw, Compass, Gauge, ArrowUpDown,
   TrendingUp, Activity, Battery, Home, Radio, LayoutGrid, Palette, Bookmark,
-  Trash2, RotateCcw, Target, Bomb, Wind, Layers, SlidersHorizontal, type LucideIcon,
+  Trash2, RotateCcw, Target, Bomb, Wind, Layers, SlidersHorizontal, Car, Plane,
+  type LucideIcon,
 } from 'lucide-react';
 import { useHudStore } from '../../stores/hud-store';
-import { HUD_WIDGETS, HUD_COLORS, type HudColor, type HudWidgetId } from '../camera/hud/hud-config';
+import { HUD_WIDGETS, HUD_COLORS, type HudColor, type HudProfile, type HudWidgetId } from '../camera/hud/hud-config';
 import { HUD_READOUTS, type HudReadoutCategory } from '../camera/hud/hud-readouts';
 
 const READOUT_CATEGORY_ORDER: HudReadoutCategory[] = ['Power', 'Flight', 'Speed', 'Navigation', 'Environment', 'Status'];
@@ -34,6 +35,7 @@ const WIDGET_ICONS: Record<string, LucideIcon> = {
   battery: Battery,
   home: Home,
   linkGraph: Radio,
+  groundSpeed: Gauge,
 };
 
 export function HudPanel() {
@@ -51,8 +53,13 @@ export function HudPanel() {
   const loadPreset = useHudStore((s) => s.loadPreset);
   const deletePreset = useHudStore((s) => s.deletePreset);
 
+  const designGround = useHudStore((s) => s.designGround);
+  const setDesignGround = useHudStore((s) => s.setDesignGround);
+  const setProfile = useHudStore((s) => s.setProfile);
+
   const [presetName, setPresetName] = useState('');
   const presetNames = Object.keys(presets);
+  const activeWidgets = designGround ? config.widgetsGround : config.widgets;
 
   return (
     <div className="flex flex-col h-full overflow-y-auto overflow-x-hidden">
@@ -67,15 +74,49 @@ export function HudPanel() {
         </div>
       </div>
 
+      {/* Vehicle profile: two independent arrangements, one HUD */}
+      <Section title="Vehicle profile" icon={designGround ? Car : Plane}>
+        <div className="px-2 pb-1">
+          <div className="inline-flex w-full items-center rounded-lg border border-subtle overflow-hidden bg-surface">
+            {([['air', 'Aircraft', Plane], ['ground', 'Ground', Car]] as const).map(([key, label, Icon]) => (
+              <button
+                key={key}
+                onClick={() => setDesignGround(key === 'ground')}
+                className={`flex flex-1 items-center justify-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium transition-colors ${
+                  (key === 'ground') === designGround ? 'bg-blue-600/80 text-white' : 'text-content-secondary hover:text-content hover:bg-surface-raised'
+                }`}
+              >
+                <Icon className="h-3.5 w-3.5" />
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <p className="px-2 pb-1 text-[10px] leading-snug text-content-tertiary">
+          You are editing the {designGround ? 'ground vehicle (rover/boat)' : 'aircraft'} arrangement. Each keeps its own instruments.
+        </p>
+        <Row label="Live overlay uses">
+          <select
+            value={config.profile}
+            onChange={(e) => setProfile(e.target.value as HudProfile)}
+            className="bg-surface-input text-content text-[11px] rounded-lg px-2 py-1 border border-subtle focus:border-blue-500 focus:outline-none"
+          >
+            <option value="auto">Auto (match vehicle)</option>
+            <option value="air">Always aircraft</option>
+            <option value="ground">Always ground</option>
+          </select>
+        </Row>
+      </Section>
+
       {/* Instruments */}
       <Section title="Instruments" icon={LayoutGrid}>
         {HUD_WIDGETS.map((wdef) => {
           const Icon = WIDGET_ICONS[wdef.id];
-          const on = config.widgets[wdef.id];
+          const on = activeWidgets[wdef.id];
           return (
             <button
               key={wdef.id}
-              onClick={() => toggleWidget(wdef.id)}
+              onClick={() => toggleWidget(wdef.id, designGround)}
               className={`group flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[11px] transition-colors hover:bg-surface-raised ${on ? 'text-content' : 'text-content-secondary'}`}
             >
               <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${on ? 'bg-blue-500/15 text-blue-400' : 'bg-surface-raised text-content-tertiary'}`}>
@@ -103,11 +144,11 @@ export function HudPanel() {
             <div key={cat} className="mb-1">
               <div className="px-2 pt-1.5 pb-0.5 text-[9px] font-semibold uppercase tracking-wider text-content-tertiary">{cat}</div>
               {items.map((r) => {
-                const on = config.widgets[r.id];
+                const on = activeWidgets[r.id];
                 return (
                   <button
                     key={r.id}
-                    onClick={() => toggleWidget(r.id)}
+                    onClick={() => toggleWidget(r.id, designGround)}
                     className={`group flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[11px] transition-colors hover:bg-surface-raised ${on ? 'text-content' : 'text-content-secondary'}`}
                   >
                     <span className={`flex h-5 min-w-[2.75rem] shrink-0 items-center justify-center rounded px-1.5 font-mono text-[10px] ${on ? 'bg-indigo-500/15 text-indigo-300' : 'bg-surface-raised text-content-tertiary'}`}>
@@ -165,7 +206,7 @@ export function HudPanel() {
       </Section>
 
       {/* Delivery ballistics (CCIP / CCRP) */}
-      {(config.widgets.ccip || config.widgets.ccrp) && (
+      {(activeWidgets.ccip || activeWidgets.ccrp) && (
         <Section title="Delivery" icon={Wind}>
           <Row label={config.payloadTerminalV > 0 ? `Payload Vt ${config.payloadTerminalV.toFixed(0)} m/s` : 'No drag (vacuum)'}>
             <input type="range" min={0} max={120} step={5} value={config.payloadTerminalV}

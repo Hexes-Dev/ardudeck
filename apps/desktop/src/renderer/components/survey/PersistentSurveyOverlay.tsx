@@ -196,7 +196,7 @@ export function PersistentSurveyOverlay() {
             key={`gen-ov-${g.id}-${oi}`}
             positions={points}
             interactive={false}
-            pathOptions={{ ...pathOptions, fillColor: ov.color ?? g.color, fillOpacity: 0.04 }}
+            pathOptions={{ ...pathOptions, fillColor: ov.color ?? g.color, fillOpacity: 0.14 }}
           />
         ) : (
           <Polyline

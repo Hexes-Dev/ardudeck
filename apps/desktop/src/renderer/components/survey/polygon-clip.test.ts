@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { routeScanSegments, type ClippedSegment } from './polygon-clip';
+import { routeScanSegments, type ClippedSegment, routeTransitAroundHoles, legEntersRing } from './polygon-clip';
 
 // Horizontal distance between the exit of one ordered segment and the entry of
 // the next — i.e. the "deadhead" connector the vehicle flies between lines.
@@ -66,5 +66,26 @@ describe('routeScanSegments', () => {
     expect(routeScanSegments([], SPACING)).toEqual([]);
     const one: ClippedSegment[] = [{ x1: 0, x2: 5, y: 0 }];
     expect(routeScanSegments(one, SPACING)).toEqual(one);
+  });
+});
+
+// ── Hole-aware transit routing ───────────────────────────────────────────────
+
+const HOLE = [
+  { x: 40, y: 0 }, { x: 60, y: 0 }, { x: 60, y: 100 }, { x: 40, y: 100 },
+];
+
+describe('routeTransitAroundHoles', () => {
+  it('detects a leg through the slot', () => {
+    expect(legEntersRing({ x: 40, y: 50 }, { x: 60, y: 50 }, HOLE)).toBe(true);
+  });
+  it('routes around a slot crossed mid-height', () => {
+    const detour = routeTransitAroundHoles({ x: 40, y: 90 }, { x: 60, y: 90 }, [HOLE]);
+    expect(detour.length).toBeGreaterThan(0);
+    const path = [{ x: 40, y: 90 }, ...detour, { x: 60, y: 90 }];
+    for (let i = 0; i + 1 < path.length; i++) {
+      expect(legEntersRing(path[i]!, path[i + 1]!, HOLE), `subleg ${i}`).toBe(false);
+    }
+    expect(detour.every((p) => p.y === 100)).toBe(true);
   });
 });

@@ -11,6 +11,7 @@ import {
   type HudWidgetId,
   type HudColor,
   type HudUnits,
+  type HudProfile,
   type Vec2,
   DEFAULT_HUD_CONFIG,
   DEFAULT_POSITIONS,
@@ -44,8 +45,12 @@ const initial = load();
 interface HudStore {
   config: HudConfig;
   presets: Record<string, HudConfig>;
+  /** Which arrangement the designer is editing/previewing (not persisted). */
+  designGround: boolean;
 
-  toggleWidget: (id: HudWidgetId) => void;
+  toggleWidget: (id: HudWidgetId, ground?: boolean) => void;
+  setProfile: (p: HudProfile) => void;
+  setDesignGround: (g: boolean) => void;
   setColor: (c: HudColor) => void;
   setLineWeight: (w: number) => void;
   setGlow: (g: boolean) => void;
@@ -72,11 +77,17 @@ function persist(get: () => HudStore) {
 export const useHudStore = create<HudStore>((set, get) => ({
   config: initial.config,
   presets: initial.presets,
+  designGround: false,
 
-  toggleWidget: (id) => {
-    set((s) => ({ config: { ...s.config, widgets: { ...s.config.widgets, [id]: !s.config.widgets[id] } } }));
+  toggleWidget: (id, ground = false) => {
+    set((s) => {
+      const key = ground ? 'widgetsGround' : 'widgets';
+      return { config: { ...s.config, [key]: { ...s.config[key], [id]: !s.config[key][id] } } };
+    });
     persist(get);
   },
+  setProfile: (profile) => { set((s) => ({ config: { ...s.config, profile } })); persist(get); },
+  setDesignGround: (designGround) => set({ designGround }),
   setColor: (color) => { set((s) => ({ config: { ...s.config, color } })); persist(get); },
   setLineWeight: (lineWeight) => { set((s) => ({ config: { ...s.config, lineWeight } })); persist(get); },
   setGlow: (glow) => { set((s) => ({ config: { ...s.config, glow } })); persist(get); },
