@@ -159,6 +159,9 @@ importers:
       '@vitest/coverage-v8':
         specifier: 2.1.9
         version: 2.1.9(vitest@2.1.9(@types/node@20.19.27))
+      '@xmldom/xmldom':
+        specifier: 0.8.11
+        version: 0.8.11
       autoprefixer:
         specifier: ^10.4.16
         version: 10.4.23(postcss@8.5.6)

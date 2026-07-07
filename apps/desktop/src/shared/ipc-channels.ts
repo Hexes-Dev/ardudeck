@@ -2,6 +2,8 @@
  * IPC Channel definitions for main<->renderer communication
  */
 
+import type { UserUnitPreferences } from './user-units.js';
+
 export const IPC_CHANNELS = {
   // Port management
   COMMS_LIST_PORTS: 'comms:list-ports',
@@ -1157,6 +1159,7 @@ export interface SettingsStoreSchema {
   flightStats: SettingsFlightStats;
   connectionMemory?: SettingsConnectionMemory;
   telemetrySpeed?: TelemetrySpeed;
+  unitPreferences?: UserUnitPreferences;
   experienceLevel?: 'beginner' | 'advanced';
   experienceLevelVersion?: string;
   uiVisibility?: UiVisibilitySettings;
