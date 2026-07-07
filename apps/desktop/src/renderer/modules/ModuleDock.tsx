@@ -102,8 +102,10 @@ export function ModuleDock() {
           /* ignore */
         }
       }
+    } else if (menuOpen) {
+      collapse();
     } else {
-      menuOpen ? collapse() : setMenuOpen(true);
+      setMenuOpen(true);
     }
   };
 
