@@ -3,7 +3,8 @@
  * Handles window management and native integrations
  */
 
-import { app, BrowserWindow, shell } from 'electron';
+import { app, BrowserWindow, dialog, shell } from 'electron';
+import { existsSync, writeFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { setupIpcHandlers, cleanupOnShutdown } from './ipc-handlers.js';
@@ -75,6 +76,41 @@ app.name = 'ardudeck';
 registerTileCacheScheme();
 registerModuleSchemePrivileges();
 
+/**
+ * macOS shows a scary system prompt ("ardudeck wants to access your
+ * confidential information") the first time a build with a new code signature
+ * reads the "ardudeck Safe Storage" keychain entry created by an older,
+ * differently-signed build. That read happens as soon as the first
+ * BrowserWindow's session initialises, so this notice must run BEFORE
+ * createWindow() and before any safeStorage call. Fresh installs create the
+ * entry silently and never see the system prompt, so only warn when a
+ * previous install is detected (settings.json is written on every run).
+ * Shown at most once per machine.
+ */
+function maybeShowKeychainNotice(): void {
+  if (process.platform !== 'darwin' || !app.isPackaged) return;
+  const userData = app.getPath('userData');
+  const marker = join(userData, '.keychain-notice-shown');
+  if (existsSync(marker)) return;
+  const isUpgrade = existsSync(join(userData, 'settings.json'));
+  try {
+    writeFileSync(marker, '1');
+  } catch {
+    /* best effort - worst case the notice shows again next launch */
+  }
+  if (!isUpgrade) return;
+  dialog.showMessageBoxSync({
+    type: 'info',
+    title: 'ArduDeck',
+    message: 'Your keys are protected',
+    detail:
+      'ArduDeck encrypts the sensitive data you enter - AI provider API keys, map service keys and connection tokens - and keeps the encryption key in your macOS keychain, the same vault Safari uses for your passwords.\n\n' +
+      'Because macOS guards that vault, it may ask once whether ArduDeck can access "ardudeck Safe Storage". That is ArduDeck unlocking its own encryption key, nothing else.\n\n' +
+      'Click "Always Allow" and macOS will not ask again. Nothing is read from other apps and nothing ever leaves this computer.',
+    buttons: ['Got it'],
+  });
+}
+
 function createWindow(): BrowserWindow {
   // Get the icon path based on platform
   // In dev: __dirname is out/main/, resources is at ../../resources/
@@ -144,6 +180,10 @@ app.whenReady().then(() => {
   // Setup tile cache protocol handler (must be after app.ready)
   setupTileCacheProtocol();
   setupModuleProtocol();
+
+  // Must run before the first BrowserWindow exists: creating a session is
+  // what triggers the Safe Storage keychain read on macOS.
+  maybeShowKeychainNotice();
 
   const mainWindow = createWindow();
   mainWindowRef = mainWindow;
