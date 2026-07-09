@@ -28,8 +28,6 @@ export const FIXED_WIDGETS = [
   'airspeedTape',
   'altitudeTape',
   'vsi',
-  'ccip',
-  'ccrp',
   'groundSpeed',
 ] as const;
 
@@ -87,8 +85,6 @@ export const HUD_WIDGETS: HudWidgetMeta[] = [
   { id: 'airspeedTape', label: 'Airspeed tape', movable: false },
   { id: 'altitudeTape', label: 'Altitude tape', movable: false },
   { id: 'vsi', label: 'Vertical speed', movable: false },
-  { id: 'ccip', label: 'CCIP impact point', movable: false },
-  { id: 'ccrp', label: 'CCRP release cue', movable: false },
   { id: 'status', label: 'Status (mode/sat/thr)', movable: true },
   { id: 'battery', label: 'Battery', movable: true },
   { id: 'home', label: 'Home arrow + distance', movable: true },
@@ -112,12 +108,6 @@ export interface HudConfig {
   units: HudUnits;
   /** Overall HUD scale, ~0.7 .. 1.3. */
   scale: number;
-  /**
-   * Payload terminal velocity (m/s) for the CCIP/CCRP ballistics. The single
-   * drag parameter; 0 = no drag (vacuum, over-throws). ~25 draggy box,
-   * ~45 compact package, ~80+ dense/streamlined.
-   */
-  payloadTerminalV: number;
   /** Positions (1600x900 viewBox coords) of movable widgets. */
   positions: Record<string, Vec2>;
 }
@@ -146,8 +136,6 @@ export const DEFAULT_GROUND_WIDGETS: Record<HudWidgetId, boolean> = {
   airspeedTape: false,
   altitudeTape: false,
   vsi: false,
-  ccip: false,
-  ccrp: false,
   groundSpeed: true,
   status: true,
   battery: true,
@@ -170,8 +158,6 @@ export const DEFAULT_HUD_CONFIG: HudConfig = {
     airspeedTape: true,
     altitudeTape: true,
     vsi: true,
-    ccip: false,
-    ccrp: false,
     groundSpeed: false,
     status: true,
     battery: true,
@@ -186,7 +172,6 @@ export const DEFAULT_HUD_CONFIG: HudConfig = {
   glow: true,
   units: 'metric',
   scale: 1,
-  payloadTerminalV: 45,
   positions: { ...DEFAULT_POSITIONS },
 };
 

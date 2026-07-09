@@ -277,7 +277,7 @@ const sensorNodes: NodeDefinition[] = [
   {
     type: 'sensor-gpio-read',
     label: 'Read GPIO Pin',
-    description: 'Read the digital level of a GPIO pin (e.g. a camera hotshoe feedback pin). Wire a Pin input to set it from a parameter, or use the Pin property.',
+    description: 'Read the digital level of a GPIO pin. Wire a Pin input to set it from a parameter, or use the Pin property. Polled once per tick: pulses shorter than the run interval are missed — use Pulse Input (interrupt) for those.',
     category: 'sensors',
     inputs: [
       { id: 'pin', label: 'Pin', type: 'number', direction: 'input' },
@@ -290,6 +290,22 @@ const sensorNodes: NodeDefinition[] = [
       { id: 'pin', label: 'Pin (fallback)', type: 'number', defaultValue: 54, min: 0, max: 255 },
     ],
     luaTemplate: 'gpio:read(PIN)',
+  },
+  {
+    type: 'sensor-pwm-pulse',
+    label: 'Pulse Input (interrupt)',
+    description: 'Catch short pulses (e.g. a 1-2 ms camera hotshoe pulse) on a GPIO pin via hardware interrupt. The pulse width is latched between ticks, so slow polling still sees it. The pin needs SERVOx_FUNCTION = -1 and must not be shared with CAM1_FEEDBAK_PIN (whoever attaches first owns the interrupt).',
+    category: 'sensors',
+    inputs: [],
+    outputs: [
+      { id: 'pulse_seen', label: 'Pulse Seen', type: 'boolean', direction: 'output' },
+      { id: 'width_us', label: 'Width (us)', type: 'number', direction: 'output' },
+      { id: 'ok', label: 'Pin OK', type: 'boolean', direction: 'output' },
+    ],
+    properties: [
+      { id: 'pin', label: 'Pin', type: 'number', defaultValue: 54, min: 0, max: 255 },
+    ],
+    luaTemplate: 'PWMSource():get_pwm_us()',
   },
   {
     type: 'sensor-current-waypoint',

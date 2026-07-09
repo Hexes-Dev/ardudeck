@@ -154,14 +154,17 @@ function ModuleCard({
   isUpdating,
   onUpdate,
   onRemove,
+  onToggle,
 }: {
   module: InstalledModule;
   hasUpdate: boolean;
   isUpdating: boolean;
   onUpdate: () => void;
   onRemove: () => void;
+  onToggle: (enabled: boolean) => void;
 }) {
   const [confirmRemove, setConfirmRemove] = useState(false);
+  const isEnabled = module.enabled !== false;
 
   const displayName = module.name
     .split('-')
@@ -169,21 +172,28 @@ function ModuleCard({
     .join(' ');
 
   return (
-    <div className="bg-surface rounded-xl border border-subtle p-4 flex items-start gap-4">
+    <div className="flex items-center gap-3 px-4 py-3">
       {/* Icon */}
-      <div className="w-12 h-12 rounded-lg bg-purple-500/10 border border-purple-500/20 flex items-center justify-center shrink-0">
-        <PackageIcon className="w-6 h-6 text-purple-400" />
+      <div
+        className={`w-10 h-10 rounded-lg flex items-center justify-center shrink-0 transition-colors ${
+          isEnabled
+            ? 'bg-purple-500/10 border border-purple-500/20'
+            : 'bg-surface-raised border border-subtle'
+        }`}
+      >
+        <PackageIcon className={`w-5 h-5 ${isEnabled ? 'text-purple-400' : 'text-content-tertiary'}`} />
       </div>
 
       {/* Info */}
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2 mb-1">
+      <div className={`flex-1 min-w-0 ${isEnabled ? '' : 'opacity-60'}`}>
+        <div className="flex items-center gap-2">
           <h3 className="text-sm font-medium text-content truncate">{displayName}</h3>
+          <span className="text-xs text-content-tertiary shrink-0">v{module.version}</span>
           {hasUpdate && (
             <button
               onClick={onUpdate}
               disabled={isUpdating}
-              className={`flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded-full border transition-colors ${
+              className={`flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded-full border transition-colors shrink-0 ${
                 isUpdating
                   ? 'bg-blue-500/10 text-blue-400/60 border-blue-500/20 cursor-wait'
                   : 'bg-blue-500/10 text-blue-400 border-blue-500/20 hover:bg-blue-500/20 hover:text-blue-300'
@@ -199,20 +209,31 @@ function ModuleCard({
             </button>
           )}
         </div>
-        <p className="text-xs text-content-secondary font-mono mb-2">{module.slug}</p>
-        <div className="flex items-center gap-3">
-          <span className="text-xs text-content-secondary">v{module.version}</span>
-          <LicenseTypeBadge type={module.licenseType} />
-          {module.bundleName && (
-            <span className="text-xs text-content-secondary">{module.bundleName}</span>
-          )}
-        </div>
+        <p className="text-xs text-content-secondary font-mono mt-0.5 truncate">{module.slug}</p>
       </div>
 
-      {/* Remove */}
-      <div className="shrink-0">
+      {/* License + controls */}
+      <div className={`shrink-0 ${isEnabled ? '' : 'opacity-60'}`}>
+        <LicenseTypeBadge type={module.licenseType} />
+      </div>
+      <div className="shrink-0 flex items-center gap-1 pl-2 border-l border-subtle">
+        <button
+          onClick={() => onToggle(!isEnabled)}
+          role="switch"
+          aria-checked={isEnabled}
+          data-tip={isEnabled ? 'Turn off (stays on board)' : 'Turn on'}
+          className={`relative w-9 h-5 rounded-full transition-colors ${
+            isEnabled ? 'bg-emerald-500' : 'bg-surface-inset border border-subtle'
+          }`}
+        >
+          <span
+            className={`absolute left-0 top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
+              isEnabled ? 'translate-x-[18px]' : 'translate-x-0.5'
+            }`}
+          />
+        </button>
         {confirmRemove ? (
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1 ml-1">
             <button
               onClick={() => {
                 onRemove();
@@ -224,7 +245,7 @@ function ModuleCard({
             </button>
             <button
               onClick={() => setConfirmRemove(false)}
-              className="px-2 py-1 text-xs bg-surface-raised text-content-secondary rounded hover:bg-surface-raised transition-colors"
+              className="px-2 py-1 text-xs bg-surface-raised text-content-secondary rounded transition-colors"
             >
               Cancel
             </button>
@@ -232,8 +253,8 @@ function ModuleCard({
         ) : (
           <button
             onClick={() => setConfirmRemove(true)}
-            className="p-1.5 rounded-lg text-content-secondary hover:text-red-400 hover:bg-red-500/10 transition-colors"
-            title="Remove module"
+            className="p-1.5 ml-1 rounded-lg text-content-tertiary hover:text-red-400 hover:bg-red-500/10 transition-colors"
+            data-tip="Remove cargo"
           >
             <TrashIcon className="w-4 h-4" />
           </button>
@@ -253,10 +274,10 @@ function EmptyState() {
       <div className="w-16 h-16 rounded-2xl bg-surface border border-subtle flex items-center justify-center mb-5">
         <PackageIcon className="w-8 h-8 text-content-tertiary" />
       </div>
-      <h3 className="text-lg font-medium text-content mb-2">No modules installed</h3>
+      <h3 className="text-lg font-medium text-content mb-2">No cargo on board</h3>
       <p className="text-sm text-content-secondary max-w-sm leading-relaxed">
-        Enter a license key above to activate and download your modules.
-        License keys are provided when you purchase modules from the ArduDeck Hangar.
+        Have a cargo key? Enter it above and the rest happens on its own.
+        Keys start finding their way out when the Hangar opens.
       </p>
     </div>
   );
@@ -284,6 +305,7 @@ export function ModuleManagerView() {
     checkUpdates,
     updateModule,
     updateAll,
+    setEnabled,
     setProgress,
     clearError,
   } = useModuleStore();
@@ -342,6 +364,13 @@ export function ModuleManagerView() {
   // Group modules by license key for display
   const updateSlugs = new Set(updates.map((u) => u.slug));
 
+  const handleToggle = async (mod: InstalledModule, enabled: boolean) => {
+    const result = await setEnabled(mod.slug, enabled);
+    // Bundle cargo only loads/unloads at startup; activatable cargo flips its
+    // capability gate reactively and needs no restart.
+    if (result.success && !mod.activatable) setRestartRequired(true);
+  };
+
   const handleUpdate = async (slug: string) => {
     clearError();
     const result = await updateModule(slug);
@@ -364,21 +393,34 @@ export function ModuleManagerView() {
             <PackageIcon className="w-5 h-5 text-purple-400" />
           </div>
           <div>
-            <h1 className="text-xl font-semibold text-content">Module Manager</h1>
-            <p className="text-sm text-content-secondary">Add modules and manage what's installed</p>
+            <h1 className="text-xl font-semibold text-content">Cargo Bay</h1>
+            <p className="text-sm text-content-secondary">Load cargo and manage what's on board</p>
+          </div>
+        </div>
+
+        {/* Hangar preview banner */}
+        <div className="card border-amber-500/30">
+          <div className="card-body flex items-center gap-3 py-3">
+            <span className="shrink-0 rounded-full bg-amber-500/15 px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-amber-500">
+              Coming soon
+            </span>
+            <p className="text-sm text-content-secondary">
+              The Hangar doors open soon. What's being built inside stays under
+              wraps for now. Everything here is experimental and may change
+              between releases.
+            </p>
           </div>
         </div>
 
         {/* Module key input */}
-        <div className="bg-surface rounded-xl border border-subtle p-5">
-          <div className="flex items-center gap-3 mb-4">
-            <div className="w-8 h-8 rounded-lg bg-blue-500/10 flex items-center justify-center">
+        <div className="card">
+          <div className="card-header">
+            <h2 className="text-sm font-medium text-content flex items-center gap-2">
               <KeyIcon className="w-4 h-4 text-blue-400" />
-            </div>
-            <h2 className="text-sm font-medium text-content">Add a module</h2>
+              Load cargo
+            </h2>
           </div>
-
-          <div className="flex gap-2">
+          <div className="card-body flex gap-2">
             <div className="flex-1 relative">
               <input
                 ref={inputRef}
@@ -404,7 +446,7 @@ export function ModuleManagerView() {
             <button
               onClick={handleActivate}
               disabled={!keyInput.trim() || activating}
-              className="px-4 py-2.5 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:hover:bg-blue-600 shrink-0"
+              className="btn btn-primary text-sm shrink-0"
             >
               {activating ? 'Adding…' : 'Add'}
             </button>
@@ -412,7 +454,7 @@ export function ModuleManagerView() {
 
           {/* Error message */}
           {error && (
-            <div className="mt-3 flex items-center gap-2 p-3 bg-red-500/10 border border-red-500/20 rounded-lg">
+            <div className="mx-4 mb-4 flex items-center gap-2 p-3 bg-red-500/10 border border-red-500/20 rounded-lg">
               <AlertIcon className="w-4 h-4 text-red-400 shrink-0" />
               <p className="text-sm text-red-400">{error}</p>
             </div>
@@ -427,36 +469,39 @@ export function ModuleManagerView() {
         {/* Restart-required banner - modules only load at startup, so a freshly
             installed module stays hidden until the app restarts. */}
         {restartRequired && (
-          <div className="flex items-center gap-4 p-4 bg-amber-500/10 border border-amber-500/30 rounded-xl">
-            <AlertIcon className="w-5 h-5 text-amber-400 shrink-0" />
-            <div className="flex-1 min-w-0">
-              <h3 className="text-sm font-medium text-amber-300">Restart required</h3>
-              <p className="text-sm text-content-secondary mt-0.5">
-                Module installed. ArduDeck must restart before it appears.
-              </p>
+          <div className="card border-amber-500/30">
+            <div className="card-body flex items-center gap-4 py-3">
+              <AlertIcon className="w-5 h-5 text-amber-500 shrink-0" />
+              <div className="flex-1 min-w-0">
+                <h3 className="text-sm font-medium text-content">Restart required</h3>
+                <p className="text-sm text-content-secondary mt-0.5">
+                  Cargo changed. ArduDeck must restart for it to take effect.
+                </p>
+              </div>
+              <button
+                onClick={() => window.electronAPI.relaunchApp()}
+                className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-black text-sm font-medium rounded-lg transition-colors shrink-0"
+              >
+                Restart now
+              </button>
+              <button
+                onClick={() => setRestartRequired(false)}
+                className="px-3 py-2 text-sm text-content-secondary hover:text-content transition-colors shrink-0"
+              >
+                Later
+              </button>
             </div>
-            <button
-              onClick={() => window.electronAPI.relaunchApp()}
-              className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-black text-sm font-medium rounded-lg transition-colors shrink-0"
-            >
-              Restart now
-            </button>
-            <button
-              onClick={() => setRestartRequired(false)}
-              className="px-3 py-2 text-sm text-content-secondary hover:text-content transition-colors shrink-0"
-            >
-              Later
-            </button>
           </div>
         )}
 
-        {/* Installed Modules */}
-        <div>
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-sm font-medium text-content">
-              Installed Modules
+        {/* On board */}
+        <div className="card">
+          <div className="card-header flex items-center justify-between">
+            <h2 className="text-sm font-medium text-content flex items-center gap-2">
+              <PackageIcon className="w-4 h-4 text-purple-400" />
+              On board
               {modules.length > 0 && (
-                <span className="ml-2 text-xs text-content-secondary">({modules.length})</span>
+                <span className="text-xs text-content-secondary">({modules.length})</span>
               )}
             </h2>
             {modules.length > 0 && (
@@ -471,10 +516,10 @@ export function ModuleManagerView() {
                 <button
                   onClick={() => checkUpdates()}
                   disabled={checkingUpdates}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-content-secondary hover:text-content bg-surface hover:bg-surface border border-subtle rounded-lg transition-colors disabled:opacity-60"
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-content-secondary hover:text-content bg-surface-raised border border-subtle rounded-lg transition-colors disabled:opacity-60"
                 >
                   <RefreshIcon className={`w-3.5 h-3.5 ${checkingUpdates ? 'animate-spin' : ''}`} />
-                  {checkingUpdates ? 'Checking…' : 'Check Updates'}
+                  {checkingUpdates ? 'Checking…' : 'Check updates'}
                 </button>
               </div>
             )}
@@ -487,7 +532,7 @@ export function ModuleManagerView() {
           ) : modules.length === 0 ? (
             <EmptyState />
           ) : (
-            <div className="space-y-3">
+            <div className="divide-y divide-subtle">
               {modules.map((mod) => (
                 <ModuleCard
                   key={mod.slug}
@@ -496,6 +541,7 @@ export function ModuleManagerView() {
                   isUpdating={updating === mod.slug || updating === 'all'}
                   onUpdate={() => handleUpdate(mod.slug)}
                   onRemove={() => removeLicense(mod.licenseKey)}
+                  onToggle={(enabled) => handleToggle(mod, enabled)}
                 />
               ))}
             </div>
@@ -504,10 +550,10 @@ export function ModuleManagerView() {
 
         {/* Updates available */}
         {updates.length > 0 && (
-          <div className="bg-blue-500/5 rounded-xl border border-blue-500/20 p-5">
-            <div className="flex items-center gap-3 mb-3">
-              <ArrowUpIcon className="w-5 h-5 text-blue-400" />
-              <h3 className="text-sm font-medium text-blue-400">
+          <div className="card border-blue-500/20">
+            <div className="card-header flex items-center gap-3">
+              <h3 className="text-sm font-medium text-content flex items-center gap-2">
+                <ArrowUpIcon className="w-4 h-4 text-blue-400" />
                 {updates.length} update{updates.length > 1 ? 's' : ''} available
               </h3>
               <div className="flex-1" />
@@ -523,7 +569,7 @@ export function ModuleManagerView() {
                 {updating === 'all' ? 'Updating all...' : updates.length > 1 ? 'Update all' : 'Update'}
               </button>
             </div>
-            <div className="space-y-2">
+            <div className="card-body space-y-2">
               {updates.map((u) => (
                 <div key={u.slug} className="flex items-center justify-between gap-3 text-sm">
                   <span className="text-content">{u.name}</span>

@@ -13,7 +13,6 @@
 
 import { memo, useRef } from 'react';
 import { headingTicks, verticalTapeTicks, pitchLadderRungs, wrap180 } from './hud-geometry';
-import { ballisticImpact, depressionDeg } from './hud-ballistics';
 import {
   type HudConfig,
   HUD_COLORS,
@@ -56,10 +55,6 @@ export interface FighterHudValues {
   windSpeed?: number;
   linkHistory?: number[];
   linkLabel?: string;
-  /** CCRP target (designated drop point): bearing from north + horizontal ground range, metres. */
-  targetBearing?: number;
-  targetRange?: number;
-  targetLabel?: string;
   /** Ground-vehicle values: steering output -100..100, autopilot nav solution. */
   steer?: number;
   wpDistance?: number;
@@ -116,35 +111,6 @@ export const FighterHud = memo(function FighterHud({ v, config, profile = 'air',
   }
   const fpmDX = Math.max(-26, Math.min(26, wrap180(course - v.heading))) * PX_PER_DEG;
   const fpmDY = Math.max(-16, Math.min(16, v.pitch - fpa)) * PX_PER_DEG;
-
-  // Payload-delivery reticles (CCIP impact point + CCRP release cue). Vacuum
-  // ballistic; relative altitude is treated as height above the target/ground.
-  const gsHoriz = v.vx != null && v.vy != null ? Math.hypot(v.vx, v.vy) : v.groundspeed;
-  const vDown = v.vz != null ? v.vz : -v.vario;
-  const agl = Math.max(0, v.altitude);
-  const impact = ballisticImpact({ heightAGL: agl, vDown, groundSpeed: gsHoriz, terminalV: config.payloadTerminalV });
-  const deliveryReady = agl > 1;
-  const clampDeg = (d: number) => Math.max(-17, Math.min(17, d));
-  // CCIP pipper: along the velocity ground track, depressed below the horizon.
-  const ccipDepr = depressionDeg(agl, impact.range);
-  const ccipDXp = Math.max(-26, Math.min(26, wrap180(course - v.heading))) * PX_PER_DEG;
-  const ccipDeg = v.pitch + ccipDepr;
-  const ccipDYp = clampDeg(ccipDeg) * PX_PER_DEG;
-  const ccipOff = ccipDeg > 17;
-  // CCRP: designated target diamond + release cue.
-  const hasTarget = v.targetBearing != null && v.targetRange != null;
-  const tgtAz = hasTarget ? Math.max(-26, Math.min(26, wrap180(v.targetBearing! - v.heading))) * PX_PER_DEG : 0;
-  const tgtDepr = hasTarget ? depressionDeg(agl, v.targetRange!) : 0;
-  const tgtDeg = v.pitch + tgtDepr;
-  const tgtDYp = clampDeg(tgtDeg) * PX_PER_DEG;
-  const tgtOff = tgtDeg > 17;
-  const releaseNow = hasTarget && deliveryReady && impact.range >= (v.targetRange ?? 0);
-  const timeToRelease = hasTarget && gsHoriz > 0.5 ? (v.targetRange! - impact.range) / gsHoriz : Infinity;
-  // CCRP solution cue: descends the steering line from the velocity vector to
-  // the target reticle as the ballistic throw closes on the target range.
-  const fpmYpx = CY + fpmDY;
-  const relFrac = hasTarget && (v.targetRange ?? 0) > 0 ? Math.max(0, Math.min(1, impact.range / v.targetRange!)) : 0;
-  const cueY = fpmYpx + relFrac * (CY + tgtDYp - fpmYpx);
 
   // Drag handling for movable widgets (designer only).
   const toViewBox = (clientX: number, clientY: number) => {
@@ -258,62 +224,6 @@ export const FighterHud = memo(function FighterHud({ v, config, profile = 'air',
               <line x1={17} y1={0} x2={45} y2={0} />
               <line x1={-17} y1={0} x2={-45} y2={0} />
               <line x1={0} y1={-17} x2={0} y2={-34} />
-            </g>
-          )}
-
-          {/* CCIP — Projected Bomb Impact Line + bomb reticle (A-10 style). */}
-          {w.ccip && deliveryReady && (
-            <g fill="none">
-              {/* Projected Bomb Impact Line (PBIL): velocity vector -> reticle. */}
-              <line x1={CX + fpmDX} y1={CY + fpmDY} x2={CX + ccipDXp} y2={CY + ccipDYp} strokeWidth={2 * lw} />
-              {/* CCIP bomb reticle: circle + cardinal ticks + centre pipper. */}
-              <g transform={`translate(${CX + ccipDXp} ${CY + ccipDYp})`} strokeWidth={2.5 * lw}>
-                <circle cx={0} cy={0} r={24} />
-                <line x1={0} y1={-24} x2={0} y2={-33} />
-                <line x1={-24} y1={0} x2={-33} y2={0} />
-                <line x1={24} y1={0} x2={33} y2={0} />
-                <circle cx={0} cy={0} r={2.5} fill={C} stroke="none" />
-                {ccipOff && <polygon points="0,42 -8,30 8,30" fill={C} stroke="none" />}
-              </g>
-            </g>
-          )}
-
-          {/* CCRP — Azimuth Steering Line + bomb reticle + descending solution cue. */}
-          {w.ccrp && deliveryReady && hasTarget && (
-            <g fill="none">
-              {/* Azimuth Steering Line (ASL) / projected bomb release line. */}
-              <line x1={CX + tgtAz} y1={CY - PITCH_BAND} x2={CX + tgtAz} y2={CY + tgtDYp} strokeWidth={2 * lw} />
-              {/* CCRP bomb reticle at the designated target. */}
-              <g transform={`translate(${CX + tgtAz} ${CY + tgtDYp})`} strokeWidth={2.5 * lw}>
-                <circle cx={0} cy={0} r={24} />
-                <line x1={-24} y1={0} x2={-33} y2={0} />
-                <line x1={24} y1={0} x2={33} y2={0} />
-                <circle cx={0} cy={0} r={2.5} fill={C} stroke="none" />
-                {tgtOff && <polygon points="0,42 -8,30 8,30" fill={C} stroke="none" />}
-                <text x={38} y={6} fontSize={18} stroke="none" fill={C} opacity={0.85}>{v.targetLabel ?? 'TGT'}</text>
-              </g>
-              {/* Solution cue: rides the ASL down to the reticle at release. */}
-              <circle cx={CX + tgtAz} cy={cueY} r={9} strokeWidth={2.5 * lw} />
-              {/* Release cue. */}
-              <g transform={`translate(${CX + tgtAz} ${CY + tgtDYp - 40})`} stroke="none" textAnchor="middle">
-                {releaseNow ? (
-                  <text x={0} y={0} fontSize={26} fontWeight="bold" fill="#ffb000">
-                    RELEASE
-                    <animate attributeName="opacity" values="1;0.25;1" dur="0.6s" repeatCount="indefinite" />
-                  </text>
-                ) : Number.isFinite(timeToRelease) && timeToRelease > 0 && timeToRelease < 30 ? (
-                  <text x={0} y={0} fontSize={20} fill={C}>REL {timeToRelease.toFixed(1)}s</text>
-                ) : null}
-              </g>
-            </g>
-          )}
-
-          {/* Time-of-fall + mode readout (A-10 lower-left delivery block). */}
-          {(w.ccip || w.ccrp) && deliveryReady && (
-            <g transform={`translate(150 ${CY + 150})`} stroke="none" fill={C}>
-              <rect x={-6} y={-22} width={112} height={30} fill="rgba(0,0,0,0.4)" stroke={C} strokeWidth={1.5 * lw} />
-              <text x={50} y={0} textAnchor="middle" fontSize={22}>TOF {impact.time.toFixed(1)}</text>
-              <text x={50} y={28} textAnchor="middle" fontSize={16} opacity={0.8}>{w.ccrp && hasTarget ? 'CCRP' : 'CCIP'}</text>
             </g>
           )}
 

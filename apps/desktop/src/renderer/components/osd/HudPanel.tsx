@@ -9,7 +9,7 @@ import { useState } from 'react';
 import {
   Minus, Rows3, LocateFixed, Crosshair, RotateCw, Compass, Gauge, ArrowUpDown,
   TrendingUp, Activity, Battery, Home, Radio, LayoutGrid, Palette, Bookmark,
-  Trash2, RotateCcw, Target, Bomb, Wind, Layers, SlidersHorizontal, Car, Plane,
+  Trash2, RotateCcw, Layers, SlidersHorizontal, Car, Plane,
   type LucideIcon,
 } from 'lucide-react';
 import { useHudStore } from '../../stores/hud-store';
@@ -29,8 +29,6 @@ const WIDGET_ICONS: Record<string, LucideIcon> = {
   airspeedTape: Gauge,
   altitudeTape: ArrowUpDown,
   vsi: TrendingUp,
-  ccip: Target,
-  ccrp: Bomb,
   status: Activity,
   battery: Battery,
   home: Home,
@@ -47,7 +45,6 @@ export function HudPanel() {
   const setGlow = useHudStore((s) => s.setGlow);
   const setUnits = useHudStore((s) => s.setUnits);
   const setScale = useHudStore((s) => s.setScale);
-  const setPayloadTerminalV = useHudStore((s) => s.setPayloadTerminalV);
   const resetConfig = useHudStore((s) => s.resetConfig);
   const savePreset = useHudStore((s) => s.savePreset);
   const loadPreset = useHudStore((s) => s.loadPreset);
@@ -204,19 +201,6 @@ export function HudPanel() {
           </div>
         </Row>
       </Section>
-
-      {/* Delivery ballistics (CCIP / CCRP) */}
-      {(activeWidgets.ccip || activeWidgets.ccrp) && (
-        <Section title="Delivery" icon={Wind}>
-          <Row label={config.payloadTerminalV > 0 ? `Payload Vt ${config.payloadTerminalV.toFixed(0)} m/s` : 'No drag (vacuum)'}>
-            <input type="range" min={0} max={120} step={5} value={config.payloadTerminalV}
-              onChange={(e) => setPayloadTerminalV(parseFloat(e.target.value))} className="w-full accent-blue-500" />
-          </Row>
-          <p className="px-2 text-[10px] leading-snug text-content-tertiary">
-            Terminal velocity tunes the CCIP/CCRP throw. Lower = draggier / lighter payload (lands shorter); 0 disables drag.
-          </p>
-        </Section>
-      )}
 
       {/* Presets */}
       <Section title="HUD presets" icon={Bookmark}>

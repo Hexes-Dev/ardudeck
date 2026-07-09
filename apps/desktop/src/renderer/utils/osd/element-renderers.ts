@@ -9,7 +9,6 @@
 import { SYM } from './osd-symbols';
 import { OsdScreenBuffer } from './font-renderer';
 import type { OsdElementId } from './element-registry';
-import type { CcrpResult } from '../../utils/ccrp-calculator';
 import { getModuleOsdElement } from '../../modules/module-osd-registry';
 import type { OsdCharBuffer } from '@ardudeck/module-sdk';
 
@@ -33,8 +32,6 @@ export interface DemoTelemetry {
   distance: number;
   latitude: number;
   longitude: number;
-  targetLat: number;
-  targetLon: number;
   // New fields
   airspeed: number;
   vario: number;
@@ -77,8 +74,6 @@ export const DEFAULT_DEMO_VALUES: DemoTelemetry = {
   distance: 350,
   latitude: 37.7749,
   longitude: -122.4194,
-  targetLat: 37.7749,
-  targetLon: -122.4254,
   // New defaults
   airspeed: 18,
   vario: 1.5,
@@ -115,7 +110,6 @@ export function renderElement(
   x: number,
   y: number,
   values: DemoTelemetry,
-  ccrpResult?: CcrpResult
 ): void {
   switch (id) {
     // General
@@ -273,9 +267,6 @@ export function renderElement(
       break;
 
     // Mission
-    case 'ccrp_indicator':
-      if (ccrpResult) renderCcrpIndicator(buffer, x, y, ccrpResult);
-      break;
     case 'vtx_channel':
       renderVtxChannel(buffer, x, y);
       break;
@@ -688,71 +679,6 @@ function renderEscRpm(buffer: OsdScreenBuffer, x: number, y: number, rpm: number
   buffer.drawString(x + 1, y, str.padStart(6, ' '));
 }
 
-// ── Mission ─────────────────────────────────────────────────────────────────
-
-function renderCcrpIndicator(
-  buffer: OsdScreenBuffer,
-  x: number,
-  y: number,
-  ccrpResult: CcrpResult
-): void {
-  const GAUGE_HEIGHT = 5;
-
-  if (!ccrpResult.valid) {
-    buffer.drawString(x, y, '---');
-    buffer.drawString(x, y + 1, 'CCRP');
-    return;
-  }
-
-  if (ccrpResult.inRange) {
-    buffer.drawString(x - 1, y, 'DROP!');
-  } else if (ccrpResult.passed) {
-    buffer.drawString(x - 1, y, 'PASS');
-  } else if (!ccrpResult.isLinedUp) {
-    const error = ccrpResult.headingError;
-    if (error > 20) buffer.drawString(x - 1, y, '>>R');
-    else if (error > 5) buffer.drawString(x - 1, y, ' >R');
-    else if (error < -20) buffer.drawString(x - 1, y, 'L<<');
-    else if (error < -5) buffer.drawString(x - 1, y, 'L< ');
-  } else {
-    buffer.drawString(x - 1, y, ' OK ');
-  }
-
-  const gaugeStartY = y + 1;
-  const fillLevel = Math.min(GAUGE_HEIGHT, Math.round(ccrpResult.releaseProgress * GAUGE_HEIGHT));
-
-  for (let i = 0; i < GAUGE_HEIGHT; i++) {
-    const rowY = gaugeStartY + i;
-    const isFilled = i < fillLevel;
-    buffer.setChar(x, rowY, 0x7c); // |
-    if (isFilled) {
-      buffer.setChar(x + 1, rowY, ccrpResult.isLinedUp ? 0x23 : 0x3d);
-    } else {
-      buffer.setChar(x + 1, rowY, 0x2e);
-    }
-    buffer.setChar(x + 2, rowY, 0x7c); // |
-  }
-
-  const targetY = gaugeStartY + GAUGE_HEIGHT;
-  buffer.setChar(x, targetY, 0x5b);
-  buffer.setChar(x + 1, targetY, 0x58);
-  buffer.setChar(x + 2, targetY, 0x5d);
-
-  const distY = targetY + 1;
-  if (ccrpResult.distanceToRelease >= 0) {
-    const distStr = Math.round(ccrpResult.distanceToRelease).toString();
-    buffer.drawString(x, distY, distStr.padStart(3, ' ') + 'm');
-  } else {
-    const distStr = Math.round(Math.abs(ccrpResult.distanceToRelease)).toString();
-    buffer.drawString(x, distY, '-' + distStr.padStart(2, ' ') + 'm');
-  }
-
-  const hdgErrY = distY + 1;
-  const hdgErr = Math.round(ccrpResult.headingError);
-  if (hdgErr > 0) buffer.drawString(x, hdgErrY, `R${hdgErr}`.padStart(4, ' '));
-  else if (hdgErr < 0) buffer.drawString(x, hdgErrY, `L${Math.abs(hdgErr)}`.padStart(4, ' '));
-  else buffer.drawString(x, hdgErrY, '  0 ');
-}
 
 function renderVtxChannel(buffer: OsdScreenBuffer, x: number, y: number): void {
   buffer.setChar(x, y, SYM.VTX_POWER);

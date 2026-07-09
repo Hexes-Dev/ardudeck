@@ -18,12 +18,9 @@ OsdView.tsx              - Main tab component with controls and demo sliders
 OsdCanvas.tsx            - Canvas-based renderer that draws the screen buffer
 ├── stores/
 │   osd-store.ts         - State management, element renderers, screen buffer
-│   payload-store.ts     - Payload configuration for CCRP
 ├── utils/osd/
 │   font-renderer.ts     - MCM font parser, CachedFont, OsdScreenBuffer
 │   osd-symbols.ts       - 150+ symbol constants (SYM.ALT_M, SYM.BATT, etc.)
-├── utils/
-│   ccrp-calculator.ts   - CCRP physics and lineup guidance calculations
 └── assets/osd-fonts/    - Bundled .mcm font files
 ```
 
@@ -55,7 +52,6 @@ These are non-standard elements with separate documentation:
 | Element | Description | Docs |
 |---------|-------------|------|
 | `artificial_horizon` | Tilted horizon responding to pitch/roll | [artificial-horizon.md](docs/artificial-horizon.md) |
-| `ccrp_indicator` | Payload release guidance with steering | [ccrp-indicator.md](docs/ccrp-indicator.md) |
 
 ## Adding New Elements
 

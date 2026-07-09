@@ -14,8 +14,6 @@ import { useTelemetryStore } from './telemetry-store';
 import { useConnectionStore } from './connection-store';
 import { useParameterStore } from './parameter-store';
 import { useMissionStore } from './mission-store';
-import { calculateCcrp } from '../utils/ccrp-calculator';
-import { usePayloadStore } from './payload-store';
 import {
   type OsdElementId,
   type OsdElementKey,
@@ -793,22 +791,7 @@ export const useOsdStore = create<OsdStore>((set, get) => ({
     for (const [id, pos] of Object.entries(elementPositions) as [OsdElementKey, OsdElementPosition][]) {
       if (!pos.enabled) continue;
 
-      if (id === 'ccrp_indicator') {
-        const payloadConfig = usePayloadStore.getState().config;
-        const ccrpResult = calculateCcrp({
-          aircraftLat: values.latitude,
-          aircraftLon: values.longitude,
-          aircraftAltAgl: values.altitude,
-          groundSpeed: values.speed,
-          heading: values.heading,
-          targetLat: values.targetLat,
-          targetLon: values.targetLon,
-          descentRateMs: payloadConfig.descentRateMs,
-        });
-        renderElement(screenBuffer, id, pos.x, pos.y, values, ccrpResult);
-      } else {
-        renderElement(screenBuffer, id, pos.x, pos.y, values);
-      }
+      renderElement(screenBuffer, id, pos.x, pos.y, values);
     }
 
     set((state) => ({ renderVersion: state.renderVersion + 1 }));

@@ -3,19 +3,26 @@ import type { ViewId } from '../stores/navigation-store';
 import { useModuleStore } from '../stores/module-store';
 
 /**
- * Built-in features gated behind a Hangar "activatable" module.
+ * Built-in features gated behind Hangar cargo.
  *
- * A view that is NOT listed here is always available. To make an existing
- * built-in feature activatable, add an entry mapping the Hangar module slug to
- * the view it gates - the nav item and any view navigation then require that
- * module to be activated (via the Hangar / a license key). No other code change
- * is needed; NavigationRail and the deep-link handler both consult this map.
+ * Anything NOT listed here is always available. To put an existing built-in
+ * feature behind a cargo, add one entry mapping the cargo slug to what it
+ * gates - a whole view, individual HUD widgets, and/or text-OSD elements.
+ * NavigationRail, the deep-link handler, the HUD renderers and the OSD
+ * element browser all consult this map; no other code change is needed.
+ *
+ * A gated feature shows only while its cargo is installed AND not toggled
+ * off, so the Cargo Bay enable/disable switch governs built-ins too.
  */
 export interface Capability {
-  /** Hangar module slug whose activation enables this view. */
+  /** Hangar cargo slug that enables the features below. */
   slug: string;
-  /** The built-in view this capability gates. */
-  viewId: ViewId;
+  /** A built-in view this cargo gates. */
+  viewId?: ViewId;
+  /** Built-in fighter-HUD widget ids (see hud-config HUD_WIDGETS). */
+  hudWidgets?: string[];
+  /** Built-in text-OSD element ids (see osd element-registry). */
+  osdElements?: string[];
 }
 
 export const CAPABILITIES: Capability[] = [
@@ -23,7 +30,7 @@ export const CAPABILITIES: Capability[] = [
 ];
 
 const GATED_VIEWS: ReadonlyMap<ViewId, string> = new Map(
-  CAPABILITIES.map((c): [ViewId, string] => [c.viewId, c.slug]),
+  CAPABILITIES.filter((c) => c.viewId).map((c): [ViewId, string] => [c.viewId!, c.slug]),
 );
 
 /** True if `viewId` is available given the set of enabled activatable slugs. */
@@ -32,11 +39,45 @@ export function isViewAvailable(viewId: ViewId, enabledSlugs: ReadonlySet<string
   return !requiredSlug || enabledSlugs.has(requiredSlug);
 }
 
+/** Reactive: true when the given cargo is installed and not toggled off. */
+export function useCargoEnabled(slug: string): boolean {
+  const modules = useModuleStore((s) => s.modules);
+  return useMemo(
+    () => modules.some((m) => m.slug === slug && m.enabled !== false),
+    [modules, slug],
+  );
+}
+
+/** Ids from the chosen Capability field whose gating cargo is missing or off. */
+function useGatedOffIds(field: 'hudWidgets' | 'osdElements'): ReadonlySet<string> {
+  const modules = useModuleStore((s) => s.modules);
+  return useMemo(() => {
+    const off = new Set<string>();
+    for (const cap of CAPABILITIES) {
+      const ids = cap[field];
+      if (!ids?.length) continue;
+      const enabled = modules.some((m) => m.slug === cap.slug && m.enabled !== false);
+      if (!enabled) for (const id of ids) off.add(id);
+    }
+    return off;
+  }, [modules, field]);
+}
+
+/** Reactive: built-in HUD widget ids to hide (their gating cargo is off/absent). */
+export function useGatedOffHudWidgets(): ReadonlySet<string> {
+  return useGatedOffIds('hudWidgets');
+}
+
+/** Reactive: built-in text-OSD element ids to hide (their gating cargo is off/absent). */
+export function useGatedOffOsdElements(): ReadonlySet<string> {
+  return useGatedOffIds('osdElements');
+}
+
 /** Reactive set of activatable module slugs currently enabled on this device. */
 export function useEnabledCapabilitySlugs(): ReadonlySet<string> {
   const modules = useModuleStore((s) => s.modules);
   return useMemo(
-    () => new Set(modules.filter((m) => m.activatable).map((m) => m.slug)),
+    () => new Set(modules.filter((m) => m.activatable && m.enabled !== false).map((m) => m.slug)),
     [modules],
   );
 }

@@ -76,7 +76,6 @@ export type OsdElementId =
   | 'g_force'
   | 'esc_rpm'
   // Mission
-  | 'ccrp_indicator'
   | 'vtx_channel'
   | 'wind_horizontal'
   | 'wind_vertical';
@@ -600,16 +599,6 @@ export const ELEMENT_REGISTRY: OsdElementDefinition[] = [
   },
 
   // ── Mission ───────────────────────────────────────────────────────────
-  {
-    id: 'ccrp_indicator',
-    name: 'CCRP Indicator',
-    category: 'mission',
-    description: 'Continuously Computed Release Point gauge',
-    previewSymbol: SYM.CROSS_TRACK_ERROR,
-    previewText: 'CCRP',
-    size: { width: 5, height: 9 },
-    defaultPosition: { x: 26, y: 3, enabled: false },
-  },
   {
     id: 'vtx_channel',
     name: 'VTX Channel',

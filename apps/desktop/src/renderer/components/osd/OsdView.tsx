@@ -255,9 +255,6 @@ export function OsdView() {
           ...hudValuesFromDemo(demoValues),
           linkHistory: hudConfig.widgets.linkGraph ? DEMO_LINK : undefined,
           linkLabel: 'LINK (demo)',
-          targetBearing: demoValues.heading + 6,
-          targetRange: 420,
-          targetLabel: 'WP3',
         };
 
   return (

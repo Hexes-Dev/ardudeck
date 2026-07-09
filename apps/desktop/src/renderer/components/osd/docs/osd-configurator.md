@@ -80,7 +80,6 @@ Each element has a defined width and height:
 | Most telemetry | 4-6 × 1 | Single row |
 | Coordinates | 11 × 2 | Two rows (lat + lon) |
 | Artificial Horizon | 9 × 1 | Wide horizon bar |
-| CCRP Indicator | 5 × 9 | Tall vertical gauge |
 
 The configurator prevents elements from being placed off-screen by clamping to bounds based on element size.
 

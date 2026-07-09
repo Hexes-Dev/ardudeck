@@ -1953,15 +1953,15 @@ function WaypointListContent({ readOnly = false }: { readOnly?: boolean }) {
     [missionItems, collapsedGroups],
   );
   const useVirtual = renderableIndices.length > VIRTUALIZE_THRESHOLD;
-  // Dynamic DOM measurement (measureElement) gives pixel-perfect row heights and
-  // is fine for normal missions. But at very large scale react-virtual corrects
-  // the scroll position on every measured size delta (virtual-core resizeItem),
-  // which feeds back into more measurements and never settles - an infinite
-  // measure -> resize -> setState loop that crashes the panel ("Maximum update
-  // depth exceeded") on 20k+ surveys. Above this size we turn measurement off
-  // and position rows from a deterministic per-row estimate, which cannot loop.
-  const MEASURE_LIMIT = 2000;
-  const dynamicMeasure = renderableIndices.length <= MEASURE_LIMIT;
+  // Rows are positioned purely from the deterministic per-row estimate - no
+  // measureElement. Dynamic DOM measurement feeds measured-size deltas back
+  // into the virtualizer during commit (resizeItem -> notify -> re-render ->
+  // more refs measured), and that feedback crashed this panel twice with
+  // "Maximum update depth exceeded" on large surveys - once via scroll
+  // corrections, once via scroll-to-selected reconciliation. Row heights here
+  // are uniform per kind, so measurement bought pixel-perfection we don't
+  // need at the price of a loop we can't afford. Below VIRTUALIZE_THRESHOLD
+  // the list renders normally and stays exact.
   const estimateRowSize = (vi: number): number => {
     const idx = renderableIndices[vi];
     const wp = idx === undefined ? undefined : missionItems[idx];
@@ -2108,7 +2108,6 @@ function WaypointListContent({ readOnly = false }: { readOnly?: boolean }) {
                     <div
                       key={v.key}
                       data-index={v.index}
-                      ref={dynamicMeasure ? rowVirtualizer.measureElement : undefined}
                       style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${v.start}px)` }}
                     >
                       {node}

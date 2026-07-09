@@ -41,7 +41,7 @@ export function CameraOverlays({ vehicle, isPrimary, osd, attitude = null, frame
   return (
     <>
       {hudActive && <LiveFighterHud />}
-      {/* Module-contributed camera/HUD overlays (e.g. a CCRP reticle). Drawn on
+      {/* Module-contributed camera/HUD overlays. Drawn on
           the same viewport as the fighter HUD; modules self-gate via host.hud. */}
       {isPrimary && <MountPoint name="cameraOverlay" />}
       <CameraOsd

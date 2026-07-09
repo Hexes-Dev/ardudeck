@@ -56,7 +56,6 @@ interface HudStore {
   setGlow: (g: boolean) => void;
   setUnits: (u: HudUnits) => void;
   setScale: (s: number) => void;
-  setPayloadTerminalV: (v: number) => void;
   setPosition: (id: string, pos: Vec2) => void;
   resetConfig: () => void;
 
@@ -93,7 +92,6 @@ export const useHudStore = create<HudStore>((set, get) => ({
   setGlow: (glow) => { set((s) => ({ config: { ...s.config, glow } })); persist(get); },
   setUnits: (units) => { set((s) => ({ config: { ...s.config, units } })); persist(get); },
   setScale: (scale) => { set((s) => ({ config: { ...s.config, scale } })); persist(get); },
-  setPayloadTerminalV: (payloadTerminalV) => { set((s) => ({ config: { ...s.config, payloadTerminalV } })); persist(get); },
   setPosition: (id, pos) => {
     set((s) => ({ config: { ...s.config, positions: { ...s.config.positions, [id]: pos } } }));
     persist(get);

@@ -15,6 +15,7 @@ import {
   getModuleOsdElement,
 } from '../../modules/module-osd-registry';
 import { OSD_CHAR_WIDTH, OSD_CHAR_HEIGHT, getCharacterDataUrl } from '../../utils/osd/font-renderer';
+import { useGatedOffOsdElements } from '../../modules/capabilities';
 
 interface Props {
   selectedElement: OsdElementKey | null;
@@ -38,7 +39,12 @@ export function OsdElementBrowser({ selectedElement, onSelect }: Props) {
 
   // Re-read (built-in + module) elements whenever the module set changes.
   const moduleRev = useModuleOsdRevision();
-  const allElements = useMemo(() => getAllOsdElements(), [moduleRev]);
+  // Cargo-gated built-in elements (see CAPABILITIES) hide while their cargo is off.
+  const gatedOffElements = useGatedOffOsdElements();
+  const allElements = useMemo(
+    () => getAllOsdElements().filter((el) => !gatedOffElements.has(el.id)),
+    [moduleRev, gatedOffElements],
+  );
 
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedCategories, setExpandedCategories] = useState<Set<OsdElementCategory>>(() => {

@@ -338,16 +338,41 @@ function compileNode(
   }
 
   if (type === 'sensor-gpio-read') {
-    // Pin can come from a wired input (e.g. Read Parameter -> CAM1_FEEDBAK_PIN)
-    // or fall back to the static property. gpio:read needs an integer pin.
+    // Pin can come from a wired input or fall back to the static property.
+    // gpio:read needs an integer pin and returns a BOOLEAN on real firmware
+    // (older docs suggest 0/1), so normalize both shapes to 0/1.
     const pinExpr = input('pin', String(prop('pin')));
     const pinVar = nextVar(ctx, 'gpio_pin');
     const lvlVar = nextVar(ctx, 'gpio_lvl');
     emit(ctx, `local ${pinVar} = ${pinExpr}`);
     emit(ctx, `local ${lvlVar} = 0`);
-    emit(ctx, `if ${pinVar} and ${pinVar} >= 0 then ${lvlVar} = gpio:read(math.floor(${pinVar})) or 0 end`);
+    emit(ctx, `if ${pinVar} and ${pinVar} >= 0 then`);
+    emit(ctx, `  local _raw = gpio:read(math.floor(${pinVar}))`);
+    emit(ctx, `  if _raw == true or _raw == 1 then ${lvlVar} = 1 end`);
+    emit(ctx, `end`);
     ctx.varMap.set(varKey(node.id, 'level'), lvlVar);
     ctx.varMap.set(varKey(node.id, 'is_high'), `(${lvlVar} == 1)`);
+    return;
+  }
+
+  if (type === 'sensor-pwm-pulse') {
+    // PWMSource attaches a hardware interrupt and latches the last pulse
+    // width; get_pwm_us returns it once, then reads 0 until the next pulse.
+    // set_pin must run once at script load, so it lives in the prelude.
+    const pin = Math.floor(Number(prop('pin')) || 0);
+    const idSuffix = sanitizeVarName(node.id);
+    const srcVar = `_pwm_src_${idSuffix}`;
+    const okVar = `_pwm_ok_${idSuffix}`;
+    ctx.prelude.push(`-- Pulse input on pin ${pin} (hardware interrupt via PWMSource)`);
+    ctx.prelude.push(`local ${srcVar} = PWMSource()`);
+    ctx.prelude.push(`local ${okVar} = ${srcVar}:set_pin(${pin})`);
+    ctx.prelude.push(`if not ${okVar} then gcs:send_text(3, 'Pulse input: pin ${pin} not usable (SERVOx_FUNCTION = -1?)') end`);
+    const widthVar = nextVar(ctx, 'pulse_width');
+    emit(ctx, `local ${widthVar} = 0`);
+    emit(ctx, `if ${okVar} then ${widthVar} = ${srcVar}:get_pwm_us() or 0 end`);
+    ctx.varMap.set(varKey(node.id, 'width_us'), widthVar);
+    ctx.varMap.set(varKey(node.id, 'pulse_seen'), `(${widthVar} > 0)`);
+    ctx.varMap.set(varKey(node.id, 'ok'), okVar);
     return;
   }
 

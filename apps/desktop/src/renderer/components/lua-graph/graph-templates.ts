@@ -3414,15 +3414,15 @@ export const GRAPH_TEMPLATES: GraphTemplate[] = [
   {
     id: 'camera-trigger-watchdog',
     name: 'Camera Trigger Watchdog',
-    description: 'Warn on the GCS with the current waypoint when a distance-triggered camera stops actually taking photos (e.g. it overheats). Watches the hotshoe feedback pin, not the trigger command.',
+    description: 'Warn on the GCS with the current waypoint when a distance-triggered camera stops actually taking photos (e.g. it overheats). Catches the hotshoe pulse with a hardware interrupt — polling gpio:read misses the 1-2 ms pulse.',
     category: 'Safety',
     graph: {
       version: 1,
       name: 'Camera Trigger Watchdog',
-      description: 'Alert when a distance-triggered camera stops capturing, using the hotshoe feedback pin',
-      runIntervalMs: 10,
+      description: 'Alert when a distance-triggered camera stops capturing, using an interrupt on the hotshoe signal',
+      runIntervalMs: 100,
       createdAt: '2025-01-01T00:00:00.000Z',
-      updatedAt: '2025-01-01T00:00:00.000Z',
+      updatedAt: '2026-07-09T00:00:00.000Z',
       nodes: [
         {
           id: 'comment_photo',
@@ -3432,7 +3432,7 @@ export const GRAPH_TEMPLATES: GraphTemplate[] = [
             definitionType: 'flow-comment',
             label: 'Step 1',
             category: 'flow',
-            propertyValues: { text: 'Real photo = an edge on the hotshoe feedback pin (CAM1_FEEDBAK_PIN)' },
+            propertyValues: { text: 'Real photo = hotshoe pulse caught by interrupt. Y-wire the hotshoe signal to a free AUX pin with SERVOx_FUNCTION = -1. Do NOT reuse CAM1_FEEDBAK_PIN: whoever attaches first owns the interrupt.' },
           },
         },
         {
@@ -3458,36 +3458,14 @@ export const GRAPH_TEMPLATES: GraphTemplate[] = [
           },
         },
         {
-          id: 'param_pin',
-          type: 'sensor-param-get',
-          position: { x: 60, y: 90 },
-          data: {
-            definitionType: 'sensor-param-get',
-            label: 'Feedback Pin',
-            category: 'sensors',
-            propertyValues: { param_name: 'CAM1_FEEDBAK_PIN' },
-          },
-        },
-        {
-          id: 'gpio',
-          type: 'sensor-gpio-read',
+          id: 'pulse',
+          type: 'sensor-pwm-pulse',
           position: { x: 320, y: 90 },
           data: {
-            definitionType: 'sensor-gpio-read',
-            label: 'Read Hotshoe',
+            definitionType: 'sensor-pwm-pulse',
+            label: 'Hotshoe Pulse',
             category: 'sensors',
             propertyValues: { pin: 54 },
-          },
-        },
-        {
-          id: 'photo_edge',
-          type: 'timing-rising-edge',
-          position: { x: 580, y: 90 },
-          data: {
-            definitionType: 'timing-rising-edge',
-            label: 'Photo taken',
-            category: 'timing',
-            propertyValues: {},
           },
         },
         {
@@ -3580,12 +3558,10 @@ export const GRAPH_TEMPLATES: GraphTemplate[] = [
         },
       ],
       edges: [
-        { id: 'e1', source: 'param_pin', target: 'gpio', sourceHandle: 'value', targetHandle: 'pin' },
-        { id: 'e2', source: 'gpio', target: 'photo_edge', sourceHandle: 'is_high', targetHandle: 'input' },
         { id: 'e3', source: 'param_trigg', target: 'trigg_active', sourceHandle: 'value', targetHandle: 'a' },
         { id: 'e4', source: 'trigg_active', target: 'gate_and', sourceHandle: 'result', targetHandle: 'a' },
         { id: 'e5', source: 'armed', target: 'gate_and', sourceHandle: 'is_armed', targetHandle: 'b' },
-        { id: 'e6', source: 'photo_edge', target: 'watchdog', sourceHandle: 'triggered', targetHandle: 'kick' },
+        { id: 'e6', source: 'pulse', target: 'watchdog', sourceHandle: 'pulse_seen', targetHandle: 'kick' },
         { id: 'e7', source: 'gate_and', target: 'watchdog', sourceHandle: 'result', targetHandle: 'enable' },
         { id: 'e8', source: 'watchdog', target: 'warn_edge', sourceHandle: 'expired', targetHandle: 'input' },
         { id: 'e9', source: 'warn_edge', target: 'warn', sourceHandle: 'triggered', targetHandle: 'trigger' },

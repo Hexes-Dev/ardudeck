@@ -12,6 +12,7 @@ import {
   checkForUpdates,
   heartbeatAll,
   updateModule,
+  setModuleEnabled,
 } from './module-manager.js';
 import { getLoadedModules, loadAllModules } from './module-registry.js';
 import { killPty, resizePty, spawnPty, writePty } from './module-pty-service.js';
@@ -67,6 +68,16 @@ export function setupModuleIpc(mainWindow: BrowserWindow): void {
       return await updateModule(slug, (progress) => {
         mainWindow.webContents.send(IPC_CHANNELS.MODULE_PROGRESS, progress);
       });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { success: false, error: message };
+    }
+  });
+
+  // Toggle a module on/off without removing it (bundle modules apply on restart)
+  ipcMain.handle(IPC_CHANNELS.MODULE_SET_ENABLED, (_, slug: string, enabled: boolean) => {
+    try {
+      return { success: true, modules: setModuleEnabled(slug, enabled) };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return { success: false, error: message };

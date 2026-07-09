@@ -23,6 +23,8 @@ export async function loadAllModules(): Promise<void> {
   for (const mod of installed) {
     // Activatable modules ship in the app - there is no bundle to load.
     if (mod.activatable) continue;
+    // User-disabled cargo stays installed but never loads.
+    if (mod.enabled === false) continue;
     if (!mod.installPath) {
       console.warn(`[ModuleRegistry] skipping ${mod.slug}: no installPath`);
       continue;

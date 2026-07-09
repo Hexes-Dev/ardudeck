@@ -132,7 +132,7 @@ export function ModuleDock() {
                   <button
                     onClick={() => setOpenKey(null)}
                     className="rounded-md p-1 text-content-secondary transition-colors hover:bg-surface-raised hover:text-content"
-                    aria-label="Back to modules"
+                    aria-label="Back to cargo"
                   >
                     <ChevronLeft className="h-4 w-4" />
                   </button>
@@ -153,7 +153,7 @@ export function ModuleDock() {
               <>
                 <div className="flex items-center justify-between border-b border-subtle px-3 py-2.5">
                   <span className="text-[11px] font-semibold uppercase tracking-wider text-content-tertiary">
-                    Modules
+                    Cargo
                   </span>
                   <button
                     onClick={() => setMenuOpen(false)}
@@ -204,7 +204,7 @@ export function ModuleDock() {
         >
           <GripVertical className={'h-4 w-4 ' + (menuOpen ? 'text-white/50' : 'text-content-tertiary')} />
           <Boxes className="h-4 w-4" />
-          Modules
+          Cargo
           <span
             className={
               'rounded-full px-1.5 text-[11px] ' +

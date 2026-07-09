@@ -85,7 +85,7 @@ export interface ForwardTarget {
 }
 
 /**
- * Pick the CCRP target from a set of waypoints: the NEAREST point that lies
+ * Pick a forward target from a set of waypoints: the NEAREST point that lies
  * ahead (within ±90° of the current heading), so it auto-advances to the next
  * as each is overflown - without relying on the FC's AUTO mission sequencing
  * (MISSION_CURRENT doesn't advance in manual/FPV flight). Falls back to the
@@ -194,8 +194,6 @@ export function buildLiveTelemetry(
     gpsHdop: gps.hdop,
     latitude: lat,
     longitude: lon,
-    targetLat: lat,
-    targetLon: lon,
 
     distance,
     homeDirection,

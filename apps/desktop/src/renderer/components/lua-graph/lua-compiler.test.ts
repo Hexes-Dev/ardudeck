@@ -48,6 +48,23 @@ describe('new watchdog nodes', () => {
     const res = compileGraph(nodes, [], 'test');
     expect(res.success).toBe(true);
     expect(res.code).toContain('gpio:read(math.floor(');
+    // gpio:read returns a boolean on real firmware — must be normalized to 0/1
+    expect(res.code).toContain('== true');
+  });
+
+  it('sensor-pwm-pulse sets up PWMSource once in the prelude and drains it per tick', () => {
+    const nodes = [node('p', 'sensor-pwm-pulse', { pin: 54 })];
+    const res = compileGraph(nodes, [], 'test');
+    expect(res.success).toBe(true);
+    // one-time setup at module scope, before update()
+    const updateIdx = res.code.indexOf('function update()');
+    expect(res.code.indexOf('PWMSource()')).toBeGreaterThan(-1);
+    expect(res.code.indexOf('PWMSource()')).toBeLessThan(updateIdx);
+    expect(res.code.indexOf(':set_pin(54)')).toBeLessThan(updateIdx);
+    // per-tick read inside update()
+    expect(res.code.indexOf(':get_pwm_us()')).toBeGreaterThan(updateIdx);
+    // failed attach is reported, not silent
+    expect(res.code).toContain('not usable');
   });
 
   it('sensor-gpio-read takes its pin from a wired input when connected', () => {
@@ -106,8 +123,20 @@ describe('Camera Trigger Watchdog template', () => {
     const res = compileGraph(g.nodes as Node<GraphNodeData>[], g.edges as Edge<GraphEdgeData>[], g.name, g.runIntervalMs);
     expect(res.success).toBe(true);
     expect(res.errors).toEqual([]);
-    expect(res.code).toContain('gpio:read(math.floor(');
     expect(res.code).toContain('mission:get_current_nav_index()');
     expect(res.code).toContain('param:get("CAM1_TRIGG_DIST")');
+  });
+
+  it('detects photos via PWMSource interrupt, not gpio:read polling', () => {
+    const tpl = GRAPH_TEMPLATES.find((t) => t.id === 'camera-trigger-watchdog');
+    const g = tpl!.graph;
+    // hotshoe pulses are 1-2 ms; gpio:read polling misses them
+    expect(g.runIntervalMs).toBeGreaterThanOrEqual(50);
+    const res = compileGraph(g.nodes as Node<GraphNodeData>[], g.edges as Edge<GraphEdgeData>[], g.name, g.runIntervalMs);
+    expect(res.code).toContain('PWMSource()');
+    expect(res.code).toContain(':get_pwm_us()');
+    expect(res.code).not.toContain('gpio:read');
+    // must not steal AP_Camera's feedback pin (comment text may mention it)
+    expect(res.code).not.toContain('param:get("CAM1_FEEDBAK_PIN")');
   });
 });

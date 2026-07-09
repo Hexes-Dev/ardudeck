@@ -240,6 +240,19 @@ export function getInstalledModules(): InstalledModule[] {
   return store.get('modules');
 }
 
+/**
+ * Enable or disable an installed module without removing it. Bundle modules
+ * only load at startup, so a change takes effect after restart; activatable
+ * modules gate renderer capabilities reactively and flip immediately.
+ */
+export function setModuleEnabled(slug: string, enabled: boolean): InstalledModule[] {
+  const modules = store.get('modules').map((m) =>
+    m.slug === slug ? { ...m, enabled } : m,
+  );
+  store.set('modules', modules);
+  return modules;
+}
+
 // --------------------------------------------------------------------------
 // Update
 // --------------------------------------------------------------------------

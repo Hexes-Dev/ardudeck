@@ -119,7 +119,6 @@ export async function registerAllStores(): Promise<void> {
     'osd': () => import('../stores/osd-store'),
     'overlay': () => import('../stores/overlay-store'),
     'parameter': () => import('../stores/parameter-store'),
-    'payload': () => import('../stores/payload-store'),
     'quick-setup': () => import('../stores/quick-setup-store'),
     'rally': () => import('../stores/rally-store'),
     'receiver': () => import('../stores/receiver-store'),

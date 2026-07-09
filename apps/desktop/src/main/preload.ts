@@ -1968,6 +1968,9 @@ const api = {
   moduleUpdate: (slug: string): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke(IPC_CHANNELS.MODULE_UPDATE, slug),
 
+  moduleSetEnabled: (slug: string, enabled: boolean): Promise<{ success: boolean; modules?: InstalledModule[]; error?: string }> =>
+    ipcRenderer.invoke(IPC_CHANNELS.MODULE_SET_ENABLED, slug, enabled),
+
   onModuleProgress: (callback: (progress: ModuleProgress) => void) => {
     const handler = (_: unknown, progress: ModuleProgress) => callback(progress);
     ipcRenderer.on(IPC_CHANNELS.MODULE_PROGRESS, handler);

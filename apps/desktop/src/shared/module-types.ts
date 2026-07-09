@@ -15,6 +15,8 @@ export interface InstalledModule {
   installPath?: string; // filesystem path where bundle was extracted (installable only)
   manifestVersion?: number; // schema version from module.json
   activatable?: boolean; // built-in feature enabled by license, no bundle downloaded
+  /** User toggle: false = keep installed but don't load. Absent means enabled. */
+  enabled?: boolean;
 }
 
 /** License key payload (decoded from key, verified with Ed25519) */

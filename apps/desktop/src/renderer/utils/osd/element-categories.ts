@@ -33,7 +33,7 @@ export const ELEMENT_CATEGORIES: CategoryDefinition[] = [
   { id: 'timers', name: 'Timers', description: 'Flight time, on time, remaining' },
   { id: 'radio', name: 'Radio & Control', description: 'RSSI, throttle position' },
   { id: 'sensors', name: 'Sensors', description: 'Temperature, G-force, ESC data' },
-  { id: 'mission', name: 'Mission', description: 'CCRP, VTX, wind indicators' },
+  { id: 'mission', name: 'Mission', description: 'VTX, wind indicators' },
 ];
 
 export const CATEGORY_MAP = new Map<OsdElementCategory, CategoryDefinition>(

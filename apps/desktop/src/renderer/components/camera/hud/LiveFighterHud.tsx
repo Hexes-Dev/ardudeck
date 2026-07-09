@@ -9,8 +9,7 @@ import { useTelemetryStore } from '../../../stores/telemetry-store';
 import { useMissionStore } from '../../../stores/mission-store';
 import { useHudStore } from '../../../stores/hud-store';
 import { useConnectionStore } from '../../../stores/connection-store';
-import { useSelfActiveTarget } from '../../../stores/command-target-store';
-import { bearingDeg, haversineMeters, pickForwardTarget } from '../../../utils/osd/live-telemetry';
+import { bearingDeg, haversineMeters } from '../../../utils/osd/live-telemetry';
 import { wrap180 } from './hud-geometry';
 import { resolveHudProfile } from './hud-config';
 import { useLinkHistory } from './useLinkHistory';
@@ -19,8 +18,6 @@ import { FighterHud, type FighterHudValues } from './FighterHud';
 export const LiveFighterHud = memo(function LiveFighterHud() {
   const t = useTelemetryStore();
   const home = useMissionStore((s) => s.homePosition);
-  const missionItems = useMissionStore((s) => s.missionItems);
-  const activeTarget = useSelfActiveTarget();
   const config = useHudStore((s) => s.config);
   const mavType = useConnectionStore((s) => s.connectionState.mavType);
   const profile = resolveHudProfile(config.profile, mavType);
@@ -36,29 +33,6 @@ export const LiveFighterHud = memo(function LiveFighterHud() {
   if (home && (lat || lon)) {
     distance = haversineMeters(lat, lon, home.lat, home.lon);
     homeDirection = wrap180(bearingDeg(lat, lon, home.lat, home.lon) - heading);
-  }
-
-  // CCRP designated target, in priority order:
-  //  1. an on-the-fly "Move here" (guided goto) commanded from the map, else
-  //  2. the nearest pending drop waypoint ahead - geometric, not FC mission
-  //     index, so it auto-advances drop-to-drop in manual FPV flight.
-  let targetBearing: number | undefined;
-  let targetRange: number | undefined;
-  let targetLabel: string | undefined;
-  if (widgets.ccrp && (lat || lon)) {
-    if (activeTarget?.type === 'goto') {
-      targetRange = haversineMeters(lat, lon, activeTarget.lat, activeTarget.lon);
-      targetBearing = bearingDeg(lat, lon, activeTarget.lat, activeTarget.lon);
-      targetLabel = 'MOVE';
-    } else {
-      const located = missionItems.filter((m) => m.latitude || m.longitude);
-      const tgt = pickForwardTarget(lat, lon, heading, located);
-      if (tgt) {
-        targetRange = tgt.range;
-        targetBearing = tgt.bearing;
-        targetLabel = tgt.seq != null ? `WP${tgt.seq}` : 'TGT';
-      }
-    }
   }
 
   // Steering output: servo 1 is the ground-steering output on ArduPilot
@@ -95,9 +69,6 @@ export const LiveFighterHud = memo(function LiveFighterHud() {
     windSpeed: t.wind.speed,
     linkHistory,
     linkLabel: 'RC LINK',
-    targetBearing,
-    targetRange,
-    targetLabel,
     steer,
     wpDistance: t.navController?.wpDist,
     xtrackError: t.navController?.xtrackError,

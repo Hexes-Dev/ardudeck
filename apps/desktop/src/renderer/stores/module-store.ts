@@ -27,6 +27,11 @@ interface ModuleState {
   updateModule: (slug: string) => Promise<{ success: boolean; error?: string }>;
   /** Update every module that has a pending update. Returns how many succeeded. */
   updateAll: () => Promise<number>;
+  /**
+   * Toggle a module without removing it. Returns success; bundle modules need
+   * a restart for the change to take effect (they only load at startup).
+   */
+  setEnabled: (slug: string, enabled: boolean) => Promise<{ success: boolean; error?: string }>;
   setProgress: (progress: ModuleProgress | null) => void;
   clearError: () => void;
 }
@@ -140,6 +145,24 @@ export const useModuleStore = create<ModuleState>((set, get) => ({
     }
     set({ updating: null });
     return succeeded;
+  },
+
+  setEnabled: async (slug: string, enabled: boolean) => {
+    set({ error: null });
+    try {
+      const result = await window.electronAPI.moduleSetEnabled(slug, enabled);
+      if (!result.success) {
+        set({ error: result.error || 'Toggle failed' });
+        return { success: false, error: result.error };
+      }
+      if (result.modules) set({ modules: result.modules });
+      else await get().loadModules();
+      return { success: true };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      set({ error: message });
+      return { success: false, error: message };
+    }
   },
 
   setProgress: (progress) => set({ progress }),
