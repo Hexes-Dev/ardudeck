@@ -192,15 +192,15 @@ export function generateDefaultParams(
   // NOT re-initialize the simulated battery; only SIM_BATT_CAP_AH change
   // resets state of charge. Writing both here forces a fresh init at boot.
   //
-  // CRITICAL: SIM_BATT_VOLTAGE feeds the SITL motor model — thrust scales with
+  // CRITICAL: SIM_BATT_VOLTAGE feeds the SITL motor model. Thrust scales with
   // supply voltage relative to the frame's reference voltage. The built-in
-  // `-M<model>` frames (quad/hexa/plane/…) are calibrated around a ~12.6V (3S)
+  // `-M<model>` frames (quad/hexa/plane/etc.) are calibrated around a ~12.6V (3S)
   // reference, so a higher default over-drives them: hover throttle produces
   // several times the intended thrust and the vehicle rockets past its takeoff
   // target and oscillates (a 14S/60.9V default made a 10m NAV_TAKEOFF climb to
   // >1200m). Keep the default matched to the built-in frames' reference. A high
   // industrial-pack voltage is only safe when paired with a custom frame whose
-  // refVoltage matches — pass it explicitly via simBattVoltage in that case.
+  // refVoltage matches, so pass it explicitly via simBattVoltage in that case.
   const battV = typeof simBattVoltage === 'number' && simBattVoltage > 0 ? simBattVoltage : 12.6;
   const battAh = typeof simBattCapAh === 'number' && simBattCapAh > 0 ? simBattCapAh : 10;
   lines.push(`SIM_BATT_VOLTAGE ${battV}`);

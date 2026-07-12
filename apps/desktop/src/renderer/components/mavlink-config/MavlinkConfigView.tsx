@@ -44,6 +44,7 @@ import {
 } from 'lucide-react';
 import { useParameterStore } from '../../stores/parameter-store';
 import { useConnectionStore } from '../../stores/connection-store';
+import { useNavigationStore } from '../../stores/navigation-store';
 import { formatParamValue } from '../../../shared/parameter-types';
 import PidTuningTab from './PidTuningTab';
 import RatesTab from './RatesTab';
@@ -255,7 +256,10 @@ export const MavlinkConfigView: React.FC = () => {
   const modifiedParameters = useParameterStore((s) => s.modifiedParameters);
   const markAllAsSaved = useParameterStore((s) => s.markAllAsSaved);
   const isRebootRequired = useParameterStore((s) => s.isRebootRequired);
+  const setSearchQuery = useParameterStore((s) => s.setSearchQuery);
   const connectionState = useConnectionStore((s) => s.connectionState);
+  const scrollTarget = useNavigationStore((s) => s.scrollTarget);
+  const clearScrollTarget = useNavigationStore((s) => s.clearScrollTarget);
 
   // Determine vehicle type and appropriate tabs
   const vehicleCategory = getVehicleCategory(connectionState.mavType);
@@ -272,6 +276,18 @@ export const MavlinkConfigView: React.FC = () => {
       setActiveTab(defaultTab);
     }
   }, [tabs, activeTab, defaultTab]);
+
+  // Deep link from a pre-arm quick-fix (or anywhere calling setView('parameters',
+  // paramId)): open the All Parameters tab and filter to that exact parameter,
+  // then clear the target so it fires once.
+  useEffect(() => {
+    if (!scrollTarget) return;
+    if (collectTabIds(tabs).includes('parameters')) {
+      setActiveTab('parameters');
+    }
+    setSearchQuery(scrollTarget);
+    clearScrollTarget();
+  }, [scrollTarget, tabs, setSearchQuery, clearScrollTarget]);
 
   const activeGroup = useMemo(() => findGroupForTab(tabs, activeTab), [tabs, activeTab]);
   const [openGroupId, setOpenGroupId] = useState<string | null>(null);

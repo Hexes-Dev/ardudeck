@@ -19,7 +19,7 @@ import { useSettingsStore } from '../../stores/settings-store';
 import { useActiveVehicleStore } from '../../stores/active-vehicle-store';
 import { useFleetVehicles } from '../../hooks/useFleet';
 import { useOrchestrationStore } from '../../stores/orchestration-store';
-import { isPreArmMessage, extractPreArmReason, matchPreArmError } from '../../../shared/prearm-checks';
+import { isPreArmMessage, extractPreArmReason, matchPreArmError, PREARM_STALE_MS } from '../../../shared/prearm-checks';
 import { PreArmParamFix } from '../prearm/PreArmParamFix';
 import { PanelContainer, SectionTitle } from './panel-utils';
 import { getVehicleClass, ARDUPILOT_COMMON_MODES, VEHICLE_CAPABILITIES, type ArduPilotVehicleClass } from '../../../shared/telemetry-types';
@@ -540,6 +540,24 @@ function MavlinkFlightControl({ mavTypeOverride }: { mavTypeOverride?: number })
   const containerRef = useRef<HTMLDivElement>(null);
   const [isHorizontal, setIsHorizontal] = useState(false);
   const [expandedPreArm, setExpandedPreArm] = useState<Set<string>>(new Set());
+  // Pre-arm reasons are derived from the (append-only) message log, so a failure
+  // the FC reported once lingers even after it's fixed. Clearing stamps "now";
+  // only messages newer than this show, so a still-failing check reappears when
+  // the FC re-reports it (which bumps its timestamp) while fixed ones stay gone.
+  const [preArmDismissedAt, setPreArmDismissedAt] = useState(0);
+  const clearPreArm = useCallback(() => {
+    setPreArmDismissedAt(Date.now());
+    setExpandedPreArm(new Set());
+  }, []);
+  // The FC re-broadcasts failing checks every ~30s (bumping the message
+  // timestamp), so a fixed reason ages out after PREARM_STALE_MS while a
+  // still-failing one stays fresh. Tick so freshness re-evaluates even when no
+  // new message arrives. Same approach as PreflightCheckCard.
+  const [preArmNow, setPreArmNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setPreArmNow(Date.now()), 5_000);
+    return () => clearInterval(id);
+  }, []);
   const prevArmedRef = useRef(flight.armed);
   const [modeLoading, setModeLoading] = useState<number | null>(null);
   const [showTakeoffDialog, setShowTakeoffDialog] = useState(false);
@@ -589,8 +607,10 @@ function MavlinkFlightControl({ mavTypeOverride }: { mavTypeOverride?: number })
   // Extract PreArm failure reasons from STATUSTEXT messages
   const preArmReasons = useMemo(() => {
     if (flight.armed) return [];
+    const freshAfter = Math.max(preArmDismissedAt, preArmNow - PREARM_STALE_MS);
     return messages
       .filter((m) => isPreArmMessage(m.text))
+      .filter((m) => m.timestamp >= freshAfter)
       .map((m) => {
         const match = matchPreArmError(m.text);
         return match ? { reason: match.reason, fix: match.pattern.fix } : null;
@@ -598,7 +618,7 @@ function MavlinkFlightControl({ mavTypeOverride }: { mavTypeOverride?: number })
       .filter((x): x is NonNullable<typeof x> => x !== null)
       .filter((x, i, arr) => arr.findIndex((a) => a.reason === x.reason) === i)
       .slice(0, 10);
-  }, [messages, flight.armed]);
+  }, [messages, flight.armed, preArmDismissedAt, preArmNow]);
 
   // Watch for ARM/DISARM command result in messages
   const lastArmResult = useMemo(() => {
@@ -996,6 +1016,13 @@ function MavlinkFlightControl({ mavTypeOverride }: { mavTypeOverride?: number })
                             {reason}
                           </span>
                         ))}
+                        <button
+                          onClick={clearPreArm}
+                          title="Dismiss these. A check that's still failing reappears when the flight controller re-reports it."
+                          className="px-2 py-0.5 bg-surface border border-subtle rounded text-content-secondary hover:text-content text-[11px]"
+                        >
+                          Clear
+                        </button>
                       </div>
                     )}
                   </div>
@@ -1191,7 +1218,16 @@ function MavlinkFlightControl({ mavTypeOverride }: { mavTypeOverride?: number })
 
             {!flight.armed && preArmReasons.length > 0 && (
               <div className="mb-4 bg-red-500/10 border border-red-500/30 rounded-lg">
-                <div className="text-red-400 text-[10px] font-medium uppercase tracking-wider px-2.5 pt-2.5 pb-1.5">Pre-arm Checks Failed</div>
+                <div className="flex items-center justify-between px-2.5 pt-2.5 pb-1.5">
+                  <span className="text-red-400 text-[10px] font-medium uppercase tracking-wider">Pre-arm Checks Failed</span>
+                  <button
+                    onClick={clearPreArm}
+                    title="Dismiss these. A check that's still failing reappears when the flight controller re-reports it."
+                    className="text-[10px] text-content-secondary hover:text-content px-1.5 py-0.5 -my-0.5 rounded hover:bg-red-500/10 transition-colors"
+                  >
+                    Clear
+                  </button>
+                </div>
                 <div className="flex flex-col">
                   {preArmReasons.map(({ reason, fix }, i) => {
                     const isExpanded = expandedPreArm.has(reason);

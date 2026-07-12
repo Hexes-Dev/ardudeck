@@ -63,9 +63,10 @@
   }
 
   /* Boot-check log: each line slides in with a spinner (pending), then its
-     spinner fades and OK pops in. Delays are set per-line via --d inline.
-     The final line stays pending (spinning) until the app signals ready via
-     window.splash.fadeOut(), so the splash never looks "finished" early. */
+     spinner fades and OK pops in. Delays are set per-line via --d inline. The
+     labels are chosen randomly per launch (see script). The final line stays
+     pending (spinning) until the app signals ready via window.splash.fadeOut(),
+     so the splash never looks "finished" before the app actually appears. */
   .log {
     width: 262px;
     font-family: var(--mono);
@@ -106,8 +107,8 @@
   }
   @keyframes okIn { to { opacity: 1; transform: none; } }
 
-  /* Final "Starting interface" line: spins indefinitely, resolves only when
-     the card gets .out (app ready). Overrides the auto spinner/OK timing. */
+  /* Final "ready" line: spins indefinitely, resolves only when the card gets
+     .out (app ready). Overrides the auto spinner/OK timing. */
   .line.hold .spin { animation: spinRot 700ms linear infinite; opacity: 1; }
   .line.hold .ok { animation: none; }
   .card.out .line.hold .spin { opacity: 0; }
@@ -119,19 +120,23 @@
     width: 262px; height: 3px; border-radius: 3px;
     background: rgba(45, 212, 191, 0.12); overflow: hidden;
   }
-  /* Indeterminate loader: a bright segment sweeps the track until ready. */
-  .bar::after {
+  /* Indeterminate loaders (never show "done" until ready) - one per variant. */
+  .bar.sweep::after {
     content: ""; position: absolute; top: 0; left: -42%;
     height: 100%; width: 42%; border-radius: 3px;
     background: linear-gradient(90deg, transparent, var(--teal), transparent);
     animation: indet 1.5s cubic-bezier(0.65, 0.05, 0.35, 1) infinite;
   }
   @keyframes indet { 0% { left: -42%; } 100% { left: 100%; } }
-  /* On ready, stop sweeping and show a full, settled bar. */
+  .bar.pulse::after {
+    content: ""; position: absolute; inset: 0; border-radius: 3px;
+    background: var(--teal); animation: pulseBar 1.7s ease-in-out infinite;
+  }
+  @keyframes pulseBar { 0%, 100% { opacity: 0.22; } 50% { opacity: 0.85; } }
+  /* On ready, stop and show a full, settled bar. */
   .card.out .bar::after {
-    animation: none; left: 0; width: 100%;
+    animation: none; left: 0; inset: 0; width: 100%; opacity: 1;
     background: linear-gradient(90deg, var(--teal-dim), var(--teal));
-    transition: none;
   }
 
   .version {
@@ -149,7 +154,7 @@
     .logo-wrap img, .line { opacity: 1; }
     .spin { display: none; }
     .ok { opacity: 1; transform: none; }
-    .bar::after { left: 0; width: 100%; background: linear-gradient(90deg, var(--teal-dim), var(--teal)); }
+    .bar::after { left: 0; width: 100%; opacity: 1; background: linear-gradient(90deg, var(--teal-dim), var(--teal)); }
   }
 </style>
 </head>
@@ -158,13 +163,8 @@
     <div class="logo-wrap" id="logoWrap">
       <img id="logo" src="logo-splash.png" alt="ArduDeck" />
     </div>
-    <div class="log" id="log">
-      <div class="line" style="--d: 350ms"><span class="lbl">MAVLink link</span><span class="state"><i class="spin"></i><b class="ok">OK</b></span></div>
-      <div class="line" style="--d: 1000ms"><span class="lbl">EKF / AHRS</span><span class="state"><i class="spin"></i><b class="ok">OK</b></span></div>
-      <div class="line" style="--d: 1650ms"><span class="lbl">GPS fix</span><span class="state"><i class="spin"></i><b class="ok">OK</b></span></div>
-      <div class="line hold" style="--d: 2300ms"><span class="lbl">Starting interface</span><span class="state"><i class="spin"></i><b class="ok">OK</b></span></div>
-    </div>
-    <div class="bar" id="bar"></div>
+    <div class="log" id="log"></div>
+    <div class="bar sweep" id="bar"></div>
     <div class="version" id="version"></div>
   </div>
 
@@ -180,21 +180,52 @@
         const el = document.getElementById('version');
         if (el) el.textContent = v ? 'v' + v : '';
       },
-      // App is ready: .out resolves the final "Starting interface" check to OK,
-      // settles the bar to full, then fades the card. Completion is tied to the
-      // real ready signal, not a timer, so the splash never sits done-but-waiting.
+      // App ready: .out resolves the final check to OK, settles the bar to full,
+      // then fades the card. Completion is tied to the real ready signal, not a
+      // timer, so the splash never sits done-but-waiting.
       fadeOut() {
         const card = document.getElementById('card');
         if (card) card.classList.add('out');
       },
     };
 
-    // Brighten each resolved line's label as its OK lands (skip the held final
-    // line - it brightens on ready via the .card.out rule).
-    document.querySelectorAll('.line:not(.hold)').forEach(function (el) {
-      var d = parseFloat(getComputedStyle(el).getPropertyValue('--d')) || 0;
-      setTimeout(function () { el.classList.add('done'); }, d + 750);
-    });
+    // A launch picks one of these at random. Each is the same layout - only the
+    // check labels and loader style differ, so every start feels a little fresh.
+    var VARIANTS = [
+      { loader: 'sweep', checks: ['MAVLink link', 'EKF / AHRS', 'GPS fix'],               final: 'Starting interface' },
+      { loader: 'pulse', checks: ['Flight controller', 'Sensor suite', 'Telemetry link'], final: 'Loading interface' },
+      { loader: 'sweep', checks: ['Serial ports', 'MAVLink v2', 'Parameter cache'],       final: 'Rendering UI' },
+      { loader: 'pulse', checks: ['Map tiles', 'Mission store', 'Vehicle profiles'],      final: 'Starting interface' },
+      { loader: 'sweep', checks: ['Core services', 'Protocol bridge', 'Datalink'],        final: 'Warming up' }
+    ];
+    var BASE = 350, STEP = 650;
+
+    (function buildLog() {
+      var v = VARIANTS[Math.floor(Math.random() * VARIANTS.length)];
+      var html = '';
+      for (var i = 0; i < v.checks.length; i++) {
+        html += '<div class="line" style="--d:' + (BASE + i * STEP) + 'ms">' +
+                '<span class="lbl">' + v.checks[i] + '</span>' +
+                '<span class="state"><i class="spin"></i><b class="ok">OK</b></span></div>';
+      }
+      html += '<div class="line hold" style="--d:' + (BASE + v.checks.length * STEP) + 'ms">' +
+              '<span class="lbl">' + v.final + '</span>' +
+              '<span class="state"><i class="spin"></i><b class="ok">OK</b></span></div>';
+
+      var log = document.getElementById('log');
+      log.innerHTML = html;
+      document.getElementById('bar').className = 'bar ' + v.loader;
+
+      // Brighten each resolved line's label as its OK lands (skip the held final
+      // line - it brightens on ready via the .card.out rule).
+      var lines = log.querySelectorAll('.line:not(.hold)');
+      for (var j = 0; j < lines.length; j++) {
+        (function (el) {
+          var d = parseFloat(getComputedStyle(el).getPropertyValue('--d')) || 0;
+          setTimeout(function () { el.classList.add('done'); }, d + 750);
+        })(lines[j]);
+      }
+    })();
 
     // Graceful fallback to a text wordmark if the logo image is missing.
     var logo = document.getElementById('logo');

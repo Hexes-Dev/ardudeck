@@ -153,6 +153,7 @@ const components: Record<string, React.FC<IDockviewPanelProps>> = {
 // Preset layout definitions (pilotView is the default)
 const PRESET_LAYOUTS = {
   pilotView: 'Pilot View',
+  fpv: 'FPV',
   missionTelemetry: 'Mission Telemetry',
   sitl: 'SITL',
   allPanels: 'All Panels',
@@ -168,52 +169,113 @@ function isPresetLayout(name: string): name is PresetLayoutKey {
   return name in PRESET_LAYOUTS;
 }
 
-// Pilot View preset - Map + FlightControl left, compact telemetry on right.
-// Attitude panel intentionally omitted - the map already renders an attitude indicator overlay.
+// Pilot View preset. Map on top-left with Flight Control as a bottom bar under
+// it, and a compact telemetry stack (Battery, GPS, Altitude, Speed, Position)
+// down the right side. Attitude panel omitted since the map renders an attitude
+// overlay.
 const PILOT_VIEW_LAYOUT: SerializedDockview = {
   grid: {
     root: {
       type: 'branch',
       data: [
-        // Map (primary, takes most of the horizontal space)
+        // Left column: Map on top, Flight Control as a bottom bar under it
         {
-          type: 'leaf',
-          data: { views: ['map'], activeView: 'map', id: '1' },
-          size: 620,
+          type: 'branch',
+          data: [
+            { type: 'leaf', data: { views: ['map'], activeView: 'map', id: '1' }, size: 640 },
+            { type: 'leaf', data: { views: ['flightControl'], activeView: 'flightControl', id: '8' }, size: 240 },
+          ],
+          size: 900,
         },
-        // Flight Control gets its own tall column next to the map
-        {
-          type: 'leaf',
-          data: { views: ['flightControl'], activeView: 'flightControl', id: '8' },
-          size: 280,
-        },
-        // Right telemetry stack
+        // Right telemetry stack (full height)
         {
           type: 'branch',
           data: [
             { type: 'leaf', data: { views: ['battery'], activeView: 'battery', id: '3' }, size: 180 },
-            { type: 'leaf', data: { views: ['gps'], activeView: 'gps', id: '4' }, size: 210 },
+            { type: 'leaf', data: { views: ['gps'], activeView: 'gps', id: '4' }, size: 220 },
             {
               type: 'branch',
               data: [
                 { type: 'leaf', data: { views: ['altitude'], activeView: 'altitude', id: '7' }, size: 160 },
                 { type: 'leaf', data: { views: ['speed'], activeView: 'speed', id: '6' }, size: 160 },
               ],
-              size: 220,
+              size: 200,
             },
             { type: 'leaf', data: { views: ['position'], activeView: 'position', id: '5' }, size: 180 },
           ],
           size: 320,
         },
       ],
-      size: 900,
+      size: 880,
     },
     width: 1220,
-    height: 900,
+    height: 880,
     orientation: Orientation.HORIZONTAL,
   },
   panels: {
     map: { id: 'map', contentComponent: 'MapPanel', title: 'Map' },
+    flightControl: { id: 'flightControl', contentComponent: 'FlightControlPanel', title: 'Flight Control' },
+    battery: { id: 'battery', contentComponent: 'BatteryPanel', title: 'Battery' },
+    gps: { id: 'gps', contentComponent: 'GpsPanel', title: 'GPS' },
+    altitude: { id: 'altitude', contentComponent: 'AltitudePanel', title: 'Altitude' },
+    speed: { id: 'speed', contentComponent: 'SpeedPanel', title: 'Speed' },
+    position: { id: 'position', contentComponent: 'PositionPanel', title: 'Position' },
+  },
+  activeGroup: '1',
+};
+
+// FPV preset. Pilot View plus the Vision panel (live camera or synthetic SITL
+// view) beside the map. Map and Vision share the top row, Flight Control spans
+// the bottom under both, and the telemetry stack stays on the right.
+const FPV_LAYOUT: SerializedDockview = {
+  grid: {
+    root: {
+      type: 'branch',
+      data: [
+        // Left area: Map + Vision row on top, Flight Control bar underneath
+        {
+          type: 'branch',
+          data: [
+            {
+              type: 'branch',
+              data: [
+                { type: 'leaf', data: { views: ['map'], activeView: 'map', id: '1' }, size: 520 },
+                { type: 'leaf', data: { views: ['camera'], activeView: 'camera', id: '2' }, size: 420 },
+              ],
+              size: 640,
+            },
+            { type: 'leaf', data: { views: ['flightControl'], activeView: 'flightControl', id: '8' }, size: 240 },
+          ],
+          size: 940,
+        },
+        // Right telemetry stack (full height)
+        {
+          type: 'branch',
+          data: [
+            { type: 'leaf', data: { views: ['battery'], activeView: 'battery', id: '3' }, size: 180 },
+            { type: 'leaf', data: { views: ['gps'], activeView: 'gps', id: '4' }, size: 220 },
+            {
+              type: 'branch',
+              data: [
+                { type: 'leaf', data: { views: ['altitude'], activeView: 'altitude', id: '7' }, size: 160 },
+                { type: 'leaf', data: { views: ['speed'], activeView: 'speed', id: '6' }, size: 160 },
+              ],
+              size: 200,
+            },
+            { type: 'leaf', data: { views: ['position'], activeView: 'position', id: '5' }, size: 180 },
+          ],
+          size: 320,
+        },
+      ],
+      size: 880,
+    },
+    width: 1260,
+    height: 880,
+    orientation: Orientation.HORIZONTAL,
+  },
+  panels: {
+    map: { id: 'map', contentComponent: 'MapPanel', title: 'Map' },
+    camera: { id: 'camera', contentComponent: 'CameraPanel', title: 'Vision' },
     flightControl: { id: 'flightControl', contentComponent: 'FlightControlPanel', title: 'Flight Control' },
     battery: { id: 'battery', contentComponent: 'BatteryPanel', title: 'Battery' },
     gps: { id: 'gps', contentComponent: 'GpsPanel', title: 'GPS' },
@@ -274,64 +336,85 @@ const MISSION_TELEMETRY_LAYOUT: SerializedDockview = {
   activeGroup: '5',
 };
 
-// All Panels preset - Map center, all telemetry panels around it
+// All Panels preset. Every registered panel laid out at once. Related panels
+// that rarely need to be visible together are grouped as tabs (messages group,
+// mission group, SITL group) to keep the grid readable. Kept in sync with the
+// PANEL_COMPONENTS registry; add new panels here so this stays complete.
 const ALL_PANELS_LAYOUT: SerializedDockview = {
   grid: {
     root: {
       type: 'branch',
       data: [
-        // Left column - flight data
+        // Column 1: flight control + attitude + altitude/speed
         {
           type: 'branch',
           data: [
-            { type: 'leaf', data: { views: ['flightControl'], activeView: 'flightControl', id: '10' }, size: 360 },
-            { type: 'leaf', data: { views: ['altitude'], activeView: 'altitude', id: '2' }, size: 200 },
-            { type: 'leaf', data: { views: ['speed'], activeView: 'speed', id: '3' }, size: 200 },
+            { type: 'leaf', data: { views: ['flightControl'], activeView: 'flightControl', id: '1' }, size: 340 },
+            { type: 'leaf', data: { views: ['attitude'], activeView: 'attitude', id: '2' }, size: 220 },
+            { type: 'leaf', data: { views: ['altitude'], activeView: 'altitude', id: '3' }, size: 150 },
+            { type: 'leaf', data: { views: ['speed'], activeView: 'speed', id: '4' }, size: 150 },
           ],
-          size: 220,
+          size: 240,
         },
-        // Center - Map + Messages
+        // Column 2: Map + Messages / Pre-flight / Safety Monitor tabs
         {
           type: 'branch',
           data: [
-            { type: 'leaf', data: { views: ['map'], activeView: 'map', id: '4' }, size: 650 },
-            { type: 'leaf', data: { views: ['messages', 'preflightCheck'], activeView: 'messages', id: '11' }, size: 250 },
+            { type: 'leaf', data: { views: ['map'], activeView: 'map', id: '5' }, size: 580 },
+            { type: 'leaf', data: { views: ['messages', 'preflightCheck', 'safetyMonitor'], activeView: 'messages', id: '6' }, size: 260 },
           ],
           size: 560,
         },
-        // Right column - system status
+        // Column 3: system status
         {
           type: 'branch',
           data: [
-            { type: 'leaf', data: { views: ['battery'], activeView: 'battery', id: '5' }, size: 250 },
-            { type: 'leaf', data: { views: ['gps'], activeView: 'gps', id: '6' }, size: 150 },
-            { type: 'leaf', data: { views: ['position'], activeView: 'position', id: '7' }, size: 150 },
-            { type: 'leaf', data: { views: ['velocity'], activeView: 'velocity', id: '8' }, size: 150 },
-            { type: 'leaf', data: { views: ['flightMode'], activeView: 'flightMode', id: '9' }, size: 150 },
+            { type: 'leaf', data: { views: ['battery'], activeView: 'battery', id: '7' }, size: 200 },
+            { type: 'leaf', data: { views: ['gps'], activeView: 'gps', id: '8' }, size: 160 },
+            { type: 'leaf', data: { views: ['position'], activeView: 'position', id: '9' }, size: 150 },
+            { type: 'leaf', data: { views: ['velocity'], activeView: 'velocity', id: '10' }, size: 150 },
+            { type: 'leaf', data: { views: ['flightMode'], activeView: 'flightMode', id: '11' }, size: 150 },
           ],
           size: 220,
         },
+        // Column 4: Vision + mission tabs + SITL tabs
+        {
+          type: 'branch',
+          data: [
+            { type: 'leaf', data: { views: ['camera'], activeView: 'camera', id: '12' }, size: 300 },
+            { type: 'leaf', data: { views: ['waypoints', 'altitudeProfile'], activeView: 'waypoints', id: '13' }, size: 280 },
+            { type: 'leaf', data: { views: ['sitlFailures', 'sitlEnvironment'], activeView: 'sitlFailures', id: '14' }, size: 240 },
+          ],
+          size: 260,
+        },
       ],
-      size: 900,
+      size: 880,
     },
-    width: 1000,
-    height: 900,
+    width: 1280,
+    height: 880,
     orientation: Orientation.HORIZONTAL,
   },
   panels: {
-    map: { id: 'map', contentComponent: 'MapPanel', title: 'Map' },
+    flightControl: { id: 'flightControl', contentComponent: 'FlightControlPanel', title: 'Flight Control' },
+    attitude: { id: 'attitude', contentComponent: 'AttitudePanel', title: 'Attitude' },
     altitude: { id: 'altitude', contentComponent: 'AltitudePanel', title: 'Altitude' },
     speed: { id: 'speed', contentComponent: 'SpeedPanel', title: 'Speed' },
+    map: { id: 'map', contentComponent: 'MapPanel', title: 'Map' },
+    messages: { id: 'messages', contentComponent: 'MessagesPanel', title: 'Messages' },
+    preflightCheck: { id: 'preflightCheck', contentComponent: 'PreflightCheckCard', title: 'Pre-flight Checks' },
+    safetyMonitor: { id: 'safetyMonitor', contentComponent: 'SafetyMonitorPanel', title: 'Safety Monitor' },
     battery: { id: 'battery', contentComponent: 'BatteryPanel', title: 'Battery' },
     gps: { id: 'gps', contentComponent: 'GpsPanel', title: 'GPS' },
     position: { id: 'position', contentComponent: 'PositionPanel', title: 'Position' },
     velocity: { id: 'velocity', contentComponent: 'VelocityPanel', title: 'Velocity' },
     flightMode: { id: 'flightMode', contentComponent: 'FlightModePanel', title: 'Flight Mode' },
-    flightControl: { id: 'flightControl', contentComponent: 'FlightControlPanel', title: 'Flight Control' },
-    messages: { id: 'messages', contentComponent: 'MessagesPanel', title: 'Messages' },
-    preflightCheck: { id: 'preflightCheck', contentComponent: 'PreflightCheckCard', title: 'Pre-flight Checks' },
+    camera: { id: 'camera', contentComponent: 'CameraPanel', title: 'Vision' },
+    waypoints: { id: 'waypoints', contentComponent: 'WaypointTablePanel', title: 'Waypoints' },
+    altitudeProfile: { id: 'altitudeProfile', contentComponent: 'AltitudeProfilePanel', title: 'Altitude Profile' },
+    sitlFailures: { id: 'sitlFailures', contentComponent: 'SitlFailureDockPanel', title: 'SITL Failures' },
+    sitlEnvironment: { id: 'sitlEnvironment', contentComponent: 'SitlEnvironmentDockPanel', title: 'SITL Environment' },
   },
-  activeGroup: '4',
+  activeGroup: '5',
 };
 
 // SITL preset - Map + Messages center, Flight Control + telemetry left, GPS + SITL panels right
@@ -447,6 +530,9 @@ function loadPresetLayout(api: DockviewApi, preset: PresetLayoutKey): void {
   switch (preset) {
     case 'pilotView':
       api.fromJSON(PILOT_VIEW_LAYOUT);
+      break;
+    case 'fpv':
+      api.fromJSON(FPV_LAYOUT);
       break;
     case 'missionTelemetry':
       api.fromJSON(MISSION_TELEMETRY_LAYOUT);

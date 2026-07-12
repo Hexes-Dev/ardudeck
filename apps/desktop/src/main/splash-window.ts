@@ -97,7 +97,7 @@ export function splashSetStatus(win: BrowserWindow | null, text: string): void {
 export function closeSplash(win: BrowserWindow | null): void {
   if (!win || win.isDestroyed()) return;
   splashRun(win, 'window.splash.fadeOut()');
-  // fadeOut() plays a completion beat (final check → OK, bar fills, ~140ms)
+  // fadeOut() plays a completion beat (final check to OK, bar fills, ~140ms)
   // then the 300ms card fade. Wait for the whole ~440ms before closing so the
   // fade isn't cut off mid-animation.
   setTimeout(() => {

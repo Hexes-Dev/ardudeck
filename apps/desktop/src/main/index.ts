@@ -132,6 +132,11 @@ function createWindow(splash?: BrowserWindow | null): BrowserWindow {
     minWidth: 800,
     minHeight: 600,
     show: false,
+    // Match the app's dark canvas (--bg-base). Without this the window defaults
+    // to white, so any moment it's shown before the renderer's first paint (e.g.
+    // the handoff fallback below on a slow load) flashes a blank WHITE screen.
+    // Dark bg means a not-yet-painted window reads as "loading", not "broken".
+    backgroundColor: '#0a0a0f',
     autoHideMenuBar: true,
     icon: iconPath,
     webPreferences: {
@@ -147,15 +152,19 @@ function createWindow(splash?: BrowserWindow | null): BrowserWindow {
     splashSetStatus(splash ?? null, 'Loading interface');
   });
 
-  // Safety net: if ready-to-show never fires, don't leave the splash orphaned
-  // (or the main window forever hidden). Close splash and reveal main anyway.
+  // Last-resort safety net: ready-to-show (below) is the clean handoff - it
+  // only fires after the renderer's first paint, so a slow load simply keeps the
+  // splash up until it's genuinely ready. This timeout exists ONLY for the case
+  // where ready-to-show never fires at all; it's generous (20s) so a merely-slow
+  // first paint is never force-shown as an unpainted window. Even if it does
+  // fire, the dark backgroundColor above means the fallback isn't a white flash.
   const handoffTimeout = setTimeout(() => {
     if (!mainWindow.isDestroyed() && !mainWindow.isVisible()) {
-      console.warn('[Main] ready-to-show timed out; forcing window handoff');
+      console.warn('[Main] ready-to-show never fired after 20s; forcing window handoff');
       closeSplash(splash ?? null);
       mainWindow.show();
     }
-  }, 8000);
+  }, 20000);
 
   mainWindow.on('ready-to-show', () => {
     clearTimeout(handoffTimeout);
@@ -174,12 +183,47 @@ function createWindow(splash?: BrowserWindow | null): BrowserWindow {
     mainWindow.webContents.openDevTools();
   }
 
-  // Load the app
-  if (isDev && process.env['ELECTRON_RENDERER_URL']) {
-    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL']);
-  } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'));
+  // Load the app. Wrapped in a retry because an intermittent failed load leaves
+  // the window blank (white/grey screen) forever with nothing to recover it -
+  // e.g. the dev server not being up yet on a cold start, or a transient
+  // navigation abort. did-fail-load re-tries with backoff instead of stranding
+  // the user on an empty window.
+  const rendererUrl = isDev ? process.env['ELECTRON_RENDERER_URL'] : undefined;
+  const MAX_LOAD_ATTEMPTS = 5;
+  let loadAttempts = 0;
+  function loadRenderer(): void {
+    loadAttempts++;
+    if (rendererUrl) {
+      mainWindow.loadURL(rendererUrl).catch(() => { /* handled by did-fail-load */ });
+    } else {
+      mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+        .catch(() => { /* handled by did-fail-load */ });
+    }
   }
+
+  mainWindow.webContents.on('did-fail-load', (_e, errorCode, errorDescription, _url, isMainFrame) => {
+    // -3 = ERR_ABORTED: a superseded navigation, not a real failure. Only the
+    // main frame failing to load produces the blank-window symptom.
+    if (!isMainFrame || errorCode === -3) return;
+    if (loadAttempts < MAX_LOAD_ATTEMPTS && !mainWindow.isDestroyed()) {
+      const delay = 300 * loadAttempts;
+      console.warn(`[Main] renderer load failed (${errorCode} ${errorDescription}); retry ${loadAttempts}/${MAX_LOAD_ATTEMPTS} in ${delay}ms`);
+      setTimeout(() => { if (!mainWindow.isDestroyed()) loadRenderer(); }, delay);
+    } else {
+      console.error(`[Main] renderer failed to load after ${loadAttempts} attempts: ${errorCode} ${errorDescription}`);
+    }
+  });
+
+  // Recover from a renderer crash (also surfaces as a blank window) by reloading.
+  mainWindow.webContents.on('render-process-gone', (_e, details) => {
+    console.error('[Main] renderer process gone:', details.reason);
+    if (details.reason !== 'clean-exit' && !mainWindow.isDestroyed()) {
+      loadAttempts = 0;
+      loadRenderer();
+    }
+  });
+
+  loadRenderer();
 
   return mainWindow;
 }
