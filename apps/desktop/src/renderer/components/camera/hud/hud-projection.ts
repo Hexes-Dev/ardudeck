@@ -15,3 +15,23 @@ const PITCH_HALF_SPAN = 18;
 const PITCH_BAND = 250;
 /** viewBox units per degree of pitch / azimuth. */
 export const HUD_PX_PER_DEG = PITCH_BAND / PITCH_HALF_SPAN;
+
+import type { HudProjection } from '@ardudeck/module-sdk';
+import type { HudConfig } from './hud-config';
+import { HUD_COLORS } from './hud-config';
+
+/** Build the HUD projection (geometry + resolved style) from a HUD config. The
+ *  single source of truth for both the live host.hud projection and the
+ *  module-instrument renderer, so module symbology matches the built-in HUD. */
+export function buildHudProjection(config: HudConfig): HudProjection {
+  return {
+    viewBoxW: HUD_VIEWBOX_W,
+    viewBoxH: HUD_VIEWBOX_H,
+    centerX: HUD_CENTER_X,
+    centerY: HUD_CENTER_Y,
+    pxPerDeg: HUD_PX_PER_DEG,
+    scale: config.scale,
+    color: HUD_COLORS[config.color],
+    lineWeight: config.lineWeight,
+  };
+}

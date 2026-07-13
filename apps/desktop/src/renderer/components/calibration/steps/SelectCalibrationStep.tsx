@@ -11,6 +11,7 @@ import { useTelemetryStore } from '../../../stores/telemetry-store';
 import { type CalibrationTypeId } from '../../../../shared/calibration-types';
 import { LargeVehicleMagCalDialog } from '../LargeVehicleMagCalDialog';
 import { LoadCalibrationFromFileDialog } from '../LoadCalibrationFromFileDialog';
+import { CompassMotDialog } from '../CompassMotDialog';
 
 // Map calibration type IDs to arming flag names that indicate calibration is needed
 // iNav flags: 'Accelerometer', 'Compass', 'No Gyro'
@@ -205,6 +206,7 @@ export function SelectCalibrationStep() {
   const flight = useTelemetryStore((s) => s.flight);
   const [showLargeVehicleMagCal, setShowLargeVehicleMagCal] = useState(false);
   const [showLoadCalFromFile, setShowLoadCalFromFile] = useState(false);
+  const [showCompassMot, setShowCompassMot] = useState(false);
 
   // Get arming disabled reasons from telemetry
   const armingDisabledReasons = flight.armingDisabledReasons || [];
@@ -364,6 +366,28 @@ export function SelectCalibrationStep() {
             </button>
           </div>
 
+          {/* Compass/Motor calibration - compassmot (#102) */}
+          <div className="flex items-center gap-3 p-4 rounded-xl border border-orange-500/20 bg-gradient-to-br from-orange-500/5 via-transparent to-red-500/5">
+            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-orange-500/20 to-red-500/20 text-orange-400 flex items-center justify-center shrink-0">
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
+              </svg>
+            </div>
+            <div className="flex-1 min-w-0">
+              <h4 className="text-sm font-semibold text-content">Compass/Motor Calibration</h4>
+              <p className="text-xs text-content-secondary mt-0.5 leading-relaxed">
+                Measures compass interference from the motors under load and writes COMPASS_MOT
+                compensation. Copter only. Motors spin, secure the vehicle first.
+              </p>
+            </div>
+            <button
+              onClick={() => setShowCompassMot(true)}
+              className="px-3 py-1.5 rounded-lg text-xs font-medium text-orange-300 bg-orange-500/10 border border-orange-500/30 hover:bg-orange-500/20 hover:border-orange-400/60 transition-colors shrink-0"
+            >
+              Run
+            </button>
+          </div>
+
           {/* Load calibration from file (#16) */}
           <div className="flex items-center gap-3 p-4 rounded-xl border border-cyan-500/20 bg-gradient-to-br from-cyan-500/5 via-transparent to-blue-500/5">
             <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-cyan-500/20 to-blue-500/20 text-cyan-400 flex items-center justify-center shrink-0">
@@ -401,6 +425,10 @@ export function SelectCalibrationStep() {
 
       {showLoadCalFromFile && (
         <LoadCalibrationFromFileDialog onClose={() => setShowLoadCalFromFile(false)} />
+      )}
+
+      {showCompassMot && (
+        <CompassMotDialog onClose={() => setShowCompassMot(false)} />
       )}
     </div>
   );

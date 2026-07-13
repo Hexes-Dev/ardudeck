@@ -110,6 +110,9 @@ export interface HudConfig {
   scale: number;
   /** Positions (1600x900 viewBox coords) of movable widgets. */
   positions: Record<string, Vec2>;
+  /** On/off state of module-contributed HUD instruments, keyed by their id.
+      Absent = off. Not arrangement-specific (modules manage their own draw). */
+  moduleInstruments: Record<string, boolean>;
 }
 
 /** Default anchor positions for movable widgets in the 1600x900 viewBox. */
@@ -173,6 +176,7 @@ export const DEFAULT_HUD_CONFIG: HudConfig = {
   units: 'metric',
   scale: 1,
   positions: { ...DEFAULT_POSITIONS },
+  moduleInstruments: {},
 };
 
 // ── unit conversions ────────────────────────────────────────────────────────
@@ -234,5 +238,6 @@ export function normalizeHudConfig(partial: Partial<HudConfig> | undefined): Hud
     widgets: { ...DEFAULT_HUD_CONFIG.widgets, ...(partial.widgets ?? {}) },
     widgetsGround: { ...DEFAULT_GROUND_WIDGETS, ...(partial.widgetsGround ?? {}) },
     positions: { ...DEFAULT_POSITIONS, ...(partial.positions ?? {}) },
+    moduleInstruments: { ...(partial.moduleInstruments ?? {}) },
   };
 }

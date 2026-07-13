@@ -1805,6 +1805,15 @@ const api = {
   calibrationLargeVehicleMagCal: (headingDeg: number): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke(IPC_CHANNELS.CALIBRATION_LARGE_VEHICLE_MAGCAL, headingDeg),
 
+  /** Start compass/motor calibration (ArduPilot compassmot). The FC streams
+   * COMPASSMOT_STATUS while the user raises throttle; decode it via onPacket. */
+  calibrationCompassMotStart: (): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke(IPC_CHANNELS.CALIBRATION_COMPASSMOT_START),
+
+  /** Finish compassmot - the FC writes COMPASS_MOT_* and exits the loop. */
+  calibrationCompassMotStop: (): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke(IPC_CHANNELS.CALIBRATION_COMPASSMOT_STOP),
+
   /** Listen for calibration progress updates */
   onCalibrationProgress: (callback: (progress: CalibrationProgressEvent) => void) => {
     const handler = (_: unknown, progress: unknown) => callback(progress as CalibrationProgressEvent);

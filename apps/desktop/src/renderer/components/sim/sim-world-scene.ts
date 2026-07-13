@@ -67,6 +67,10 @@ export interface SimVehicleFrame {
   /** ArduPilot vehicle class ('copter' | 'plane' | 'vtol' | 'rover' | 'sub'),
       picks the 3D model (quad fallback). Undefined → quad. */
   vehicleClass?: string;
+  /** Normalized motor activity 0..1 (from real throttle / motor PWM). When set,
+      it drives prop spin - scaling the rate and turning props even while
+      disarmed (compassmot, motor test). Omit to fall back to the armed flag. */
+  throttle01?: number;
 }
 
 /** A mission waypoint expressed in local NED metres from home. */
@@ -176,6 +180,9 @@ interface VehicleObjects {
   disposables: Array<{ dispose: () => void }>;
   lastPos: THREE.Vector3;
   armed: boolean;
+  /** Normalized motor activity 0..1 driving prop spin; -1 = unknown (fall back
+      to the armed flag). Updated from telemetry each frame. */
+  motorActivity: number;
 }
 
 /** Draw a vehicle's label text into its canvas texture (tinted to its colour). */
@@ -588,6 +595,7 @@ export function createSimWorldScene(canvas: HTMLCanvasElement): SimWorldScene {
         labelMat, labelTexture, selRingGeom, selRingMat],
       lastPos: new THREE.Vector3(),
       armed,
+      motorActivity: -1,
     };
     // If its model wasn't ready, keep the procedural frame and queue a swap-in.
     if (USE_VEHICLE_MODEL && !usesModel) pendingModels.push(v);
@@ -800,6 +808,8 @@ export function createSimWorldScene(canvas: HTMLCanvasElement): SimWorldScene {
           v.ledMat.emissive.setHex(accent);
         }
 
+        v.motorActivity = typeof f.throttle01 === 'number' ? Math.max(0, Math.min(1, f.throttle01)) : -1;
+
         // Ground shadow tracks x/z; grows + fades with altitude.
         const alt = Math.max(0, posVec.y);
         v.shadow.position.set(posVec.x, 0.04, posVec.z);
@@ -840,11 +850,23 @@ export function createSimWorldScene(canvas: HTMLCanvasElement): SimWorldScene {
     },
 
     render() {
-      // Spin props on armed vehicles for a sense of life (counter-rotate alternates).
+      // Spin props to reflect real motor output. When telemetry supplies motor
+      // activity (0..1) the rate scales with it and the props turn even while
+      // disarmed - so compassmot and motor test show real spin-up. Without that
+      // signal we fall back to a fixed spin on armed vehicles (counter-rotate
+      // alternates) for a sense of life.
       for (const v of vehicles.values()) {
-        if (!v.armed) continue;
+        let rate: number;
+        if (v.motorActivity >= 0) {
+          if (v.motorActivity <= 0.005) continue; // motors idle -> still props
+          // Floor keeps a slow idle spin visible; scales up to full at 100%.
+          rate = PROP_SPIN * (0.12 + 0.88 * v.motorActivity);
+        } else {
+          if (!v.armed) continue;
+          rate = PROP_SPIN;
+        }
         for (let i = 0; i < v.props.length; i++) {
-          v.props[i]!.rotation[v.spinAxis] += i % 2 === 0 ? PROP_SPIN : -PROP_SPIN;
+          v.props[i]!.rotation[v.spinAxis] += i % 2 === 0 ? rate : -rate;
         }
       }
       updateCamera();

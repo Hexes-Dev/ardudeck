@@ -5,14 +5,15 @@
  * live to both the designer preview and the video overlay.
  */
 
-import { useState } from 'react';
+import { useState, useSyncExternalStore } from 'react';
 import {
   Minus, Rows3, LocateFixed, Crosshair, RotateCw, Compass, Gauge, ArrowUpDown,
   TrendingUp, Activity, Battery, Home, Radio, LayoutGrid, Palette, Bookmark,
-  Trash2, RotateCcw, Layers, SlidersHorizontal, Car, Plane,
+  Trash2, RotateCcw, Layers, SlidersHorizontal, Car, Plane, Puzzle,
   type LucideIcon,
 } from 'lucide-react';
 import { useHudStore } from '../../stores/hud-store';
+import { listModuleHudInstruments, subscribeModuleHudInstruments } from '../../modules/module-hud-registry';
 import { HUD_WIDGETS, HUD_COLORS, type HudColor, type HudProfile, type HudWidgetId } from '../camera/hud/hud-config';
 import { HUD_READOUTS, type HudReadoutCategory } from '../camera/hud/hud-readouts';
 
@@ -53,6 +54,14 @@ export function HudPanel() {
   const designGround = useHudStore((s) => s.designGround);
   const setDesignGround = useHudStore((s) => s.setDesignGround);
   const setProfile = useHudStore((s) => s.setProfile);
+  const toggleModuleInstrument = useHudStore((s) => s.toggleModuleInstrument);
+
+  // Module-contributed instruments (e.g. a cargo's CCRP/CCIP reticle). Re-read
+  // when a module registers or unregisters one (snapshot on count so React does
+  // not loop). Absent when no such cargo is loaded, so nothing extra shows for
+  // users without the module.
+  useSyncExternalStore(subscribeModuleHudInstruments, () => listModuleHudInstruments().length);
+  const moduleInstruments = listModuleHudInstruments();
 
   const [presetName, setPresetName] = useState('');
   const presetNames = Object.keys(presets);
@@ -121,6 +130,25 @@ export function HudPanel() {
               </span>
               <span className="flex-1 truncate">{wdef.label}</span>
               {wdef.movable && <span className="text-[9px] uppercase tracking-wide text-content-tertiary">drag</span>}
+              <span className={`h-3.5 w-3.5 shrink-0 rounded-[4px] border transition-colors ${on ? 'border-blue-500 bg-blue-500' : 'border-strong bg-surface-input'} flex items-center justify-center`}>
+                {on && <svg viewBox="0 0 24 24" className="h-2.5 w-2.5 text-white" fill="none" stroke="currentColor" strokeWidth="3"><path d="M20 6L9 17l-5-5" /></svg>}
+              </span>
+            </button>
+          );
+        })}
+        {moduleInstruments.map((inst) => {
+          const on = !!config.moduleInstruments[inst.id];
+          return (
+            <button
+              key={inst.id}
+              onClick={() => toggleModuleInstrument(inst.id)}
+              className={`group flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[11px] transition-colors hover:bg-surface-raised ${on ? 'text-content' : 'text-content-secondary'}`}
+            >
+              <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${on ? 'bg-blue-500/15 text-blue-400' : 'bg-surface-raised text-content-tertiary'}`}>
+                <Puzzle className="h-3.5 w-3.5" />
+              </span>
+              <span className="flex-1 truncate">{inst.label}</span>
+              <span className="text-[9px] uppercase tracking-wide text-content-tertiary">module</span>
               <span className={`h-3.5 w-3.5 shrink-0 rounded-[4px] border transition-colors ${on ? 'border-blue-500 bg-blue-500' : 'border-strong bg-surface-input'} flex items-center justify-center`}>
                 {on && <svg viewBox="0 0 24 24" className="h-2.5 w-2.5 text-white" fill="none" stroke="currentColor" strokeWidth="3"><path d="M20 6L9 17l-5-5" /></svg>}
               </span>

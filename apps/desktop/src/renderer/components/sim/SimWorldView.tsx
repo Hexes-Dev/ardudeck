@@ -83,6 +83,34 @@ function telemetryToState(
   };
 }
 
+/**
+ * Normalized motor activity 0..1 for driving prop spin, from real telemetry.
+ *
+ * Copters/VTOLs use SERVO_OUTPUT_RAW (the actual motor PWM, present even while
+ * disarmed) so compassmot and motor test show real spin-up; their main-rail
+ * outputs are all motors. Planes ride VFR_HUD throttle instead, since their
+ * other outputs are control surfaces, not the prop. Rover/sub have no props.
+ */
+export function motorActivity01(
+  vehicleClass: string | undefined,
+  vfrThrottlePct: number | undefined,
+  servoOutputs: number[] | undefined,
+): number | undefined {
+  const cls = vehicleClass ?? 'copter';
+  if (cls === 'rover' || cls === 'sub') return undefined;
+  const throttleFrac = Math.max(0, Math.min(1, (vfrThrottlePct ?? 0) / 100));
+  if ((cls === 'copter' || cls === 'vtol') && servoOutputs && servoOutputs.length > 0) {
+    let maxFrac = 0;
+    for (const pwm of servoOutputs) {
+      if (pwm < 1000) continue; // disabled / zero channel
+      const frac = Math.min(1, (pwm - 1000) / 1000);
+      if (frac > maxFrac) maxFrac = frac;
+    }
+    return Math.max(throttleFrac, maxFrac);
+  }
+  return throttleFrac;
+}
+
 export default function SimWorldView() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -253,6 +281,7 @@ export default function SimWorldView() {
               batteryVoltage: t.battery && t.battery.voltage > 0 ? t.battery.voltage : undefined,
             };
             const isActive = v.key === activeKey;
+            const cls = getVehicleClass(v.mavType, { qEnable: qEnableRef.current });
             frames.push({
               id: v.key,
               position: state.position,
@@ -262,7 +291,8 @@ export default function SimWorldView() {
               color: resolveVehicleColor(overrides, v.key, v.sysid),
               label: multi ? `SYS ${v.sysid}` : '',
               active: isActive && multi,
-              vehicleClass: getVehicleClass(v.mavType, { qEnable: qEnableRef.current }),
+              vehicleClass: cls,
+              throttle01: motorActivity01(cls, t.vfrHud?.throttle, t.servoOutput?.outputs),
             });
             if (isActive) activePrimary = state;
             if (!firstPrimary) firstPrimary = state;
@@ -274,9 +304,18 @@ export default function SimWorldView() {
         // SITL (built-in physics) - or a real connected vehicle - shows up here,
         // not only the ArduDeck Sim engine.
         primary = telemetryToState(geoOriginRef);
+        const t = useTelemetryStore.getState();
         const cls = getVehicleClass(useConnectionStore.getState().connectionState.mavType, { qEnable: qEnableRef.current });
         frames = primary
-          ? [{ id: primary.id, position: primary.position, quaternion: primary.quaternion, euler: primary.euler, armed: false, vehicleClass: cls }]
+          ? [{
+              id: primary.id,
+              position: primary.position,
+              quaternion: primary.quaternion,
+              euler: primary.euler,
+              armed: t.flight?.armed ?? false,
+              vehicleClass: cls,
+              throttle01: motorActivity01(cls, t.vfrHud?.throttle, t.servoOutput?.outputs),
+            }]
           : [];
       }
 

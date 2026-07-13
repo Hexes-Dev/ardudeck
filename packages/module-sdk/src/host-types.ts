@@ -114,6 +114,62 @@ export interface OsdCharBuffer {
   setChar(x: number, y: number, code: number): void;
 }
 
+/** Flight values passed to a HUD instrument's render(), a documented subset of
+ *  what the HUD itself draws. Demo values in the designer, live on the camera. */
+export interface HudValueSnapshot {
+  roll: number;
+  pitch: number;
+  heading: number;
+  airspeed: number;
+  groundspeed: number;
+  altitude: number;
+  vario: number;
+  throttle: number;
+  vx?: number;
+  vy?: number;
+  vz?: number;
+  lat?: number;
+  lon?: number;
+}
+
+/** A mission waypoint, for instruments that target the flight plan. */
+export interface HudMissionWaypoint {
+  seq?: number;
+  latitude?: number;
+  longitude?: number;
+}
+
+/** A guided "go here" target, if one is set. */
+export interface HudCommandTarget {
+  type?: string;
+  lat: number;
+  lon: number;
+}
+
+/** Everything a HUD instrument needs to draw, in the HUD's own coordinate space. */
+export interface HudInstrumentContext {
+  projection: HudProjection;
+  values: HudValueSnapshot;
+  mission: HudMissionWaypoint[];
+  commandTarget: HudCommandTarget | null;
+}
+
+/** A toggleable HUD instrument contributed by a module (see host.hud). */
+export interface HudInstrumentRegistration {
+  /** Stable id; reverse-DNS prefix recommended so it can't collide. */
+  id: string;
+  /** Label shown in the HUD Instruments list. */
+  label: string;
+  /**
+   * Draw the instrument into the HUD. Return SVG elements (e.g. a <g>) laid out
+   * in the projection's viewBox; the host wraps them in the HUD's <svg> so they
+   * align with the built-in symbology. Called wherever the HUD renders - the
+   * live camera overlay AND the OSD Tool designer preview - so the instrument
+   * behaves like a first-party one. Return type is opaque (a React node).
+   */
+  render?(ctx: HudInstrumentContext): unknown;
+}
+
 export interface OsdElementRegistration {
   /** Stable id serialized into saved OSD layouts. Must NOT collide with a
    *  built-in element id; using the module's reverse-DNS prefix is recommended. */
@@ -208,6 +264,18 @@ export interface RendererHostApi {
   hud: {
     getProjection(): HudProjection | null;
     subscribe(listener: (p: HudProjection | null) => void): () => void;
+    /**
+     * Contribute a toggleable instrument to the HUD overlay's Instruments list,
+     * alongside the built-ins. The user's checkbox drives its on/off state; read
+     * it back with isInstrumentEnabled() from your cameraOverlay component and
+     * draw only when enabled. The row appears only while this module is loaded,
+     * so it never clutters the HUD for users without the module.
+     */
+    registerInstrument(reg: HudInstrumentRegistration): void;
+    /** Remove an instrument this module registered. Other modules' ids are ignored. */
+    unregisterInstrument(id: string): void;
+    /** Current on/off state of a registered instrument (false if unknown). */
+    isInstrumentEnabled(id: string): boolean;
   };
   /**
    * Contribute a character-cell OSD element. It appears in the OSD Designer

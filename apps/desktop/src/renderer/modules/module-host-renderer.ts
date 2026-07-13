@@ -8,18 +8,15 @@ import { useMissionStore } from '../stores/mission-store';
 import { useCommandTargetStore, SELF_VEHICLE_ID } from '../stores/command-target-store';
 import { useHudStore } from '../stores/hud-store';
 import { useHudOverlayStore } from '../stores/hud-overlay-store';
-import { HUD_COLORS } from '../components/camera/hud/hud-config';
-import {
-  HUD_VIEWBOX_W,
-  HUD_VIEWBOX_H,
-  HUD_CENTER_X,
-  HUD_CENTER_Y,
-  HUD_PX_PER_DEG,
-} from '../components/camera/hud/hud-projection';
+import { buildHudProjection } from '../components/camera/hud/hud-projection';
 import {
   registerModuleOsdElement,
   unregisterModuleOsdElement,
 } from './module-osd-registry';
+import {
+  registerModuleHudInstrument,
+  unregisterModuleHudInstrument,
+} from './module-hud-registry';
 import {
   registerModulePanel,
   unregisterModulePanel,
@@ -34,17 +31,7 @@ type RegisterFn = (slug: string, name: MountPointName, component: ComponentType)
 
 function currentHudProjection(): HudProjection | null {
   if (!useHudOverlayStore.getState().active) return null;
-  const config = useHudStore.getState().config;
-  return {
-    viewBoxW: HUD_VIEWBOX_W,
-    viewBoxH: HUD_VIEWBOX_H,
-    centerX: HUD_CENTER_X,
-    centerY: HUD_CENTER_Y,
-    pxPerDeg: HUD_PX_PER_DEG,
-    scale: config.scale,
-    color: HUD_COLORS[config.color],
-    lineWeight: config.lineWeight,
-  };
+  return buildHudProjection(useHudStore.getState().config);
 }
 
 // Which generator ids each module registered, so a module can only remove its
@@ -123,13 +110,16 @@ export function createRendererHostApi(
       subscribe: (listener) => {
         const notify = () => listener(currentHudProjection());
         const unActive = useHudOverlayStore.subscribe(notify);
-        // Scale / colour / line-weight live in the HUD config store.
+        // Scale / colour / line-weight / instrument toggles live in the config store.
         const unConfig = useHudStore.subscribe(notify);
         return () => {
           unActive();
           unConfig();
         };
       },
+      registerInstrument: (reg) => registerModuleHudInstrument(slug, reg),
+      unregisterInstrument: (id) => unregisterModuleHudInstrument(slug, id),
+      isInstrumentEnabled: (id) => useHudStore.getState().isModuleInstrumentEnabled(id),
     },
 
     osd: {

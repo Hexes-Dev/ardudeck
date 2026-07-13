@@ -20,6 +20,7 @@ import {
   DEFAULT_POSITIONS,
 } from './hud-config';
 import { HUD_READOUTS, formatReadout } from './hud-readouts';
+import { ModuleHudInstruments } from './ModuleHudInstruments';
 import {
   HUD_VIEWBOX_W,
   HUD_VIEWBOX_H,
@@ -304,6 +305,10 @@ export const FighterHud = memo(function FighterHud({ v, config, profile = 'air',
           );
         })}
       </g>
+
+      {/* Module-contributed instruments (e.g. a cargo's CCRP/CCIP reticle),
+          drawn in the same viewBox so they line up with the built-ins. */}
+      <ModuleHudInstruments v={v} config={config} />
     </svg>
   );
 });

@@ -75,6 +75,8 @@ export interface MavlinkCalibrationDeps {
     param1: number; param2: number; param3: number; param4: number;
     param5: number; param6: number; param7: number;
   }) => Promise<boolean>;
+  /** Send a MAVLink COMMAND_ACK to the FC. Returns true if packet was sent. */
+  sendCommandAck: (command: number, result: number) => Promise<boolean>;
   sendLog: (level: 'info' | 'warn' | 'error', message: string, details?: string) => void;
   sendProgress: (event: CalibrationProgressEvent) => void;
   sendComplete: (event: CalibrationCompleteEvent) => void;
@@ -110,6 +112,12 @@ const ONE_SHOT_TIMEOUT_MS = 15000;
 let pendingFixedMagCalYawResolver: ((result: { success: boolean; error?: string }) => void) | null = null;
 let pendingFixedMagCalYawTimeoutId: ReturnType<typeof setTimeout> | null = null;
 const FIXED_MAG_CAL_YAW_TIMEOUT_MS = 10000;
+
+// Compass/motor calibration (compassmot). Runs outside the activeCalType state
+// machine: the FC does not ACK the start command, it just enters the loop and
+// streams COMPASSMOT_STATUS (decoded renderer-side). Finishing is a COMMAND_ACK
+// for PREFLIGHT_CALIBRATION, which tells the FC to write COMPASS_MOT_* and exit.
+let compassMotActive = false;
 
 // =============================================================================
 // Init
@@ -176,6 +184,57 @@ export async function sendFixedMagCalYaw(headingDeg: number): Promise<{ success:
       }
     }, FIXED_MAG_CAL_YAW_TIMEOUT_MS);
   });
+}
+
+/**
+ * Start compass/motor calibration (compassmot).
+ *
+ * Sends MAV_CMD_PREFLIGHT_CALIBRATION with param6=1. ArduPilot enters a mode
+ * where raising the throttle spins the motors and it samples the compass
+ * interference against throttle/current, streaming COMPASSMOT_STATUS (177) the
+ * whole time. There is no start ACK - the running state is confirmed by the
+ * arrival of COMPASSMOT_STATUS frames, which the renderer decodes directly.
+ */
+export async function startCompassMot(): Promise<{ success: boolean; error?: string }> {
+  if (!deps) return { success: false, error: 'MAVLink calibration not initialized' };
+  if (compassMotActive) return { success: false, error: 'CompassMot already in progress' };
+
+  deps.sendLog('info', 'Starting CompassMot (PREFLIGHT_CALIBRATION param6=1)');
+
+  const sent = await deps.sendCommandLong(MAV_CMD_PREFLIGHT_CALIBRATION, {
+    param1: 0, param2: 0, param3: 0, param4: 0,
+    param5: 0,
+    param6: 1, // compass/motor calibration
+    param7: 0,
+  });
+
+  if (!sent) {
+    return { success: false, error: 'Failed to send command - ensure FC is connected' };
+  }
+
+  compassMotActive = true;
+  return { success: true };
+}
+
+/**
+ * Finish compassmot. ArduPilot exits its calibration loop and writes the
+ * computed COMPASS_MOT_* offsets when it receives a COMMAND_ACK for
+ * PREFLIGHT_CALIBRATION. Mission Planner sends it twice for reliability over
+ * lossy links, so we do the same.
+ */
+export async function stopCompassMot(): Promise<{ success: boolean; error?: string }> {
+  if (!deps) return { success: false, error: 'MAVLink calibration not initialized' };
+
+  deps.sendLog('info', 'Finishing CompassMot (COMMAND_ACK for PREFLIGHT_CALIBRATION)');
+
+  const sent = await deps.sendCommandAck(MAV_CMD_PREFLIGHT_CALIBRATION, 0);
+  await deps.sendCommandAck(MAV_CMD_PREFLIGHT_CALIBRATION, 0);
+  compassMotActive = false;
+
+  if (!sent) {
+    return { success: false, error: 'Failed to send finish command - ensure FC is connected' };
+  }
+  return { success: true };
 }
 
 export async function startMavlinkCalibration(type: CalibrationTypeId): Promise<{ success: boolean; error?: string }> {
@@ -275,6 +334,7 @@ export function cancelMavlinkCalibration(): void {
     oneShotTimeoutId = null;
   }
   activeCalType = null;
+  compassMotActive = false;
   expectedPosition = -1;
   positionStatus = [false, false, false, false, false, false];
 }

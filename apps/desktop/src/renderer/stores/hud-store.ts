@@ -49,6 +49,10 @@ interface HudStore {
   designGround: boolean;
 
   toggleWidget: (id: HudWidgetId, ground?: boolean) => void;
+  /** Toggle a module-contributed HUD instrument (see module-hud-registry). */
+  toggleModuleInstrument: (id: string) => void;
+  /** Whether a module-contributed instrument is currently on. */
+  isModuleInstrumentEnabled: (id: string) => boolean;
   setProfile: (p: HudProfile) => void;
   setDesignGround: (g: boolean) => void;
   setColor: (c: HudColor) => void;
@@ -85,6 +89,16 @@ export const useHudStore = create<HudStore>((set, get) => ({
     });
     persist(get);
   },
+  toggleModuleInstrument: (id) => {
+    set((s) => ({
+      config: {
+        ...s.config,
+        moduleInstruments: { ...s.config.moduleInstruments, [id]: !s.config.moduleInstruments[id] },
+      },
+    }));
+    persist(get);
+  },
+  isModuleInstrumentEnabled: (id) => !!get().config.moduleInstruments[id],
   setProfile: (profile) => { set((s) => ({ config: { ...s.config, profile } })); persist(get); },
   setDesignGround: (designGround) => set({ designGround }),
   setColor: (color) => { set((s) => ({ config: { ...s.config, color } })); persist(get); },

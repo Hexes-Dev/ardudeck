@@ -25,6 +25,8 @@ import {
   cancelMavlinkCalibration,
   isMavlinkCalibrationActive,
   sendFixedMagCalYaw,
+  startCompassMot,
+  stopCompassMot,
   type MavlinkCalibrationDeps,
 } from './mavlink-calibration.js';
 
@@ -552,6 +554,10 @@ export function initCalibrationHandlers(
     sendFixedMagCalYaw(headingDeg)
   );
 
+  // Compass/motor calibration (ArduPilot) - start/finish compassmot
+  ipcMain.handle(IPC_CHANNELS.CALIBRATION_COMPASSMOT_START, async () => startCompassMot());
+  ipcMain.handle(IPC_CHANNELS.CALIBRATION_COMPASSMOT_STOP, async () => stopCompassMot());
+
   // Persistent storage (MSP/INAV) - saves calibration to bootloader partition via CLI `cali_save`
   // For MAVLink/ArduPilot, the renderer uses writeParamsToFlash() directly (MAV_CMD_PREFLIGHT_STORAGE)
   ipcMain.handle(IPC_CHANNELS.CALIBRATION_SAVE_PERSISTENT, async () => {
@@ -576,6 +582,8 @@ export function cleanupCalibrationHandlers(): void {
   ipcMain.removeHandler(IPC_CHANNELS.CALIBRATION_CANCEL);
   ipcMain.removeHandler(IPC_CHANNELS.CALIBRATION_SAVE_PERSISTENT);
   ipcMain.removeHandler(IPC_CHANNELS.CALIBRATION_LARGE_VEHICLE_MAGCAL);
+  ipcMain.removeHandler(IPC_CHANNELS.CALIBRATION_COMPASSMOT_START);
+  ipcMain.removeHandler(IPC_CHANNELS.CALIBRATION_COMPASSMOT_STOP);
 
   cancelCalibration();
   cleanupMavlinkCalibration();

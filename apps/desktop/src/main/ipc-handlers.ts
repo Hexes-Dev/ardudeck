@@ -47,6 +47,7 @@ import {
   serializeParamRequestList,
   serializeParamSet,
   serializeCommandLong,
+  serializeCommandAck,
   serializeMissionRequestList,
   serializeMissionRequest,
   serializeMissionRequestInt,
@@ -74,6 +75,8 @@ import {
   PARAM_SET_CRC_EXTRA,
   COMMAND_LONG_ID,
   COMMAND_LONG_CRC_EXTRA,
+  COMMAND_ACK_ID,
+  COMMAND_ACK_CRC_EXTRA,
   serializeCommandInt,
   COMMAND_INT_ID,
   COMMAND_INT_CRC_EXTRA,
@@ -9586,6 +9589,25 @@ export function setupIpcHandlers(mainWindow: BrowserWindow): void {
           ...params,
         });
         const packet = await sendMavlinkPacket(COMMAND_LONG_ID, payload, COMMAND_LONG_CRC_EXTRA);
+        await currentTransport.write(packet);
+        connectionState.packetsSent++;
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    sendCommandAck: async (command, result) => {
+      if (!currentTransport?.isOpen || !connectionState.isConnected) return false;
+      try {
+        const payload = serializeCommandAck({
+          command,
+          result,
+          progress: 0,
+          resultParam2: 0,
+          targetSystem: connectionState.systemId ?? 1,
+          targetComponent: 1,
+        });
+        const packet = await sendMavlinkPacket(COMMAND_ACK_ID, payload, COMMAND_ACK_CRC_EXTRA);
         await currentTransport.write(packet);
         connectionState.packetsSent++;
         return true;
