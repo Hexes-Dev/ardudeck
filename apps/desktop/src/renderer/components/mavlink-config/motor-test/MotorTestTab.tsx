@@ -116,9 +116,14 @@ export const MotorTestTab: React.FC = () => {
       if (!canTest) return;
       setLastError(null);
       setActiveMotor(motorNumber);
+      // DO_MOTOR_TEST param1 is ArduPilot's test-order index (param6=0 = default
+      // order), not the servo output number. Send the clicked motor's TestOrder so
+      // the physical motor that spins matches the labelled/highlighted one; on frames
+      // like Betaflight Reversed, Number and TestOrder differ.
+      const testOrder = layout.motors.find((m) => m.Number === motorNumber)?.TestOrder ?? motorNumber;
       try {
         const result = await window.electronAPI?.motorTestStart?.({
-          motor: motorNumber,
+          motor: testOrder,
           throttle,
           duration,
           throttleType: 'percent',
@@ -132,7 +137,7 @@ export const MotorTestTab: React.FC = () => {
       // Clear active motor after the test duration + a small buffer
       window.setTimeout(() => setActiveMotor(null), duration * 1000 + 300);
     },
-    [canTest, throttle, duration, setActiveMotor, setLastError]
+    [canTest, throttle, duration, layout, setActiveMotor, setLastError]
   );
 
   const testAllInSequence = useCallback(async () => {
@@ -176,7 +181,7 @@ export const MotorTestTab: React.FC = () => {
       // Send individual test commands for all motors simultaneously
       const promises = motorsByTestOrder.map((m) =>
         window.electronAPI?.motorTestStart?.({
-          motor: m.Number,
+          motor: m.TestOrder,
           throttle,
           duration,
           throttleType: 'percent' as const,
