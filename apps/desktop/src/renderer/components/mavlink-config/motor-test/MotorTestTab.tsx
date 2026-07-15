@@ -22,6 +22,7 @@ import { useMotorTestStore } from '../../../stores/motor-test-store';
 import { FrameDiagram } from './FrameDiagram';
 import { VibrationCard } from './VibrationCard';
 import { EscTelemetryCard } from './EscTelemetryCard';
+import { formatParamValue } from '../../../../shared/parameter-types';
 import {
   buildGenericLayout,
   findFrameLayout,
@@ -32,9 +33,13 @@ import {
 const HIGH_THROTTLE_WARNING = 25;
 
 export const MotorTestTab: React.FC = () => {
-  const parameters = useParameterStore((s) => s.parameters);
   const connectionState = useConnectionStore((s) => s.connectionState);
   const escTelemetry = useTelemetryStore((s) => s.escTelemetry);
+  
+  const {
+    getParameterMetadata, 
+    parameters
+  } = useParameterStore();
 
   const {
     throttle,
@@ -62,6 +67,29 @@ export const MotorTestTab: React.FC = () => {
   }, [parameters]);
 
   const motorCount = layout.motors.length;
+
+  // Pull parameters used for motor identification process
+  const {motorData, servoFunctionMeta, servoReversedMeta} = useMemo(() => {;
+
+    const motorData = [];
+
+    for(let i = 1; i <= motorCount; i++ ){
+      let functionParam = parameters.get(`SERVO${i}_FUNCTION`);
+      let reversedParam = parameters.get(`SERVO${i}_REVERSED`);
+
+      motorData.push({
+        functionParam,
+        reversedParam
+      })
+    }
+
+    let servoFunctionMeta = getParameterMetadata(motorData[0]?.functionParam?.id || "")
+    let servoReversedMeta = getParameterMetadata(motorData[0]?.reversedParam?.id || "")
+  
+    return {motorData, servoFunctionMeta, servoReversedMeta}
+  }, [parameters, motorCount, getParameterMetadata]);
+
+  console.log(servoReversedMeta)
 
   // Motors sorted by TestOrder so "Test In Sequence" and the buttons follow physical order
   const motorsByTestOrder = useMemo(
@@ -96,6 +124,18 @@ export const MotorTestTab: React.FC = () => {
       setShowSafetyDialog(true);
     }
   }, [safetyConfirmed, connectionState.isConnected, connectionState.protocol]);
+
+  const [identificationRunning, setIdentificationRunning] = useState(false);
+  const [identificationSafetyAcknowledged, setIdentificationSafetyAcknowledged] = useState(false);
+  const [identificationCurrentMotor, setIdentificationCurrentMotor] = useState(1)
+
+  useEffect( () => {
+    if(!identificationRunning)
+    {
+      setIdentificationSafetyAcknowledged(false);
+      console.log(`ID Running: ${identificationRunning}`);
+    }
+  }, [identificationRunning, setIdentificationSafetyAcknowledged]);
 
   // Auto-stop all motors when the view unmounts.
   // We intentionally do not depend on motorCount or connection state — we
@@ -215,6 +255,11 @@ export const MotorTestTab: React.FC = () => {
     }
   }, [motorCount, setActiveMotor, setLastError, setSequenceRunning]);
 
+  const startIdentification = useCallback(async () => {
+    setIdentificationRunning(true);
+
+  }, [identificationRunning, setIdentificationRunning])
+
   // Gate: not connected or not MAVLink
   if (!connectionState.isConnected) {
     return (
@@ -264,6 +309,184 @@ export const MotorTestTab: React.FC = () => {
                 className="flex-1 px-4 py-2.5 bg-red-500/80 hover:bg-red-500 text-white font-semibold rounded-lg transition-colors"
               >
                 I Confirm — Props Removed
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {identificationRunning && !identificationSafetyAcknowledged && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="bg-surface border-red-500/40 rounded-2xl p-6 max-w-md w-full mx-4 shadow-2xl">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-12 h-12 rounded-full bg-red-500/15 border-red-500/30 flex items-center justify-center">
+                <AlertTriangle className="w-6 h-6 text-red-400" />
+              </div>
+              <div>
+                <div className="text-lg font-semibold text-content">Motor Identification</div>
+                <div className="text-xs text-content-secondary">Safety Checklist and Procedures</div>
+              </div>
+            </div>
+            <div className="text-sm text-content mb-5 space-y-2">
+              <p>
+                The motor identification process will spin each motor in sequence by commanding a throttle value to SERVO0 through SERVO4. 
+                For each motor, click on the corresponding motor on the frame reference. 
+                This process should never be done while props are attached to the motors, please ensure that all propellers are removed and the following safety guidelines are followed.
+              </p>
+              <ul className="list-disc ml-5 space-y-1 text-content-secondary">
+                <li>Propellers are REMOVED from all motors</li>
+                <li>Frame is secured and cannot tip over</li>
+                <li>Nobody is near the propellers or motors</li>
+                <li>Battery is connected and ESCs are powered</li>
+              </ul>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => {
+                  setIdentificationSafetyAcknowledged(true);
+                }}
+                className="flex-1 px-4 py-2.5 bg-red-500/80 hover:bg-red-500 text-white font-semibold rounded-lg transition-colors"
+              >
+                I Confirm — Props Removed
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {identificationRunning && identificationSafetyAcknowledged && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="bg-surface border-yellow-500/40 rounded-2xl p-6 mx-4 shadow-2xl">
+          
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-12 h-12 rounded-full bg-yellow-500/15 border-yellow-500/30 flex items-center justify-center">
+                <Zap className="w-6 h-6 text-yellow-400" />
+              </div>
+              <div>
+                <div className="text-lg font-semibold text-content">Motor Identification</div>
+                <div className="text-xs text-content-secondary">Running</div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-[auto,auto] gap-5 pb-5">
+
+              <div className="bg-surface rounded-xl border border-subtle p-5">
+                <FrameDiagram
+                  layout={layout}
+                  activeMotor={null}
+                  onMotorClick={canTest ? testMotor : undefined}
+                />
+              </div>
+
+              <div className="bg-surface rounded-xl border border-subtle p-5 space-y-5 max-w-sm">
+                <div className="flex items-center gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-content">Motor {identificationCurrentMotor} of {motorCount}</div>
+                    <div className="text-[11px] text-content-secondary">{motorCount} motors · {layout.TypeName}</div>
+                  </div>
+                </div>
+
+                {/* Throttle slider */}
+                <div>
+                  <div className="flex items-baseline justify-between mb-2">
+                    <label className="text-xs font-semibold uppercase tracking-wider text-content-secondary">
+                      Throttle
+                    </label>
+                    <div className="flex items-baseline gap-1">
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        value={throttle}
+                        onChange={(e) => setThrottle(Number(e.target.value))}
+                        className="w-14 px-1 py-0.5 text-sm text-right font-mono bg-surface border rounded text-content focus:outline-none focus:border-yellow-500"
+                      />
+                      <span className="text-sm text-content-secondary">%</span>
+                    </div>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={throttle}
+                    onChange={(e) => setThrottle(Number(e.target.value))}
+                    className="w-full h-2 bg-surface-raised rounded-lg appearance-none cursor-pointer accent-yellow-500"
+                  />
+                </div>
+
+                {/* Duration input */}
+                <div>
+                  <div className="flex items-baseline justify-between mb-2">
+                    <label className="text-xs font-semibold uppercase tracking-wider text-content-secondary">
+                      Duration
+                    </label>
+                    <div className="flex items-baseline gap-1">
+                      <input
+                        type="number"
+                        min={1}
+                        max={60}
+                        value={duration}
+                        onChange={(e) => setDuration(Number(e.target.value))}
+                        className="w-14 px-1 py-0.5 text-sm text-right font-mono bg-surface border rounded text-content focus:outline-none focus:border-yellow-500"
+                      />
+                      <span className="text-sm text-content-secondary">s</span>
+                    </div>
+                  </div>
+                </div>
+
+
+                <div className="text-sm text-content mb-5 space-y-2">
+                  <p>Click on the correct motor using the diagram to the left to update the servo output.</p>
+                  <ul className="list-disc ml-5 space-y-1 font-mono text-content-secondary">
+                    <li>Servo{identificationCurrentMotor} Output = {servoFunctionMeta?.values ? servoFunctionMeta.values[motorData[identificationCurrentMotor - 1]?.functionParam?.value || 0] : ""}</li>
+                    <li>Servo{identificationCurrentMotor} Direction = {servoReversedMeta?.values ? servoReversedMeta.values[motorData[identificationCurrentMotor - 1]?.reversedParam?.value || 0] : ""}</li>
+                  </ul>
+                </div>
+
+                <button 
+                  onClick={() => {testMotor(identificationCurrentMotor) ; console.log(parameters)}}
+                  className="w-full px-4 py-2.5 bg-yellow-500/15 border-yellow-500/30 hover:bg-yellow-500/25 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg text-sm font-semibold text-yellow-300 transition-colors flex items-center justify-center gap-2"
+                >
+                  Start Motor {identificationCurrentMotor} of {motorCount}
+                </button>
+                
+                <div className="grid grid-cols-1 lg:grid-cols-[auto,auto] gap-5 pb-5">
+                  <button {...(identificationCurrentMotor == 1 && {disabled: true})}
+                    onClick={() => setIdentificationCurrentMotor(identificationCurrentMotor - 1)}
+                    className="w-full px-4 py-2.5 bg-green-500/15 border-green-500/30 hover:bg-green-500/25 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg text-sm font-semibold text-green-300 transition-colors flex items-center justify-center gap-2"
+                  >
+                    Prev Motor
+                  </button>
+
+                  <button {...(identificationCurrentMotor == motorCount && {disabled: true})}
+                    onClick={() => setIdentificationCurrentMotor(identificationCurrentMotor + 1)}
+                    className="w-full px-4 py-2.5 bg-green-500/15 border-green-500/30 hover:bg-green-500/25 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg text-sm font-semibold text-green-300 transition-colors flex items-center justify-center gap-2"
+                  >
+                    Next Motor
+                  </button>
+                </div>
+
+              </div>
+
+            </div>
+
+            <div className="flex gap-5">
+              <button
+                onClick={() => {
+                  setIdentificationRunning(false);
+                }}
+                className="flex-1 px-4 py-2.5 bg-green-500/15 border-green-500/30 hover:bg-green-500/25 text-green-300 font-semibold rounded-lg transition-colors"
+              >
+                Save Parameters
+              </button>
+
+              <button
+                onClick={() => {
+                  setIdentificationRunning(false);
+                }}
+                className="flex-1 px-4 py-2.5 bg-red-500/80 hover:bg-red-500 text-white font-semibold rounded-lg transition-colors"
+              >
+                Cancel Identification
               </button>
             </div>
           </div>
@@ -423,6 +646,14 @@ export const MotorTestTab: React.FC = () => {
             >
               <Zap className="w-4 h-4" />
               Test All At Once
+            </button>
+            <button
+              onClick={startIdentification}
+              disabled={!canTest || sequenceRunning}
+              className="w-full px-4 py-2.5 bg-yellow-500/15 border-yellow-500/30 hover:bg-yellow-500/25 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg text-sm font-semibold text-yellow-300 transition-colors flex items-center justify-center gap-2"
+            >
+              <Play className="w-4 h-4" />
+              Run Motor Identification
             </button>
             <button
               onClick={stopAll}

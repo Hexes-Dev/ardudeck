@@ -148,9 +148,24 @@ export const FrameDiagram: React.FC<FrameDiagramProps> = ({
                 stroke={isActive ? 'rgb(250, 204, 21)' : color}
                 strokeWidth={isActive ? 3 : 2}
               />
-
+                
               {/* Rotation arrow — small arc with arrowhead */}
               <g opacity={0.7}>
+                
+                <marker
+                  id={"arrow"}
+                  viewBox="0 0 10 10"
+                  refX="5"
+                  refY="5"
+                  markerWidth="6"
+                  markerHeight="6"
+                  orient="auto-start-reverse">
+                  <path 
+                    d={`M 0 0 L 10 5 L 0 10 z`} 
+                    fill={color}
+                  />
+                </marker>
+                
                 <path
                   d={
                     isCw
@@ -160,6 +175,8 @@ export const FrameDiagram: React.FC<FrameDiagramProps> = ({
                   fill="none"
                   stroke={color}
                   strokeWidth={1.5}
+                  markerEnd={"url(#arrow)"}
+                  
                 />
               </g>
 
